@@ -144,14 +144,17 @@ export class CometSystem extends createSystem({}) {
   private _gravityVec!: Vector3;
   private _camRight!: Vector3;
   private _camUp!: Vector3;
+  private _camFwd!: Vector3;
 
   // Static per-particle seeds
   private _pebT!: Float32Array;
   private _pebDX!: Float32Array;
   private _pebDY!: Float32Array;
+  private _pebDZ!: Float32Array;
   private _hazT!: Float32Array;
   private _hazDX!: Float32Array;
   private _hazDY!: Float32Array;
+  private _hazDZ!: Float32Array;
 
   // Dynamic position buffers
   private _lPebPos!: Float32Array; private _rPebPos!: Float32Array;
@@ -171,6 +174,7 @@ export class CometSystem extends createSystem({}) {
     this._gravityVec = new Vector3(0, -GRAVITY_SCALE, 0);
     this._camRight   = new Vector3();
     this._camUp      = new Vector3();
+    this._camFwd     = new Vector3();
 
     const start = new Vector3(0, 1.5, 0);
     const mkState = (): CometState => ({
@@ -192,6 +196,7 @@ export class CometSystem extends createSystem({}) {
     this._pebT  = new Float32Array(N_PEBBLES);
     this._pebDX = new Float32Array(N_PEBBLES);
     this._pebDY = new Float32Array(N_PEBBLES);
+    this._pebDZ = new Float32Array(N_PEBBLES);
     const pebSizes  = new Float32Array(N_PEBBLES);
     const pebBright = new Float32Array(N_PEBBLES);
 
@@ -204,6 +209,8 @@ export class CometSystem extends createSystem({}) {
       const spread = 0.008 + t * 0.038;
       this._pebDX[i] = Math.cos(angle) * r * spread;
       this._pebDY[i] = Math.sin(angle) * r * spread;
+      // Depth offset: same Gaussian magnitude as lateral, gives true 3-D scatter
+      this._pebDZ[i] = (Math.random() - 0.5) * r * spread * 1.6;
 
       // Larger pebbles near the dense head, tiny ones toward the tail
       pebSizes[i]  = Math.max(0.006, (0.038 - t * 0.020) * (1.0 - Math.min(r, 2.5) * 0.08));
@@ -215,6 +222,7 @@ export class CometSystem extends createSystem({}) {
     this._hazT  = new Float32Array(N_HAZE);
     this._hazDX = new Float32Array(N_HAZE);
     this._hazDY = new Float32Array(N_HAZE);
+    this._hazDZ = new Float32Array(N_HAZE);
     const hazSizes  = new Float32Array(N_HAZE);
     const hazBright = new Float32Array(N_HAZE);
 
@@ -227,6 +235,7 @@ export class CometSystem extends createSystem({}) {
       const spread = 0.020 + t * 0.060;
       this._hazDX[i] = Math.cos(angle) * r * spread;
       this._hazDY[i] = Math.sin(angle) * r * spread;
+      this._hazDZ[i] = (Math.random() - 0.5) * r * spread * 1.4;
 
       hazSizes[i]  = 0.050 + Math.random() * 0.060;            // large soft blobs
       hazBright[i] = (0.04 + Math.random() * 0.10) * (1 - t); // very dim, fades with t
@@ -280,11 +289,12 @@ export class CometSystem extends createSystem({}) {
 
     this._camRight.setFromMatrixColumn(this.camera.matrixWorld, 0);
     this._camUp.setFromMatrixColumn(this.camera.matrixWorld, 1);
+    this._camFwd.setFromMatrixColumn(this.camera.matrixWorld, 2);
 
-    this._place(this._leftTrail,  this._pebT, this._pebDX, this._pebDY, N_PEBBLES, this._lPebPos, this._lPebPA);
-    this._place(this._rightTrail, this._pebT, this._pebDX, this._pebDY, N_PEBBLES, this._rPebPos, this._rPebPA);
-    this._place(this._leftTrail,  this._hazT, this._hazDX, this._hazDY, N_HAZE,    this._lHazPos, this._lHazPA);
-    this._place(this._rightTrail, this._hazT, this._hazDX, this._hazDY, N_HAZE,    this._rHazPos, this._rHazPA);
+    this._place(this._leftTrail,  this._pebT, this._pebDX, this._pebDY, this._pebDZ, N_PEBBLES, this._lPebPos, this._lPebPA);
+    this._place(this._rightTrail, this._pebT, this._pebDX, this._pebDY, this._pebDZ, N_PEBBLES, this._rPebPos, this._rPebPA);
+    this._place(this._leftTrail,  this._hazT, this._hazDX, this._hazDY, this._hazDZ, N_HAZE,    this._lHazPos, this._lHazPA);
+    this._place(this._rightTrail, this._hazT, this._hazDX, this._hazDY, this._hazDZ, N_HAZE,    this._rHazPos, this._rHazPA);
   }
 
   private _pushTrail(buf: Float32Array, pos: Vector3): void {
@@ -294,18 +304,18 @@ export class CometSystem extends createSystem({}) {
 
   private _place(
     trail: Float32Array,
-    tArr: Float32Array, dxArr: Float32Array, dyArr: Float32Array, n: number,
+    tArr: Float32Array, dxArr: Float32Array, dyArr: Float32Array, dzArr: Float32Array, n: number,
     pos: Float32Array, pa: BufferAttribute,
   ): void {
-    const cr = this._camRight, cu = this._camUp;
+    const cr = this._camRight, cu = this._camUp, cf = this._camFwd;
     for (let i = 0; i < n; i++) {
       const si = Math.min(TRAIL_SAMPLES - 1, Math.floor(tArr[i] * TRAIL_SAMPLES));
       const ti = si * TRAIL_STRIDE * 3;
       const bx = trail[ti], by = trail[ti+1], bz = trail[ti+2];
-      const dx = dxArr[i], dy = dyArr[i];
-      pos[i*3]   = bx + cr.x * dx + cu.x * dy;
-      pos[i*3+1] = by + cr.y * dx + cu.y * dy;
-      pos[i*3+2] = bz + cr.z * dx + cu.z * dy;
+      const dx = dxArr[i], dy = dyArr[i], dz = dzArr[i];
+      pos[i*3]   = bx + cr.x * dx + cu.x * dy + cf.x * dz;
+      pos[i*3+1] = by + cr.y * dx + cu.y * dy + cf.y * dz;
+      pos[i*3+2] = bz + cr.z * dx + cu.z * dy + cf.z * dz;
     }
     pa.needsUpdate = true;
   }
