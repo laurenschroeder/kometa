@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@iwsdk/core": "0.4.1",
+    "@pmndrs/msdfonts": "1.0.73",
     "@preact/signals-core": "^1.14.2",
     "three": "npm:super-three@0.181.0"
   },

@@ -1,0 +1,126 @@
+<style>
+  .panel-container {
+    align-items: stretch;
+    padding: 2;
+    width: 40;
+    display: flex;
+    flex-direction: column;
+    background-color: #09090b;
+    border-color: #27272a;
+    border-width: 0.15;
+    border-radius: 3;
+  }
+
+  .heading {
+    font-size: 3;
+    font-weight: medium;
+    color: #fafafa;
+    text-align: left;
+    margin-bottom: 1.5;
+  }
+
+  .phase-button {
+    width: 100%;
+    padding: 1.2;
+    margin-top: 0.8;
+    background-color: #18181b;
+    color: #fafafa;
+    border-radius: 1.2;
+    border-width: 0.1;
+    border-color: #3f3f46;
+    font-size: 2;
+    font-weight: medium;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  .stats-block {
+    width: 100%;
+    padding: 1;
+    margin-bottom: 1.5;
+    background-color: #18181b;
+    border-radius: 1.2;
+    border-width: 0.1;
+    border-color: #3f3f46;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stat-text {
+    font-size: 1.6;
+    color: #a1a1aa;
+    text-align: left;
+  }
+
+  .class-row {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    gap: 0.6;
+    margin-top: 1.5;
+  }
+
+  .class-button {
+    flex-grow: 1;
+    padding: 1;
+    background-color: #18181b;
+    color: #fafafa;
+    border-radius: 1.2;
+    border-width: 0.1;
+    border-color: #3f3f46;
+    font-size: 1.6;
+    font-weight: medium;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  .class-blue {
+    border-color: #59b3ff;
+    color: #59b3ff;
+  }
+
+  .class-green {
+    border-color: #59d97c;
+    color: #59d97c;
+  }
+
+  .class-red {
+    border-color: #ff5c52;
+    color: #ff5c52;
+  }
+
+  .reset-button {
+    width: 100%;
+    padding: 1.2;
+    margin-top: 1.5;
+    background-color: #3f1518;
+    color: #fda4af;
+    border-radius: 1.2;
+    border-width: 0.1;
+    border-color: #7f1d1d;
+    font-size: 2;
+    font-weight: medium;
+    text-align: center;
+    cursor: pointer;
+  }
+</style>
+<div class="panel-container">
+  <span class="heading">Jump to phase</span>
+  <div class="stats-block">
+    <span id="stat-comet-speed" class="stat-text">Comet speed: 0.00 m/s</span>
+    <span id="stat-avg-speed" class="stat-text">Avg phase speed: 0.00 m/s</span>
+  </div>
+  <button id="btn-stardust" class="phase-button">Stardust</button>
+  <button id="btn-pebbles" class="phase-button">Pebbles</button>
+  <button id="btn-constellations" class="phase-button">Constellations</button>
+  <button id="btn-seeding" class="phase-button">Seeding</button>
+  <button id="btn-fate-events" class="phase-button">Fate Events</button>
+  <button id="btn-launch" class="phase-button">Launch</button>
+  <button id="btn-finale" class="phase-button">Finale</button>
+  <div class="class-row">
+    <button id="btn-class-blue" class="class-button class-blue">Blue</button>
+    <button id="btn-class-green" class="class-button class-green">Green</button>
+    <button id="btn-class-red" class="class-button class-red">Red</button>
+  </div>
+  <button id="btn-reset-achievements" class="reset-button">Reset achievements</button>
+</div>

@@ -1,0 +1,33 @@
+<style>
+  .hud-root {
+    width: 60;
+    height: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .hud-box {
+    display: none;
+    padding: 1.8;
+    border-width: 0.15;
+    border-color: #ffffff;
+    background-color: #0a0a0a;
+    border-radius: 0.4;
+    opacity: 0;
+    max-width: 36;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .hud-text {
+    color: #ffffff;
+    font-size: 2.1;
+    text-align: center;
+    font-family: hud;
+    font-weight: bold;
+  }
+</style>
+<div class="hud-root">
+  <div id="hud-box" class="hud-box"><hudtext id="hud-text" class="hud-text">placeholder</hudtext></div>
+</div>

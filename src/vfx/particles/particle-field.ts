@@ -6,6 +6,34 @@ export interface RadialFieldParams {
   depthRatio: number; // z-offset scale relative to lateral radius*spread
 }
 
+export interface RadialSample {
+  t: number;
+  dx: number;
+  dy: number;
+  dz: number;
+  r: number;
+}
+
+// Single-sample version of the distribution generateRadialField() below
+// produces in bulk. Used where particles join a trail-following pool
+// incrementally at runtime (e.g. stardust motes getting captured one at a
+// time) instead of all at once at init (e.g. pebbles).
+export function sampleRadialPoint(
+  ageDecay: number,
+  spreadBase: number,
+  spreadGrowth: number,
+  depthRatio: number,
+): RadialSample {
+  const t = Math.min(1.0, -Math.log(1.0 - Math.random() * 0.9999) / ageDecay);
+  const angle = Math.random() * Math.PI * 2;
+  const r = Math.sqrt(-2.0 * Math.log(1.0 - Math.random() * 0.9999));
+  const spread = spreadBase + t * spreadGrowth;
+  const dx = Math.cos(angle) * r * spread;
+  const dy = Math.sin(angle) * r * spread;
+  const dz = (Math.random() - 0.5) * r * spread * depthRatio;
+  return { t, dx, dy, dz, r };
+}
+
 export interface RadialField {
   t: Float32Array;
   dx: Float32Array;
@@ -34,16 +62,12 @@ export function generateRadialField(params: RadialFieldParams): RadialField {
   const r = new Float32Array(count);
 
   for (let i = 0; i < count; i++) {
-    const ti = Math.min(1.0, -Math.log(1.0 - Math.random() * 0.9999) / ageDecay);
-    t[i] = ti;
-
-    const angle = Math.random() * Math.PI * 2;
-    const ri = Math.sqrt(-2.0 * Math.log(1.0 - Math.random() * 0.9999));
-    r[i] = ri;
-    const spread = spreadBase + ti * spreadGrowth;
-    dx[i] = Math.cos(angle) * ri * spread;
-    dy[i] = Math.sin(angle) * ri * spread;
-    dz[i] = (Math.random() - 0.5) * ri * spread * depthRatio;
+    const sample = sampleRadialPoint(ageDecay, spreadBase, spreadGrowth, depthRatio);
+    t[i] = sample.t;
+    dx[i] = sample.dx;
+    dy[i] = sample.dy;
+    dz[i] = sample.dz;
+    r[i] = sample.r;
   }
 
   return { t, dx, dy, dz, r };

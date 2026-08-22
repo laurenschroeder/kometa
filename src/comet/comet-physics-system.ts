@@ -55,6 +55,7 @@ export class CometPhysicsSystem extends createSystem({
     if (count > 0) {
       const globals = getGlobals(this.world);
       const avgSpeed = Math.sqrt(speedSqSum / count);
+      globals.cometSpeed.value = avgSpeed;
       globals.cometMomentum.value = Math.min(1, avgSpeed / MOMENTUM_REFERENCE_SPEED);
     }
   }

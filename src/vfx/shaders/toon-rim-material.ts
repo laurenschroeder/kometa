@@ -1,4 +1,4 @@
-import { ShaderMaterial } from '@iwsdk/core';
+import { ShaderMaterial, Vector3 } from '@iwsdk/core';
 
 // Palette-parameterized toon rim-light shading, generalized from the
 // original comet-system.ts pebble/head shaders: a flat body color (mixed
@@ -82,6 +82,129 @@ export function makeToonRimInstancedMaterial(palette: ToonRimPalette): ShaderMat
   `;
 
   return new ShaderMaterial({ vertexShader, fragmentShader, depthWrite: true, transparent: false });
+}
+
+// Instanced + per-instance-tinted variant — same technique as
+// makeToonRimInstancedMaterial above, plus an aTint/aTinted attribute pair
+// so individual instances can be pulled toward an arbitrary color (e.g. the
+// Pebbles field coloring each pebble by which type it became). aTinted=0
+// reproduces the untinted look exactly; a caller ramps it toward 1 to fade
+// an instance toward aTint. A separate factory (rather than adding this to
+// makeToonRimInstancedMaterial) so the shared kPebbleInstMat instance used
+// elsewhere — the persistent comet body — stays completely unaffected.
+export function makeToonRimInstancedTintedMaterial(palette: ToonRimPalette): ShaderMaterial {
+  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
+  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+
+  const vertexShader = `
+    attribute float aBright;
+    attribute vec3  aTint;
+    attribute float aTinted;
+    varying   float vBright;
+    varying   vec3  vTint;
+    varying   float vTinted;
+    varying   vec3  vViewNormal;
+    varying   vec3  vViewDir;
+    varying   vec3  vLocalPos;
+
+    void main() {
+      vBright = aBright;
+      vTint = aTint;
+      vTinted = aTinted;
+      vLocalPos = position;
+      vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+
+      mat3 instanceNormalMatrix = mat3(instanceMatrix);
+      vViewNormal = normalize(normalMatrix * instanceNormalMatrix * normal);
+      vViewDir    = normalize(-mvPosition.xyz);
+
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    varying float vBright;
+    varying vec3  vTint;
+    varying float vTinted;
+    varying vec3  vViewNormal;
+    varying vec3  vViewDir;
+    varying vec3  vLocalPos;
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
+
+      vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
+      bodyCol      = mix(bodyCol, vTint, vTinted);
+      vec3 col     = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  return new ShaderMaterial({ vertexShader, fragmentShader, depthWrite: true, transparent: false });
+}
+
+// Flat, non-instanced variant — for a single real Mesh (or several sharing
+// one material instance) with one solid body color and no per-vertex
+// brightness (e.g. a placeholder figure's limbs). Body/rim color are
+// uniforms, not baked GLSL literals like the other variants above — this
+// one needs to be retintable after construction (e.g. Fate Events' people
+// color depends on which constellation the player won, not known until the
+// phase's first play()). Environment lighting is all-black (see index.ts's
+// DomeGradient), so a lit material like MeshStandardMaterial would render
+// near-invisible — this stays self-lit like every other body/rim shader.
+export function makeToonRimFlatMaterial(
+  bodyColor: [number, number, number],
+  rimColor: [number, number, number] = [1, 1, 1],
+): ShaderMaterial {
+  const vertexShader = `
+    varying vec3 vViewNormal;
+    varying vec3 vViewDir;
+    varying vec3 vLocalPos;
+
+    void main() {
+      vLocalPos = position;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      vViewNormal = normalize(normalMatrix * normal);
+      vViewDir    = normalize(-mvPosition.xyz);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform vec3 uBodyColor;
+    uniform vec3 uRimColor;
+    varying vec3 vViewNormal;
+    varying vec3 vViewDir;
+    varying vec3 vLocalPos;
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${DEFAULT_OUTLINE_LOW.toFixed(4)}, ${DEFAULT_OUTLINE_HIGH.toFixed(4)}, edge);
+
+      vec3 col = mix(uBodyColor, uRimColor, outline);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  return new ShaderMaterial({
+    uniforms: {
+      uBodyColor: { value: new Vector3(...bodyColor) },
+      uRimColor: { value: new Vector3(...rimColor) },
+    },
+    vertexShader,
+    fragmentShader,
+    depthWrite: true,
+    transparent: false,
+  });
 }
 
 // Mesh+decal variant — for a single real Mesh (e.g. the comet head) that

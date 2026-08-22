@@ -20,11 +20,15 @@ import {
 import { CometBody } from '../../comet/comet-body-component.js';
 import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
+import { getGlobals } from '../../core/globals.js';
+import { Phase } from '../../core/phase.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
+import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
 import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
+import { kPebbleInstMat } from '../../vfx/shaders/pebble-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
-import { makeToonRimDecalMaterial, makeToonRimInstancedMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { makeToonRimDecalMaterial } from '../../vfx/shaders/toon-rim-material.js';
 
 // ── chapter-2-specific tuning (unchanged from the original comet-system.ts) ─
 const N_PEBBLES = 260;
@@ -32,10 +36,6 @@ const N_HAZE = 60;
 const EXP_DECAY_P = 3.5;
 const EXP_DECAY_H = 1.4;
 const N_PEBBLE_VARIANTS = 6;
-// pebSizes was originally tuned as a gl_PointSize screen-space pixel
-// heuristic, not a world-space meter radius. Scaled down so pebbles read as
-// small rocks rather than boulders crowding the head.
-const PEBBLE_MESH_SCALE = 0.22;
 // Head radius (real world-space meters) — smaller than the pebbles' largest
 // near-head size so it reads as part of the rock cluster, not a big clean
 // orb looming over it.
@@ -48,11 +48,6 @@ const FACING_SPEED_EPSILON_SQ = 0.0004;
 // 0.5s per expression).
 const FACE_CYCLE_SPEED_THRESHOLD = 1.5;
 
-const PEBBLE_PALETTE = {
-  bodyColorDark: [0.01, 0.02, 0.05] as [number, number, number],
-  bodyColorLight: [0.05, 0.08, 0.14] as [number, number, number],
-  rimColor: [1.0, 1.0, 1.0] as [number, number, number],
-};
 // Decal material only uses bodyColorDark + rimColor (no brightness mixing
 // for the head), so bodyColorLight is unused here — duplicated to satisfy
 // the shared palette shape rather than adding a second interface.
@@ -74,7 +69,6 @@ const kPebbleVariantGeos: BufferGeometry[] = Array.from({ length: N_PEBBLE_VARIA
 // with no texture at all.
 const kHeadGeo = buildOrganicGeometry();
 
-const kPebbleInstMat = makeToonRimInstancedMaterial(PEBBLE_PALETTE);
 const kHazeMat = makePointSpriteMaterial({
   color: HAZE_COLOR,
   blending: AdditiveBlending,
@@ -84,6 +78,7 @@ const kHazeMat = makePointSpriteMaterial({
 function makeHeadMat(): ShaderMaterial {
   return makeToonRimDecalMaterial(HEAD_PALETTE);
 }
+
 
 interface CometVisual {
   pebbleField: RadialField;
@@ -98,6 +93,7 @@ interface CometVisual {
   hazeField: RadialField;
   hazePositions: Float32Array;
   hazePositionAttr: BufferAttribute;
+  hazePoints: Points;
   hazePointsEntity: Entity;
 
   headMesh: Mesh;
@@ -106,17 +102,28 @@ interface CometVisual {
   faceTextures: Texture[];
 }
 
+// Phases where the pebble/head body hasn't "formed" yet and stays hidden —
+// Stardust (gathering motes) and Pebbles (gathering the ambient pebble
+// field itself, see pebble-field-system.ts) both collect raw material for
+// this body before it's earned; it becomes visible from Seeding onward.
+const HIDDEN_DURING_PHASES = new Set<Phase>([Phase.Stardust, Phase.Pebbles]);
+
 // The preserved visual from the original comet-system.ts prototype —
 // toon-shaded instanced pebbles + haze + face-decal head — rewired onto the
 // generic CometBody/CometTrail components instead of owning private
-// left/right state. Always registered, never phase-gated: per the confirmed
-// design decision, this IS the comet throughout the whole experience: later
-// chapters layer their own extra VFX around it rather than replacing it.
+// left/right state. The system itself always keeps running (position/
+// rotation tracking never stops, matching the spring-physics comet being
+// always-on) — only the meshes' visibility is gated per HIDDEN_DURING_PHASES.
+// Not managed via GameDirectorSystem's play()/stop() (that would mean
+// listing this same system in every non-hidden phase config) — it reads
+// globals.gamePhase directly instead, since the rule is naturally expressed
+// that way.
 export class PebbleCometPresentationSystem extends createSystem({
   comets: { required: [CometBody, CometTrail] },
 }) {
   private _visuals = new Map<number, CometVisual>();
   private _trailSystem!: CometTrailSystem;
+  private _visible = true;
 
   private _camRight!: Vector3;
   private _camUp!: Vector3;
@@ -141,9 +148,26 @@ export class PebbleCometPresentationSystem extends createSystem({
     this._scratchMat4 = new Matrix4();
     this._scratchScale = new Vector3();
 
+    // signal.subscribe() fires immediately with the current value, so
+    // _visible is correct before any visuals exist to apply it to.
+    this.cleanupFuncs.push(
+      getGlobals(this.world).gamePhase.subscribe((phase) => {
+        this._visible = !HIDDEN_DURING_PHASES.has(phase);
+        this._applyVisibility();
+      }),
+    );
+
     this.queries.comets.subscribe('qualify', (entity) => this._buildVisual(entity), true);
     this.queries.comets.subscribe('disqualify', (entity) => this._destroyVisual(entity));
     this.cleanupFuncs.push(() => this._visuals.clear());
+  }
+
+  private _applyVisibility(): void {
+    for (const visual of this._visuals.values()) {
+      for (const mesh of visual.pebbleMeshes) mesh.visible = this._visible;
+      visual.hazePoints.visible = this._visible;
+      visual.headMesh.visible = this._visible;
+    }
   }
 
   private _buildVisual(entity: Entity): void {
@@ -166,10 +190,8 @@ export class PebbleCometPresentationSystem extends createSystem({
     const rotAxisScratch = new Vector3();
 
     for (let i = 0; i < N_PEBBLES; i++) {
-      const t = pebbleField.t[i];
-      const r = pebbleField.r[i];
       // Larger pebbles near the dense head, tiny ones toward the tail.
-      pebbleSizes[i] = Math.max(0.006, (0.038 - t * 0.02) * (1.0 - Math.min(r, 2.5) * 0.08));
+      pebbleSizes[i] = pebbleSizeFromSample(pebbleField.t[i], pebbleField.r[i]);
       // Brightness: mix of bright glowing and dim shadowy pebbles for hazy variety.
       pebBright[i] = 0.25 + Math.random() * 0.75;
 
@@ -224,6 +246,7 @@ export class PebbleCometPresentationSystem extends createSystem({
     hazeGeo.setAttribute('position', hazePositionAttr);
     const hazePoints = new Points(hazeGeo, kHazeMat);
     hazePoints.frustumCulled = false;
+    hazePoints.visible = this._visible;
     const hazePointsEntity = this.world.createTransformEntity(hazePoints);
 
     // Face textures (already resolved by the AssetManifest in index.ts).
@@ -243,7 +266,10 @@ export class PebbleCometPresentationSystem extends createSystem({
     const headMesh = new Mesh(kHeadGeo, headMat);
     headMesh.scale.setScalar(HEAD_RADIUS);
     headMesh.frustumCulled = false;
+    headMesh.visible = this._visible;
     const headMeshEntity = this.world.createTransformEntity(headMesh);
+
+    for (const mesh of pebbleMeshes) mesh.visible = this._visible;
 
     this._visuals.set(entity.index, {
       pebbleField,
@@ -256,6 +282,7 @@ export class PebbleCometPresentationSystem extends createSystem({
       hazeField,
       hazePositions,
       hazePositionAttr,
+      hazePoints,
       hazePointsEntity,
       headMesh,
       headMat,

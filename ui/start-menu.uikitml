@@ -1,0 +1,151 @@
+<style>
+  .menu-root {
+    width: 55;
+    padding: 2.5;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    background-color: #09090b;
+    border-color: #ffffff;
+    border-width: 0.15;
+    border-radius: 2;
+  }
+
+  .title {
+    font-size: 3.2;
+    font-weight: bold;
+    color: #ffffff;
+    text-align: center;
+    margin-bottom: 2;
+    font-family: hud;
+  }
+
+  .page-main {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-achievements {
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dwell-button {
+    position-type: relative;
+    width: 100%;
+    padding: 1.6;
+    margin-top: 1;
+    border-width: 0.12;
+    border-color: #ffffff;
+    border-radius: 1;
+    overflow: hidden;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .dwell-fill {
+    position-type: absolute;
+    position-left: 0;
+    position-top: 0;
+    position-bottom: 0;
+    width: 0%;
+    background-color: #3f7fff;
+  }
+
+  .dwell-label {
+    color: #ffffff;
+    font-size: 2.2;
+    text-align: center;
+    font-family: hud;
+    font-weight: bold;
+  }
+
+  .ach-list {
+    display: flex;
+    flex-direction: column;
+    margin-top: 0.5;
+  }
+
+  .ach-row {
+    display: flex;
+    flex-direction: column;
+    padding: 1;
+    margin-top: 0.6;
+    border-width: 0.08;
+    border-color: #3f3f46;
+    border-radius: 0.8;
+  }
+
+  .ach-title {
+    font-size: 2;
+    font-weight: bold;
+    color: #fafafa;
+    font-family: hud;
+  }
+
+  .ach-desc {
+    font-size: 1.4;
+    color: #a1a1aa;
+    margin-top: 0.3;
+  }
+
+  .ach-status {
+    font-size: 1.4;
+    color: #71717a;
+    margin-top: 0.3;
+  }
+</style>
+<div class="menu-root">
+  <div id="page-main" class="page-main">
+    <hudtext class="title">Kometa</hudtext>
+    <div id="btn-start" class="dwell-button">
+      <div id="fill-start" class="dwell-fill"></div>
+      <hudtext class="dwell-label">Start</hudtext>
+    </div>
+    <div id="btn-achievements" class="dwell-button">
+      <div id="fill-achievements" class="dwell-fill"></div>
+      <hudtext class="dwell-label">Achievements</hudtext>
+    </div>
+  </div>
+  <div id="page-achievements" class="page-achievements">
+    <hudtext class="title">Achievements</hudtext>
+    <div class="ach-list">
+      <div class="ach-row">
+        <hudtext class="ach-title">First Light</hudtext>
+        <span class="ach-desc">Complete the Stardust phase.</span>
+        <span id="ach-status-first-light" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Pebble Pusher</hudtext>
+        <span class="ach-desc">Complete the Pebbles phase.</span>
+        <span id="ach-status-pebble-pusher" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">World Seeder</hudtext>
+        <span class="ach-desc">Complete the Planet Seeding phase.</span>
+        <span id="ach-status-world-seeder" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Brace for Impact</hudtext>
+        <span class="ach-desc">Reach the Fate Events.</span>
+        <span id="ach-status-brace-for-impact" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Among the Stars</hudtext>
+        <span class="ach-desc">Reach the Finale.</span>
+        <span id="ach-status-among-the-stars" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Full Circle</hudtext>
+        <span class="ach-desc">Complete one full loop of the game.</span>
+        <span id="ach-status-full-circle" class="ach-status">Locked</span>
+      </div>
+    </div>
+    <div id="btn-back" class="dwell-button">
+      <div id="fill-back" class="dwell-fill"></div>
+      <hudtext class="dwell-label">Back</hudtext>
+    </div>
+  </div>
+</div>
