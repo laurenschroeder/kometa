@@ -18,6 +18,7 @@ import { ConstellationsSystem } from './phases/constellations/constellations-sys
 import { ConstellationsVfxSystem } from './phases/constellations/constellations-vfx-system.js';
 import { FateEventSystem } from './phases/fate-events/fate-event-system.js';
 import { FateEventVfxSystem } from './phases/fate-events/fate-event-vfx-system.js';
+import { EndRunMenuSystem } from './phases/finale/end-run-menu-system.js';
 import { FinaleSystem } from './phases/finale/finale-system.js';
 import { OrbitalLaunchSystem } from './phases/orbital-launch/orbital-launch-system.js';
 import { OrbitalLaunchVfxSystem } from './phases/orbital-launch/orbital-launch-vfx-system.js';
@@ -145,6 +146,23 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     timeoutSeconds: 180,
   });
 
+  // PlanetSeedingVfxSystem is registered but, like StardustVfxSystem, never
+  // passed to definePhase() — the 9 planets persist as permanent scenery
+  // from Seeding onward (matching PebbleCometPresentationSystem's own
+  // become-visible-from-Seeding-onward treatment), so it self-gates via
+  // gamePhase instead of being director play()/stop()-managed. Must be
+  // registered before ConstellationsSystem/FateEventSystem below — both
+  // look it up via getSystem() in their own init() (it's what grows a ring
+  // planet into the big Fate-Events planet, now kicked off as Constellations
+  // begins rather than at Fate Events itself).
+  world
+    .registerSystem(PlanetSeedingSystem, { priority: 30 })
+    .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
+  director.definePhase(Phase.Seeding, {
+    systems: [world.getSystem(PlanetSeedingSystem)!],
+    timeoutSeconds: 90,
+  });
+
   // ConstellationsVfxSystem is registered but, like StardustVfxSystem/
   // PlanetSeedingVfxSystem, never passed to definePhase() — the winning
   // constellation's stars persist as permanent sky scenery once a winner is
@@ -158,24 +176,18 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     timeoutSeconds: 120,
   });
 
-  // PlanetSeedingVfxSystem is registered but, like StardustVfxSystem, never
-  // passed to definePhase() — the 9 planets persist as permanent scenery
-  // from Seeding onward (matching PebbleCometPresentationSystem's own
-  // become-visible-from-Seeding-onward treatment), so it self-gates via
-  // gamePhase instead of being director play()/stop()-managed.
-  world
-    .registerSystem(PlanetSeedingSystem, { priority: 30 })
-    .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
-  director.definePhase(Phase.Seeding, {
-    systems: [world.getSystem(PlanetSeedingSystem)!],
-    timeoutSeconds: 90,
-  });
-
+  // FateEventVfxSystem is registered but, unlike before, no longer passed to
+  // definePhase() — its people now start appearing progressively during
+  // Constellations (see its own gamePhase subscription), so it self-gates
+  // via gamePhase like ConstellationsVfxSystem/PlanetSeedingVfxSystem
+  // instead of being director play()/stop()-managed. FateEventSystem itself
+  // stays director-managed — its proximity/dialogue simulation still only
+  // runs during Phase.FateEvents.
   world
     .registerSystem(FateEventSystem, { priority: 30 })
     .registerSystem(FateEventVfxSystem, { priority: 32 });
   director.definePhase(Phase.FateEvents, {
-    systems: [world.getSystem(FateEventSystem)!, world.getSystem(FateEventVfxSystem)!],
+    systems: [world.getSystem(FateEventSystem)!],
     timeoutSeconds: 35,
   });
 
@@ -196,14 +208,18 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     timeoutSeconds: 30,
   });
 
-  world.registerSystem(FinaleSystem, { priority: 30 });
+  world
+    .registerSystem(FinaleSystem, { priority: 30 })
+    .registerSystem(EndRunMenuSystem, { priority: 30 });
   director.definePhase(Phase.Finale, {
-    systems: [world.getSystem(FinaleSystem)!],
-    // Bumped from 10 — CometAutopilotSystem keeps driving the comet's
-    // orbit/launch right through this phase (it's always-on, not
-    // phase-gated), so this needs enough time for that payoff to actually
-    // read before the loop cuts back to Stardust.
-    timeoutSeconds: 18,
+    systems: [world.getSystem(FinaleSystem)!, world.getSystem(EndRunMenuSystem)!],
+    // No timeoutSeconds: this phase no longer auto-advances. Finale plays
+    // out (CometAutopilotSystem keeps driving the comet's orbit/launch
+    // right through it, always-on and not phase-gated) until
+    // EndRunMenuSystem's own delay elapses and shows the end-of-run choice
+    // — the player picks "Make a New Comet" (jumpToPhase) or "Main Menu"
+    // (returnToMenu) rather than the loop cutting back to Stardust on its
+    // own.
   });
 
   // director.start() is deliberately NOT called here — StartMenuSystem

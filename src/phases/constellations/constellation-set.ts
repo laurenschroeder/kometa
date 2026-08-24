@@ -13,9 +13,10 @@ export interface ConstellationDef {
   dotCount: number; // path length/resolution
 }
 
-// spreadRadius values are scaled to stay reachable given ANCHOR_RADIUS
-// (see constellations-system.ts) — the star cluster/path region is a full
-// sphere around the anchor, so a dot can land anywhere within
+// spreadRadius values are scaled to stay reachable given how far the
+// anchors sit from the player (see constellation-path.ts's
+// placeConstellationAnchorsAroundPlanet) — the star cluster/path region is a
+// full sphere around the anchor, so a dot can land anywhere within
 // anchor +/- spreadRadius, not just at the edge.
 export const CONSTELLATION_SETS: Record<number, ConstellationDef[]> = {
   0: [

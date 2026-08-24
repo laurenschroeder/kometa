@@ -6,20 +6,37 @@ import { getGlobals } from '../../core/globals.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { pebbleCompletionMessage } from '../../core/notification-copy.js';
 import { samplePebbleSizes } from '../../vfx/particles/pebble-size.js';
-import { assignPebbleType, PEBBLE_TYPES } from './pebble-type.js';
+import { assignPebbleSpawnPoint } from './pebble-layout.js';
+import { PEBBLE_TYPES } from './pebble-type.js';
 
-// Bumped from 150 — combined with pebble-type.ts's widened green/red bands,
-// this puts meaningfully more pebbles in those two shells (WIN_CAPTURE_COUNT
-// scales with it too, so the 35% capture ratio — and overall difficulty —
-// stays the same; each shell is just denser and easier to find pebbles in).
+// Bumped from 150 — puts meaningfully more pebbles across the layout
+// (WIN_CAPTURE_COUNT scales with it too, so the 35% capture ratio — and
+// overall difficulty — stays the same; the field is just denser and easier
+// to find pebbles in).
 const N_PEBBLES_FIELD = 210;
 const WIN_CAPTURE_COUNT = Math.ceil(N_PEBBLES_FIELD * 0.35);
 
 // Drives the field's attraction-pull feel (slower comet movement = stronger
 // pull) — no longer tied to pebble type, which is now assigned per-particle
-// at spawn (see pebble-type.ts's assignPebbleType).
+// at spawn (see pebble-layout.ts's assignPebbleSpawnPoint).
 const SLOW_SPEED = 0.5;
 const FAST_SPEED = 1.5;
+
+// Fired via GatherableField's onCapture/onAttractStart callbacks, drained
+// each frame by PebbleFieldVfxSystem to trigger the catch/pickup pebble
+// synth sounds — same produce/drain shape StardustSystem's own CaptureEvent/
+// drainCaptureEvents() already establishes. `type` is the pebble's assigned
+// type (see pebble-layout.ts) at the moment of the event, read from
+// GatherableField.assignedType — this is what lets the synth pick the
+// harsh/earthy/heavenly timbre per pebble.
+export interface PebbleCaptureEvent {
+  x: number;
+  y: number;
+  z: number;
+  speed: number;
+  type: number;
+}
+export type PebbleAttractEvent = PebbleCaptureEvent;
 
 // Matches the eventual pebble body's own tail distribution (see
 // PebbleCometPresentationSystem) rather than stardust's tighter one — these
@@ -47,6 +64,8 @@ export class PebbleWeavingSystem extends createSystem({
   private _field!: GatherableField;
   private _sizes!: Float32Array;
   private _hasWon = false;
+  private _captureEvents: PebbleCaptureEvent[] = [];
+  private _attractEvents: PebbleAttractEvent[] = [];
 
   private _hand!: GatherHandInput;
   private _scratchVel!: Vector3;
@@ -66,7 +85,17 @@ export class PebbleWeavingSystem extends createSystem({
       capturedSpreadBase: CAPTURED_SPREAD_BASE,
       capturedSpreadGrowth: CAPTURED_SPREAD_GROWTH,
       capturedDepthRatio: CAPTURED_DEPTH_RATIO,
-      assignType: assignPebbleType,
+      spawnPoint: assignPebbleSpawnPoint,
+      // this._field isn't assigned until the constructor call below
+      // returns, but that's fine — these callbacks only ever fire later
+      // (during a future update()'s this._field.step()), by which point
+      // the assignment has long since completed.
+      onCapture: (index, x, y, z, speed) => {
+        this._captureEvents.push({ x, y, z, speed, type: this._field.assignedType[index] });
+      },
+      onAttractStart: (index, x, y, z, speed) => {
+        this._attractEvents.push({ x, y, z, speed, type: this._field.assignedType[index] });
+      },
     });
 
     // Sized from the same distribution as the final body's own pebbles (see
@@ -94,6 +123,8 @@ export class PebbleWeavingSystem extends createSystem({
     super.play();
     this._field.reset();
     this._hasWon = false;
+    this._captureEvents.length = 0;
+    this._attractEvents.length = 0;
   }
 
   update(delta: number): void {
@@ -119,6 +150,23 @@ export class PebbleWeavingSystem extends createSystem({
         if (counts[t] > counts[dominant]) dominant = t;
       }
       getGlobals(this.world).dominantPebbleType.value = dominant;
+
+      // Weighted blend of the three types' colors by how much of each was
+      // actually captured — PebbleCometPresentationSystem reads this to
+      // tint the permanent comet body from Seeding onward, so whatever mix
+      // you gathered here persists as part of the comet for the rest of the
+      // game instead of vanishing when this phase ends.
+      const total = counts.reduce((sum, c) => sum + c, 0) || 1;
+      const tint: [number, number, number] = [0, 0, 0];
+      for (let t = 0; t < counts.length; t++) {
+        const weight = counts[t] / total;
+        const [r, g, b] = PEBBLE_TYPES[t].color;
+        tint[0] += r * weight;
+        tint[1] += g * weight;
+        tint[2] += b * weight;
+      }
+      getGlobals(this.world).pebbleTint.value = tint;
+
       const { text, holdSeconds } = pebbleCompletionMessage(PEBBLE_TYPES[dominant].name);
       this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);
     }
@@ -149,5 +197,22 @@ export class PebbleWeavingSystem extends createSystem({
   // per-instance coloring.
   getAssignedType(): Uint8Array {
     return this._field.assignedType;
+  }
+
+  // Returns this frame's capture events and clears the queue — see
+  // PebbleCaptureEvent.
+  drainCaptureEvents(): readonly PebbleCaptureEvent[] {
+    if (this._captureEvents.length === 0) return this._captureEvents;
+    const events = this._captureEvents;
+    this._captureEvents = [];
+    return events;
+  }
+  // Returns this frame's pickup (Free -> Attracting) events and clears the
+  // queue — see PebbleAttractEvent.
+  drainAttractEvents(): readonly PebbleAttractEvent[] {
+    if (this._attractEvents.length === 0) return this._attractEvents;
+    const events = this._attractEvents;
+    this._attractEvents = [];
+    return events;
   }
 }

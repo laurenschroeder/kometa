@@ -3,6 +3,7 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
 import { scatterOnSphereCap } from '../../vfx/geometry/sphere-scatter.js';
+import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { FateDialogueEntry, getFateDialogue } from './fate-dialogue.js';
 
@@ -94,6 +95,14 @@ export class FateEventSystem extends createSystem({
     this._awayTimer.fill(0);
     this._lineIndex.fill(0);
     this._lineTimer.fill(0);
+
+    // Safety net: ConstellationsSystem.play() is the normal trigger for the
+    // ring planet's rotate/grow transition (it now runs before this phase —
+    // see phase.ts's PHASE_ORDER), but a dev-menu jump straight to Fate
+    // Events skips that entirely. start() always re-targets from whatever
+    // the planet's current live state is, so calling it again here is a
+    // smooth no-op on the normal path and the only trigger on the skip path.
+    this.world.getSystem(PlanetSeedingVfxSystem)?.startFateEventsTransition();
   }
 
   update(delta: number): void {

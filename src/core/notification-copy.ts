@@ -82,6 +82,13 @@ export function celestialSymbolMessage(name: string): NotificationCopy {
   };
 }
 
+// Fired once by EndRunMenuSystem after Finale's payoff has had time to read,
+// right before its Main-Menu/New-Comet choice panel appears.
+export const END_RUN_MESSAGE: NotificationCopy = {
+  text: 'Your time with the comet is done.',
+  holdSeconds: 3.2,
+};
+
 // Fired by OrbitalLaunchSystem the moment the player commits to one of the
 // two choice zones — static (no interpolated argument needed), unlike the
 // dynamic messages above.

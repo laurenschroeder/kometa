@@ -112,4 +112,25 @@ export class GameDirectorSystem extends createSystem({}) {
   private _stopPhase(phase: Phase): void {
     this._phases.get(phase)?.systems.forEach((s) => s.stop());
   }
+
+  // Backs all the way out to the parked "not started" state at
+  // Phase.Stardust, rather than looping straight back into a new run — used
+  // by EndRunMenuSystem's "Main Menu" choice. Stops the current phase's
+  // systems and clears _started so update() won't auto-advance again until
+  // start() is called (from the Start Menu's Start button, same as a fresh
+  // boot). gameStarted is cleared before gamePhase so NotificationHudSystem's
+  // gamePhase subscriber — which only fires the phase blurb while
+  // gameStarted is true — doesn't pop Stardust's intro blurb behind the
+  // Start Menu the instant this runs.
+  returnToMenu(): void {
+    if (!this._started) return;
+    const globals = getGlobals(this.world);
+    this._stopPhase(globals.gamePhase.value);
+    globals.phaseComplete.value = false;
+    globals.gameStarted.value = false;
+    this._elapsedInPhase = 0;
+    globals.gamePhase.value = Phase.Stardust;
+    this._started = false;
+    console.info('[GameDirector] returned to main menu');
+  }
 }

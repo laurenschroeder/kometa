@@ -1,0 +1,50 @@
+<style>
+  .menu-root {
+    width: 55;
+    padding: 2.5;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    background-color: #09090b;
+    border-color: #ffffff;
+    border-width: 0.15;
+    border-radius: 2;
+  }
+
+  .title {
+    font-size: 2.6;
+    font-weight: bold;
+    color: #ffffff;
+    text-align: center;
+    margin-bottom: 2;
+    font-family: hud;
+  }
+
+  .menu-button {
+    width: 100%;
+    padding: 1.6;
+    margin-top: 1;
+    border-width: 0.12;
+    border-color: #ffffff;
+    border-radius: 1;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .menu-label {
+    color: #ffffff;
+    font-size: 2.2;
+    text-align: center;
+    font-family: hud;
+    font-weight: bold;
+  }
+</style>
+<div class="menu-root">
+  <hudtext class="title">Your time with the comet is done.</hudtext>
+  <div id="btn-new-comet" class="menu-button">
+    <hudtext class="menu-label">Make a New Comet</hudtext>
+  </div>
+  <div id="btn-main-menu" class="menu-button">
+    <hudtext class="menu-label">Main Menu</hudtext>
+  </div>
+</div>

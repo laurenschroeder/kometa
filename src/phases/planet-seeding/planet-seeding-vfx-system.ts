@@ -48,8 +48,11 @@ const MIN_COVERAGE_FOR_SELECTION = 0.05;
 // Planets are Chapter 3's own reveal — they shouldn't be visible while the
 // player is still gathering stardust/pebbles, only from Seeding onward
 // (same "hasn't formed yet" treatment PebbleCometPresentationSystem gives
-// the comet body itself).
-const PLANETS_HIDDEN_DURING = new Set<Phase>([Phase.Stardust, Phase.Pebbles, Phase.Constellations]);
+// the comet body itself). Constellations now comes right after Seeding (see
+// phase.ts's PHASE_ORDER) and is staged around the same planet as it grows
+// into the Fate Events planet, so it must stay in the visible set, not the
+// hidden one.
+const PLANETS_HIDDEN_DURING = new Set<Phase>([Phase.Stardust, Phase.Pebbles]);
 
 // 9 distinct hues spread across the wheel — "9 different worlds coming
 // alive" rather than one flat seeded color repeated everywhere.

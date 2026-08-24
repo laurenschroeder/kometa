@@ -53,13 +53,19 @@ export interface GatherableFieldParams {
   capturedSpreadBase: number;
   capturedSpreadGrowth: number;
   capturedDepthRatio: number;
-  // Optional: assigns each particle's type (e.g. pebble color) once at
-  // spawn/reset, from its normalized spawn radius (0 at spawnRadiusMin, 1 at
-  // spawnRadiusMax) — a loose proxy for "how far you have to reach for it",
-  // not a hard rule (the caller decides how much to actually weight it vs.
-  // randomness). Omit for fields that don't need typed particles (e.g.
+  // Optional: fully overrides per-particle spawn direction/radius/type
+  // generation, called once per particle at construction time instead of
+  // the default uniform-random-direction (randomUnitVector3()) + uniform
+  // radius path — for fields whose type needs to depend on WHERE a
+  // particle spawns (e.g. Pebbles' angular red-ring/patch layout, where
+  // direction and color are decided together; see pebble-layout.ts).
+  // radiusT is 0-1, mapped the same way the default path already does (0 at
+  // spawnRadiusMin, 1 at spawnRadiusMax). assignedType is set from `type`
+  // once, permanently — unlike the plain-radius case there's no per-loop
+  // re-derivation to do, since direction/type are fixed together at spawn.
+  // Omit for fields that don't need typed/directional particles (e.g.
   // Stardust) — assignedType stays unused zeros and costs nothing extra.
-  assignType?: (spawnRadiusT: number) => number;
+  spawnPoint?: (index: number) => { dir: Vector3; radiusT: number; type: number };
   // Optional: fired the instant a particle crosses captureDistance, with its
   // world position and the hand's speed at that moment (e.g. for a per-catch
   // sound/VFX cue). Omit for fields that don't need this.
@@ -89,9 +95,9 @@ export class GatherableField {
   readonly capturedDY: Float32Array;
   readonly capturedDZ: Float32Array;
   readonly captured: number[] = []; // field-slot indices, in capture order
-  // Assigned once per particle at reset() (see params.assignType) — valid
-  // for every particle regardless of state, not just once Captured, so a VFX
-  // layer can color the whole ambient field from the moment it spawns.
+  // Assigned once per particle (see params.spawnPoint) — valid for every
+  // particle regardless of state, not just once Captured, so a VFX layer
+  // can color the whole ambient field from the moment it spawns.
   readonly assignedType: Uint8Array;
 
   private readonly _params: GatherableFieldParams;
@@ -123,12 +129,21 @@ export class GatherableField {
     this._velZ = new Float32Array(n);
 
     const [cx, cy, cz] = params.spawnCenter;
-    const radiusSpan = Math.max(1e-6, params.spawnRadiusMax - params.spawnRadiusMin);
+    const radiusRange = params.spawnRadiusMax - params.spawnRadiusMin;
     const dir = new Vector3();
     for (let i = 0; i < n; i++) {
-      dir.copy(randomUnitVector3());
-      const r = params.spawnRadiusMin + Math.random() * (params.spawnRadiusMax - params.spawnRadiusMin);
-      this._spawnRadiusT[i] = (r - params.spawnRadiusMin) / radiusSpan;
+      let r: number;
+      if (params.spawnPoint) {
+        const sp = params.spawnPoint(i);
+        dir.copy(sp.dir);
+        r = params.spawnRadiusMin + sp.radiusT * radiusRange;
+        this._spawnRadiusT[i] = sp.radiusT;
+        this.assignedType[i] = sp.type;
+      } else {
+        dir.copy(randomUnitVector3());
+        r = params.spawnRadiusMin + Math.random() * radiusRange;
+        this._spawnRadiusT[i] = (r - params.spawnRadiusMin) / Math.max(1e-6, radiusRange);
+      }
       this._spawnPos[i * 3] = cx + dir.x * r;
       this._spawnPos[i * 3 + 1] = cy + dir.y * r;
       this._spawnPos[i * 3 + 2] = cz + dir.z * r;
@@ -148,16 +163,19 @@ export class GatherableField {
     return this.captured.length;
   }
 
-  // Per-type capture tally (index = assignType's return value) — only
-  // meaningful when params.assignType is provided.
+  // Per-type capture tally (index = spawnPoint's type value) — only
+  // meaningful when spawnPoint is provided.
   getTypeCounts(): readonly number[] {
     return this._typeCounts;
   }
 
-  // Resets every particle back to its spawn position/Free state, clears the
-  // captured pool, and re-rolls assignedType — called from a phase system's
-  // play() so each replay loop starts from a clean field with a fresh type
-  // distribution.
+  // Resets every particle back to its spawn position/Free state and clears
+  // the captured pool — called from a phase system's play() so each replay
+  // loop starts from a clean field. assignedType is untouched here when
+  // spawnPoint was used (it was set once, permanently, in the constructor,
+  // coupled to that particle's fixed direction) — fields that don't use
+  // spawnPoint never had a typed assignedType to begin with, so there's
+  // nothing to re-derive.
   reset(): void {
     this.positions.set(this._spawnPos);
     this.states.fill(GatherState.Free);
@@ -166,11 +184,7 @@ export class GatherableField {
     this._velX.fill(0);
     this._velY.fill(0);
     this._velZ.fill(0);
-    if (this._params.assignType) {
-      for (let i = 0; i < this._params.count; i++) {
-        this.assignedType[i] = this._params.assignType(this._spawnRadiusT[i]);
-      }
-    } else {
+    if (!this._params.spawnPoint) {
       this.assignedType.fill(0);
     }
   }
@@ -205,7 +219,7 @@ export class GatherableField {
     this.states[i] = GatherState.Attracting;
     // Slower comet movement = stronger pull — rewards gentle, deliberate
     // gestures over fast grabbing. (Type is no longer derived from this —
-    // see assignedType/params.assignType above.)
+    // see assignedType/params.spawnPoint above.)
     const slowness = 1.0 - smoothstep(p.slowSpeed, p.fastSpeed, hand.speed);
     const pull = 1.0 - Math.exp(-p.attractRate * slowness * delta);
     const oldX = this._scratchPos.x;
@@ -267,7 +281,7 @@ export class GatherableField {
     this.capturedDX[i] = sample.dx;
     this.capturedDY[i] = sample.dy;
     this.capturedDZ[i] = sample.dz;
-    if (this._params.assignType) {
+    if (this._params.spawnPoint) {
       this._typeCounts[this.assignedType[i]] = (this._typeCounts[this.assignedType[i]] ?? 0) + 1;
     }
     this.captured.push(i);

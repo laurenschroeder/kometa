@@ -35,6 +35,11 @@ function notifyDuration(holdSeconds: number): number {
 // than behind/beside the player when it lets go.
 const IN_VIEW_COS = Math.cos((55 * Math.PI) / 180);
 
+// Floor on the speed used when snapping the detach direction to the
+// camera's forward vector (see _detach) — a near-stationary swing should
+// still visibly fly off rather than just sit there.
+const MIN_DETACH_SPEED = 1.0;
+
 export type LaunchChoice = 'orbit' | 'launch';
 type LaunchState = 'choosing' | 'committed' | 'detached';
 
@@ -45,16 +50,20 @@ type LaunchState = 'choosing' | 'committed' | 'detached';
 // normally (still hand-tracked, still springs/snaps/throws) while the
 // player is coached to swing it faster — once the commit +
 // LAUNCH_BUILDUP_SEQUENCE notification queue finishes playing out on the
-// HUD (see notifyDuration/_commit), detach fires the moment the comet is
-// actually somewhere in front of the player (IN_VIEW_COS) rather than
-// wherever the swing happened to leave it behind their back — regardless of
-// how fast the comet actually ends up moving. HandAnchor removal at that
-// point is the
-// entire detach mechanism (see CometAutopilotSystem, an always-on system
-// that picks up driving the comet the instant it drops HandAnchor and
-// excludes/re-includes it purely via that component's presence — it's also
-// what reads the comet's actual velocity at that instant to carry momentum
-// smoothly into orbit/launch, whatever that velocity happens to be). Pure
+// HUD (see notifyDuration/_commit) AND the comet is somewhere in front of
+// the player (IN_VIEW_COS), detach fires — regardless of how fast the comet
+// actually ends up moving. Whatever the comet's raw swing velocity happened
+// to be at that instant is NOT trusted for direction (a mid-swing sample
+// can easily point sideways or backward even while the comet itself sits in
+// front of the player) — _detach() snaps the direction to the camera's
+// actual forward vector at that moment, keeping only the swing's speed, so
+// the comet reliably flies off into the area the player is looking at
+// rather than wherever the swing physics happened to be pointing. HandAnchor
+// removal at that point is the entire detach mechanism (see
+// CometAutopilotSystem, an always-on system that picks up driving the comet
+// the instant it drops HandAnchor and excludes/re-includes it purely via
+// that component's presence — it's also what reads the comet's velocity at
+// that instant to carry momentum smoothly into orbit/launch). Pure
 // simulation here: no mesh/entity creation happens in this file (see
 // OrbitalLaunchVfxSystem).
 export class OrbitalLaunchSystem extends createSystem({
@@ -74,6 +83,7 @@ export class OrbitalLaunchSystem extends createSystem({
   private _orbitZoneCenter!: Vector3;
   private _unknownZoneCenter!: Vector3;
   private _scratchPos!: Vector3;
+  private _scratchVel!: Vector3;
   private _camPos!: Vector3;
   private _camFwd!: Vector3;
   private _toComet!: Vector3;
@@ -90,6 +100,7 @@ export class OrbitalLaunchSystem extends createSystem({
       UNKNOWN_DIR[2] * ARROW_DISTANCE,
     );
     this._scratchPos = new Vector3();
+    this._scratchVel = new Vector3();
     this._camPos = new Vector3();
     this._camFwd = new Vector3();
     this._toComet = new Vector3();
@@ -168,7 +179,18 @@ export class OrbitalLaunchSystem extends createSystem({
 
   private _detach(): void {
     this._state = 'detached';
+    // Direction comes from where the player is actually looking right now,
+    // not from the comet's raw swing velocity (see class comment) — this
+    // runs both from the normal in-view detach above and from stop()'s
+    // timeout fallback, so it's computed fresh here rather than reused from
+    // _isCometInView.
+    this.camera.getWorldDirection(this._camFwd);
     for (const entity of this.queries.bodies.entities) {
+      const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
+      this._scratchVel.fromArray(velView);
+      const speed = Math.max(this._scratchVel.length(), MIN_DETACH_SPEED);
+      this._scratchVel.copy(this._camFwd).multiplyScalar(speed);
+      this._scratchVel.toArray(velView);
       entity.removeComponent(HandAnchor);
     }
   }

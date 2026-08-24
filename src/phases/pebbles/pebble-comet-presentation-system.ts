@@ -26,7 +26,7 @@ import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.j
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
 import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
-import { kPebbleInstMat } from '../../vfx/shaders/pebble-material.js';
+import { kPebbleFieldTintedMat } from '../../vfx/shaders/pebble-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
 import { makeToonRimDecalMaterial } from '../../vfx/shaders/toon-rim-material.js';
 
@@ -47,6 +47,13 @@ const FACING_SPEED_EPSILON_SQ = 0.0004;
 // ~1.2 Hz, fast cycles the second pair at ~3 Hz (time * 2.0 in both cases —
 // 0.5s per expression).
 const FACE_CYCLE_SPEED_THRESHOLD = 1.5;
+// Partial, not full (aTinted=1 would flatten the dark rocky
+// bodyColorDark/Light gradient + per-pebble aBright variation into one flat
+// solid color — reads as a plain white/gray blob, not a rock). At this
+// strength the tint colors the existing dark/brightness-varied shading
+// instead of replacing it, so the body keeps its "rocky outline" look while
+// still visibly reading as whatever globals.pebbleTint was captured.
+const BODY_TINT_STRENGTH = 0.45;
 
 // Decal material only uses bodyColorDark + rimColor (no brightness mixing
 // for the head), so bodyColorLight is unused here — duplicated to satisfy
@@ -87,6 +94,11 @@ interface CometVisual {
   pebbleLocalIdx: Uint16Array;
   pebbleRot: Quaternion[];
   pebbleMeshes: InstancedMesh[];
+  // Per-variant aTint attribute — rewritten in bulk (all instances get the
+  // same color) whenever globals.pebbleTint changes, see the subscription
+  // in init(). Not per-pebble varying like PebbleFieldVfxSystem's own use of
+  // the same material: the whole body shares one blended tint.
+  pebbleTintAttrs: InstancedBufferAttribute[];
 
   pebbleMeshEntities: Entity[];
 
@@ -160,6 +172,30 @@ export class PebbleCometPresentationSystem extends createSystem({
     this.queries.comets.subscribe('qualify', (entity) => this._buildVisual(entity), true);
     this.queries.comets.subscribe('disqualify', (entity) => this._destroyVisual(entity));
     this.cleanupFuncs.push(() => this._visuals.clear());
+
+    // The body is built (and its aTint attributes initialized from
+    // whichever pebbleTint value exists at the time — see _buildVisual) at
+    // boot, long before Chapter 2's win condition ever sets a real value —
+    // this is what applies that value once it lands, and any later change
+    // (e.g. a dev-menu replay of Chapter 2). Body stays hidden throughout
+    // Chapter 2 itself (see HIDDEN_DURING_PHASES), so there's no visible pop.
+    this.cleanupFuncs.push(
+      getGlobals(this.world).pebbleTint.subscribe((tint) => this._applyTint(tint)),
+    );
+  }
+
+  private _applyTint(tint: [number, number, number]): void {
+    for (const visual of this._visuals.values()) {
+      for (const attr of visual.pebbleTintAttrs) {
+        const arr = attr.array as Float32Array;
+        for (let i = 0; i < arr.length; i += 3) {
+          arr[i] = tint[0];
+          arr[i + 1] = tint[1];
+          arr[i + 2] = tint[2];
+        }
+        attr.needsUpdate = true;
+      }
+    }
   }
 
   private _applyVisibility(): void {
@@ -206,18 +242,38 @@ export class PebbleCometPresentationSystem extends createSystem({
       pebbleRot[i] = new Quaternion().setFromAxisAngle(rotAxisScratch, Math.random() * Math.PI * 2);
     }
 
-    // One InstancedMesh per rock-shape variant. aBright is written onto the
-    // shared module-scope variant geometry here — safe as long as every
-    // qualifying comet entity uses the same N_PEBBLE_VARIANTS bucket sizes
-    // (true today: all comets share identical distribution parameters).
+    // One InstancedMesh per rock-shape variant. aBright/aTint/aTinted are
+    // written onto the shared module-scope variant geometry here — safe as
+    // long as every qualifying comet entity uses the same N_PEBBLE_VARIANTS
+    // bucket sizes (true today: all comets share identical distribution
+    // parameters). Every instance starts partially tinted (see
+    // BODY_TINT_STRENGTH) toward whichever globals.pebbleTint value exists
+    // right now — see _applyTint for how a later Chapter 2 completion
+    // updates it in place.
     const pebbleMeshes: InstancedMesh[] = [];
+    const pebbleTintAttrs: InstancedBufferAttribute[] = [];
     const pebbleMeshEntities: Entity[] = [];
+    const initialTint = getGlobals(this.world).pebbleTint.peek();
     for (let v = 0; v < N_PEBBLE_VARIANTS; v++) {
       const geo = kPebbleVariantGeos[v];
       geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(bucketBright[v]), 1));
 
       const count = bucketBright[v].length;
-      const mesh = new InstancedMesh(geo, kPebbleInstMat, count);
+      const tintArr = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        tintArr[i * 3] = initialTint[0];
+        tintArr[i * 3 + 1] = initialTint[1];
+        tintArr[i * 3 + 2] = initialTint[2];
+      }
+      const tintAttr = new InstancedBufferAttribute(tintArr, 3);
+      geo.setAttribute('aTint', tintAttr);
+      geo.setAttribute(
+        'aTinted',
+        new InstancedBufferAttribute(new Float32Array(count).fill(BODY_TINT_STRENGTH), 1),
+      );
+      pebbleTintAttrs.push(tintAttr);
+
+      const mesh = new InstancedMesh(geo, kPebbleFieldTintedMat, count);
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
       mesh.frustumCulled = false;
       pebbleMeshEntities.push(this.world.createTransformEntity(mesh));
@@ -278,6 +334,7 @@ export class PebbleCometPresentationSystem extends createSystem({
       pebbleLocalIdx,
       pebbleRot,
       pebbleMeshes,
+      pebbleTintAttrs,
       pebbleMeshEntities,
       hazeField,
       hazePositions,
@@ -294,10 +351,10 @@ export class PebbleCometPresentationSystem extends createSystem({
   private _destroyVisual(entity: Entity): void {
     const visual = this._visuals.get(entity.index);
     if (!visual) return;
-    // Geometries/kPebbleInstMat/kHazeMat are module-scope singletons shared
-    // across every comet — destroy() (not dispose()) so we don't free GPU
-    // resources still in use elsewhere. headMat is the one truly per-visual
-    // resource, safe to dispose directly.
+    // Geometries/kPebbleFieldTintedMat/kHazeMat are module-scope singletons
+    // shared across every comet — destroy() (not dispose()) so we don't free
+    // GPU resources still in use elsewhere. headMat is the one truly
+    // per-visual resource, safe to dispose directly.
     for (const e of visual.pebbleMeshEntities) e.destroy();
     visual.hazePointsEntity.destroy();
     visual.headMeshEntity.destroy();

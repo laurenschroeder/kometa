@@ -1,8 +1,4 @@
-import {
-  makeToonRimInstancedMaterial,
-  makeToonRimInstancedTintedMaterial,
-  ToonRimPalette,
-} from './toon-rim-material.js';
+import { makeToonRimInstancedTintedMaterial, ToonRimPalette } from './toon-rim-material.js';
 
 export const PEBBLE_PALETTE: ToonRimPalette = {
   bodyColorDark: [0.01, 0.02, 0.05],
@@ -13,12 +9,12 @@ export const PEBBLE_PALETTE: ToonRimPalette = {
 // Single shared material instance — safe to reuse across many InstancedMesh
 // objects (unlike geometry, a ShaderMaterial carries no per-owner instance
 // count/attribute state), so every "toon pebble" in the game — the ambient
-// field gathered in Chapter 2, the body riding the trail from Chapter 2
-// onward — renders with the exact same look from one shader program.
-export const kPebbleInstMat = makeToonRimInstancedMaterial(PEBBLE_PALETTE);
-
-// Tinted variant, used only by PebbleFieldVfxSystem to color individual
-// Chapter 2 pebbles by which type they became — kPebbleInstMat above (and
-// everything else that shares it, e.g. the persistent comet body) is left
-// completely untouched.
+// field gathered in Chapter 2, the permanent body riding the trail from
+// Chapter 2 onward — renders with the exact same look from one shader
+// program. Both owners write their own per-instance aTint/aTinted values
+// (Chapter 2's field pebbles by which type each one became; the body by
+// globals.pebbleTint, the blended result of what was gathered) onto their
+// own separate geometry instances (see PebbleFieldVfxSystem's kFieldPebbleGeos
+// vs. PebbleCometPresentationSystem's kPebbleVariantGeos) — only the
+// material/shader itself is shared here, never the per-instance attributes.
 export const kPebbleFieldTintedMat = makeToonRimInstancedTintedMaterial(PEBBLE_PALETTE);

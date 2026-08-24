@@ -2,22 +2,44 @@ import { Vector3 } from '@iwsdk/core';
 import { randomUnitVector3 } from './mesh-utils.js';
 import { ConstellationDef } from '../../phases/constellations/constellation-set.js';
 
-// N anchors evenly spread across a semicircle in front of the player
-// (absolute world-space — the player doesn't move during this phase, same
-// convention weave-path.ts's placePlanets uses for its full-circle ring).
-// Centered on forward (-Z), spanning SEMICIRCLE_SPAN_RADIANS total.
-const SEMICIRCLE_SPAN_RADIANS = (Math.PI * 2) / 3; // 120 degrees, i.e. +-60 deg
-export function placeConstellationAnchors(
+// N anchors arced around the big Fate Events planet, offset outward from
+// its surface and tilted up so they occupy the upper/side portion of the
+// sphere facing the player — leaving the lower/central near-face free for
+// Fate Events' people (see fate-event-system.ts's CAP_HALF_ANGLE=28° cap),
+// so "constellations rise around the planet" and "people appear on it" read
+// as two distinct bands rather than overlapping. Absolute world-space — the
+// player doesn't move during this phase, same convention weave-path.ts's
+// placePlanets uses for its full-circle ring.
+const ANCHOR_SURFACE_OFFSET = 0.3; // clears most constellations' spreadRadius (max 0.5) from the surface
+const ANCHOR_AZIMUTH_SPREAD_DEG = 30; // -30/0/+30 around the planet's vertical axis
+// Tilted up from "straight at the player" ([0,0,1]) rather than level with
+// it — this is what keeps the arc above the people cap instead of sharing it.
+const ANCHOR_ELEVATION: [number, number, number] = [0, 0.55, 1];
+
+function rotateAroundY(base: [number, number, number], degrees: number): Vector3 {
+  const rad = (degrees * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return new Vector3(base[0] * cos + base[2] * sin, base[1], -base[0] * sin + base[2] * cos);
+}
+
+export function placeConstellationAnchorsAroundPlanet(
   count: number,
-  radius: number,
-  centerY: number,
+  planetCenter: readonly [number, number, number],
+  planetRadius: number,
 ): [number, number, number][] {
+  const base = new Vector3(...ANCHOR_ELEVATION).normalize();
+  const r = planetRadius + ANCHOR_SURFACE_OFFSET;
   const anchors: [number, number, number][] = [];
-  const half = SEMICIRCLE_SPAN_RADIANS / 2;
   for (let i = 0; i < count; i++) {
     const t = count === 1 ? 0.5 : i / (count - 1);
-    const angle = -half + t * SEMICIRCLE_SPAN_RADIANS;
-    anchors.push([Math.sin(angle) * radius, centerY, -Math.cos(angle) * radius]);
+    const deg = -ANCHOR_AZIMUTH_SPREAD_DEG + t * (ANCHOR_AZIMUTH_SPREAD_DEG * 2);
+    const dir = rotateAroundY([base.x, base.y, base.z], deg);
+    anchors.push([
+      planetCenter[0] + dir.x * r,
+      planetCenter[1] + dir.y * r,
+      planetCenter[2] + dir.z * r,
+    ]);
   }
   return anchors;
 }

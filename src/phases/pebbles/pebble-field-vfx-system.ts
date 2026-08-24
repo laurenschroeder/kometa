@@ -1,4 +1,5 @@
 import {
+  AudioListener,
   BufferGeometry,
   createSystem,
   DynamicDrawUsage,
@@ -13,6 +14,7 @@ import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { GatherState } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { PEBBLE_MESH_SCALE } from '../../vfx/particles/pebble-size.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
@@ -24,12 +26,14 @@ const N_PEBBLE_VARIANTS = 6;
 
 // Own geometry variants rather than reusing
 // PebbleCometPresentationSystem's kPebbleVariantGeos: each InstancedMesh's
-// per-instance aBright attribute is sized to that mesh's own instance count
-// (150 pebbles here vs. 260 in the final body), so sharing a BufferGeometry
-// across owners with different counts would mean one of them overwrites the
-// other's instance attribute. The material (kPebbleInstMat) has no such
-// per-owner state and is safe — and important — to share, so every pebble
-// in the game renders with the exact same shader/palette.
+// per-instance aBright/aTint/aTinted attributes are sized to that mesh's own
+// instance count (210 pebbles here vs. 260 in the final body), so sharing a
+// BufferGeometry across owners with different counts would mean one of them
+// overwrites the other's instance attributes. The material
+// (kPebbleFieldTintedMat) has no such per-owner state and is safe — and
+// important — to share (PebbleCometPresentationSystem shares it too, tinting
+// the permanent body by globals.pebbleTint), so every pebble in the game
+// renders with the exact same shader/palette.
 const kFieldPebbleGeos: BufferGeometry[] = Array.from({ length: N_PEBBLE_VARIANTS }, () =>
   buildOrganicGeometry(),
 );
@@ -65,12 +69,26 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _scratchScale!: Vector3;
   private _scratchMat4!: Matrix4;
 
+  // Own AudioListener for the same reason StardustVfxSystem needs one — see
+  // its identical comment: IWSDK's AudioSource/AudioUtils layer only plays
+  // pre-loaded buffers, with no way to reach its AudioListener for
+  // generative/synthesized audio.
+  private _audioListener!: AudioListener;
+  private _pebbleSynth!: PebbleSynth;
+  private _scratchCapturePos!: Vector3;
+
   init(): void {
     // PebbleWeavingSystem/CometTrailSystem must be registered before this
     // system (see index.ts) so they already exist when this init() runs.
     this._pebbles = this.world.getSystem(PebbleWeavingSystem)!;
     this._trailSystem = this.world.getSystem(CometTrailSystem)!;
     this._sizes = this._pebbles.getSizes();
+
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._pebbleSynth = new PebbleSynth();
+    this._pebbleSynth.build(this._audioListener, this.scene);
+    this._scratchCapturePos = new Vector3();
 
     this._camRight = new Vector3();
     this._camUp = new Vector3();
@@ -170,6 +188,15 @@ export class PebbleFieldVfxSystem extends createSystem({
     for (const mesh of this._meshes) mesh.instanceMatrix.needsUpdate = true;
     for (const attr of this._tintAttrs) attr.needsUpdate = true;
     for (const attr of this._tintedAttrs) attr.needsUpdate = true;
+
+    for (const ev of this._pebbles.drainAttractEvents()) {
+      this._scratchCapturePos.set(ev.x, ev.y, ev.z);
+      this._pebbleSynth.playPickup(ev.type, this._scratchCapturePos, ev.speed);
+    }
+    for (const ev of this._pebbles.drainCaptureEvents()) {
+      this._scratchCapturePos.set(ev.x, ev.y, ev.z);
+      this._pebbleSynth.playCatch(ev.type, this._scratchCapturePos, ev.speed);
+    }
   }
 
   private _setInstance(i: number, pos: Vector3): void {
@@ -179,8 +206,8 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._scratchMat4.compose(pos, this._rot[i], this._scratchScale);
     this._meshes[variant].setMatrixAt(local, this._scratchMat4);
 
-    // Fixed color from the moment a pebble spawns — see pebble-type.ts's
-    // assignPebbleType — not something that shifts as you approach it.
+    // Fixed color from the moment a pebble spawns — see pebble-layout.ts's
+    // assignPebbleSpawnPoint — not something that shifts as you approach it.
     const [r, g, b] = PEBBLE_TYPES[this._assignedType[i]].color;
     this._tintAttrs[variant].setXYZ(local, r, g, b);
     this._tintedAttrs[variant].setX(local, 1);

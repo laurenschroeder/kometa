@@ -1,5 +1,6 @@
 import {
   createSystem,
+  Entity,
   Follower,
   FollowBehavior,
   Object3D,
@@ -33,6 +34,7 @@ export class StartMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
 }) {
   private _director!: GameDirectorSystem;
+  private _entity!: Entity;
   private _panelObject!: Object3D;
   private _buttons = new Map<string, DwellButtonEntry>();
   private _hoveredId: string | null = null;
@@ -45,6 +47,7 @@ export class StartMenuSystem extends createSystem({
     this._director = this.world.getSystem(GameDirectorSystem)!;
 
     const entity = this.world.createTransformEntity();
+    this._entity = entity;
     this._panelObject = entity.object3D!;
     this._panelObject.visible = true;
 
@@ -146,6 +149,21 @@ export class StartMenuSystem extends createSystem({
     doc.getElementById('page-achievements')?.setProperties({
       display: visibleId === 'page-achievements' ? 'flex' : 'none',
     });
+  }
+
+  // Re-shows this panel after GameDirectorSystem.returnToMenu() — called by
+  // EndRunMenuSystem's "Main Menu" choice, the only path that reaches this
+  // screen a second time (a fresh page load already starts with the panel
+  // visible). The panel is only ever hidden by btn-start, which lives on
+  // page-main, so it's always already showing that page when this runs.
+  // Resets the dwell state too, so a hover left over from before the panel
+  // was hidden can't insta-trigger the moment it reappears.
+  showAgain(): void {
+    this._hoveredId = null;
+    this._dwellElapsed = 0;
+    this._triggered = false;
+    this._panelObject.visible = true;
+    this._entity.addComponent(RayInteractable);
   }
 
   private _refreshAchievementRows(doc: UIKitDocument): void {

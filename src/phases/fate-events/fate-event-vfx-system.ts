@@ -10,10 +10,14 @@ import {
   Vector3,
   AdditiveBlending,
 } from '@iwsdk/core';
+import { getGlobals } from '../../core/globals.js';
+import { Phase } from '../../core/phase.js';
 import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
+import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { FateEventSystem } from './fate-event-system.js';
 
 const JUMP_FREQUENCY = 5; // Hz
@@ -27,6 +31,22 @@ const BUBBLE_EASE_RATE = 8; // faster than the HUD's 0.5s fade — a small in-wo
 const BUBBLE_CANVAS_W = 256;
 const BUBBLE_CANVAS_H = 128;
 const BUBBLE_LINE_HEIGHT = 34;
+
+// isFateTransitionActive() defaults to false before the transition has ever
+// been started (not just once it's finished) — since this system is
+// always-on and update() runs from world boot, checking that alone would
+// read as "already arrived" on frame 1, long before Constellations ever
+// kicks the transition off. Gating the arrival check on having reached at
+// least Constellations closes that gap for the normal flow; a dev-menu jump
+// straight to Fate Events (skipping Constellations) still works because
+// FateEventSystem.play() re-triggers the transition itself and this set
+// also covers Phase.FateEvents.
+const PLANET_ARRIVAL_ELIGIBLE_FROM = new Set<Phase>([
+  Phase.Constellations,
+  Phase.FateEvents,
+  Phase.Launch,
+  Phase.Finale,
+]);
 
 const N_FIRE_QUADS = 8;
 const FIRE_RING_RADIUS = 0.4;
@@ -80,25 +100,31 @@ function buildFireTexture(): CanvasTexture {
   return new CanvasTexture(canvas);
 }
 
-// Renders FateEventSystem's simulation state: the big planet, its N
+// Renders FateEventSystem's simulation state: the big planet's N
 // placeholder people (bobbing when their proximity-triggered "active" state
 // is on), their per-person speech bubbles (canvas-texture quads,
 // billboarded toward the camera, redrawn only when their dialogue line
 // actually changes), and — only when the dominant type was volatile gasses
-// — a small ring of ambient flame quads below the planet. Both this system
-// and FateEventSystem are director-managed (passed into definePhase, same
-// as Pebbles' pair): nothing here should persist once the phase ends, so
-// play()/stop() simply toggle .visible rather than self-gating via
-// gamePhase like the permanent Seeding planets/Constellations stars do.
+// — a small ring of ambient flame quads below the planet. Always-on and
+// self-gated via gamePhase (like ConstellationsVfxSystem/
+// PlanetSeedingVfxSystem), NOT director-managed: people now start appearing
+// progressively during Constellations (tied to ConstellationsSystem's
+// getRevealProgress(), see update()) rather than popping in all at once
+// when Fate Events itself starts, so this system's own visibility can't be
+// tied to Fate Events' play()/stop() the way it used to be. FateEventSystem
+// itself stays director-managed — its proximity/dialogue simulation only
+// runs during Phase.FateEvents, same as always.
 export class FateEventVfxSystem extends createSystem({}) {
   private _fateEvents!: FateEventSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
-  // People/bubbles/fire stay hidden until PlanetSeedingVfxSystem's rotate/
-  // grow transition (see planet-fate-transition.ts) finishes bringing the
+  private _constellations!: ConstellationsSystem;
+  // People/fire stay hidden until PlanetSeedingVfxSystem's rotate/grow
+  // transition (see planet-fate-transition.ts) finishes bringing the
   // selected ring planet into this phase's fixed PLANET_CENTER/PLANET_RADIUS
   // slot — revealing them earlier would show people standing on a planet
-  // that hasn't visually arrived yet.
-  private _revealedAfterTransition = false;
+  // that hasn't visually arrived yet. Renamed from _revealedAfterTransition
+  // since it now also gates fire, independent of the people-reveal timing.
+  private _planetArrived = false;
 
   private _peopleMaterial!: ReturnType<typeof makeToonRimFlatMaterial>;
   private _personGroups: Group[] = [];
@@ -128,6 +154,9 @@ export class FateEventVfxSystem extends createSystem({}) {
   init(): void {
     this._fateEvents = this.world.getSystem(FateEventSystem)!;
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
+    // ConstellationsSystem must be registered before this system (see
+    // index.ts) so it already exists when this init() runs.
+    this._constellations = this.world.getSystem(ConstellationsSystem)!;
 
     this._camWorldPos = new Vector3();
     this._faceDir = new Vector3();
@@ -139,18 +168,37 @@ export class FateEventVfxSystem extends createSystem({}) {
     this._buildPeople();
     this._buildBubbles();
     this._buildFire();
+
+    // signal.subscribe() fires immediately, so state is correct before the
+    // first frame renders (same idiom ConstellationsVfxSystem/
+    // PlanetSeedingVfxSystem use for their own gamePhase gating).
+    this.cleanupFuncs.push(
+      getGlobals(this.world).gamePhase.subscribe((phase) => this._onPhaseChange(phase)),
+    );
   }
 
-  play(): void {
-    super.play();
-    const color = this._fateEvents.getPeopleColor();
-    (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+  private _onPhaseChange(phase: Phase): void {
+    if (phase === Phase.Constellations) {
+      // The dialogue-specific mood color (if any) isn't resolved until a
+      // constellation is actually won — fall back to the dominant type's
+      // color for however long people are progressively appearing here.
+      const dominant = getGlobals(this.world).dominantPebbleType.peek();
+      const color = PEBBLE_TYPES[dominant].color;
+      (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+    } else if (phase === Phase.FateEvents) {
+      // celestialSymbol is resolved by now — pick up the real (possibly
+      // dialogue-overridden) color, and reveal bubbles: people are already
+      // visible from Constellations, this just adds the interactive layer.
+      const color = this._fateEvents.getPeopleColor();
+      (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+      for (const mesh of this._bubbleMeshes) mesh.visible = true;
+    } else if (phase === Phase.Stardust) {
+      this._resetAll();
+    }
+  }
 
-    // Kicks off PlanetSeedingVfxSystem's rotate/grow transition — people/
-    // bubbles/fire stay hidden until update() sees it finish (see
-    // _revealedAfterTransition).
-    this._planetSeeding.startFateEventsTransition();
-    this._revealedAfterTransition = false;
+  private _resetAll(): void {
+    this._planetArrived = false;
     for (const group of this._personGroups) group.visible = false;
     for (const mesh of this._bubbleMeshes) mesh.visible = false;
     for (const mesh of this._fireMeshes) mesh.visible = false;
@@ -159,19 +207,17 @@ export class FateEventVfxSystem extends createSystem({}) {
     this._bobAmp.fill(0);
   }
 
-  stop(): void {
-    super.stop();
-    for (const group of this._personGroups) group.visible = false;
-    for (const mesh of this._bubbleMeshes) mesh.visible = false;
-    for (const mesh of this._fireMeshes) mesh.visible = false;
-  }
-
   private _buildPeople(): void {
     const count = this._fateEvents.getPersonCount();
     const positions = this._fateEvents.getSurfacePositions();
     const normals = this._fateEvents.getNormals();
 
-    this._peopleMaterial = makeToonRimFlatMaterial(this._fateEvents.getPeopleColor());
+    // dominantPebbleType isn't known this early (world boot, well before
+    // Pebbles completes) either way — this is just a harmless placeholder
+    // until _onPhaseChange sets the real color on entering Constellations;
+    // people stay hidden until then regardless.
+    const initialDominant = getGlobals(this.world).dominantPebbleType.peek();
+    this._peopleMaterial = makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color);
     this._bobPhase = new Float32Array(count);
     this._bobAmp = new Float32Array(count);
 
@@ -245,12 +291,28 @@ export class FateEventVfxSystem extends createSystem({}) {
   }
 
   update(delta: number, time: number): void {
-    if (!this._revealedAfterTransition && !this._planetSeeding.isFateTransitionActive()) {
-      this._revealedAfterTransition = true;
-      for (const group of this._personGroups) group.visible = true;
-      for (const mesh of this._bubbleMeshes) mesh.visible = true;
+    const phase = getGlobals(this.world).gamePhase.peek();
+
+    if (
+      !this._planetArrived &&
+      PLANET_ARRIVAL_ELIGIBLE_FROM.has(phase) &&
+      !this._planetSeeding.isFateTransitionActive()
+    ) {
+      this._planetArrived = true;
       const showFire = this._fateEvents.getShowFire();
       for (const mesh of this._fireMeshes) mesh.visible = showFire;
+    }
+
+    if (this._planetArrived) {
+      // Progressive during Constellations (tied to how close the player is
+      // to winning); fully revealed for every phase after it — the
+      // constellation must have been won to leave that phase normally, and
+      // a dev-menu jump straight past it should still show everyone.
+      const progress = phase === Phase.Constellations ? this._constellations.getRevealProgress() : 1;
+      const revealCount = Math.floor(progress * this._personGroups.length);
+      for (let i = 0; i < this._personGroups.length; i++) {
+        this._personGroups[i].visible = i < revealCount;
+      }
     }
 
     this.camera.getWorldPosition(this._camWorldPos);

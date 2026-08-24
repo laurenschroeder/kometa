@@ -30,68 +30,16 @@ const OUTLINE_GLSL = `
   float edge    = (1.0 - ndotv) + wobble;
 `;
 
-// Instanced variant — for InstancedMesh (e.g. pebble swarms). instanceMatrix
+// Instanced + per-instance-tinted variant — for InstancedMesh (e.g. pebble
+// swarms), plus an aTint/aTinted attribute pair so individual instances can
+// be pulled toward an arbitrary color (e.g. the Pebbles field coloring each
+// pebble by which type it became, or the permanent comet body tinted by
+// globals.pebbleTint). aTinted=0 reproduces the untinted look exactly; a
+// caller ramps it toward 1 to fade an instance toward aTint. instanceMatrix
 // is auto-declared by three.js for any InstancedMesh (prepended to the
 // vertex shader prefix) but is NOT auto-applied for from-scratch custom
 // shaders (that auto-multiply only happens via #include <instancing_vertex>
 // in built-in ShaderLib templates) — it must be applied manually here.
-export function makeToonRimInstancedMaterial(palette: ToonRimPalette): ShaderMaterial {
-  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
-  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
-
-  const vertexShader = `
-    attribute float aBright;
-    varying   float vBright;
-    varying   vec3  vViewNormal;
-    varying   vec3  vViewDir;
-    varying   vec3  vLocalPos;
-
-    void main() {
-      vBright = aBright;
-      vLocalPos = position;
-      vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
-
-      // Per-instance scale is uniform (x==y==z), so mat3(instanceMatrix)
-      // rotates normals correctly without needing a full inverse-transpose.
-      mat3 instanceNormalMatrix = mat3(instanceMatrix);
-      vViewNormal = normalize(normalMatrix * instanceNormalMatrix * normal);
-      vViewDir    = normalize(-mvPosition.xyz);
-
-      gl_Position = projectionMatrix * mvPosition;
-    }
-  `;
-
-  const fragmentShader = `
-    varying float vBright;
-    varying vec3  vViewNormal;
-    varying vec3  vViewDir;
-    varying vec3  vLocalPos;
-
-    void main() {
-      vec3  n     = normalize(vViewNormal);
-      vec3  v     = normalize(vViewDir);
-      float ndotv = max(0.0, dot(n, v));
-
-      ${OUTLINE_GLSL}
-      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
-
-      vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
-      vec3 col     = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline);
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `;
-
-  return new ShaderMaterial({ vertexShader, fragmentShader, depthWrite: true, transparent: false });
-}
-
-// Instanced + per-instance-tinted variant — same technique as
-// makeToonRimInstancedMaterial above, plus an aTint/aTinted attribute pair
-// so individual instances can be pulled toward an arbitrary color (e.g. the
-// Pebbles field coloring each pebble by which type it became). aTinted=0
-// reproduces the untinted look exactly; a caller ramps it toward 1 to fade
-// an instance toward aTint. A separate factory (rather than adding this to
-// makeToonRimInstancedMaterial) so the shared kPebbleInstMat instance used
-// elsewhere — the persistent comet body — stays completely unaffected.
 export function makeToonRimInstancedTintedMaterial(palette: ToonRimPalette): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;

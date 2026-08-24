@@ -21,17 +21,18 @@ const ATTACK_SECONDS = 0.006;
 // arbitrary number.
 const SPEED_FOR_MAX_BRIGHTNESS = 1.8;
 
-// The full "caught it" chime — lightened/shortened from the original pass
-// per feedback (was [1.0,0.55,0.3,0.18]/[0.45,0.32,0.22,0.15]/[0.12,0.3]).
+// The full "caught it" chime — lightened/shortened per earlier feedback,
+// then pushed higher/more reverberant per a later pass (was
+// [1400,2600]/reverbSend 0.35).
 const CATCH_PROFILE: TwinkleProfile = {
   partialRatios: [1.0, 2.4, 3.76, 5.4],
   partialGains: [0.85, 0.45, 0.22, 0.12],
   partialDecay: [0.3, 0.22, 0.15, 0.1],
-  freqMin: 1400,
-  freqMax: 2600,
+  freqMin: 1900,
+  freqMax: 3400,
   outputGainMin: 0.1,
   outputGainMax: 0.24,
-  reverbSend: 0.35,
+  reverbSend: 0.55,
   maxVoices: 10,
 };
 
@@ -43,15 +44,31 @@ const PICKUP_PROFILE: TwinkleProfile = {
   partialRatios: [1.0, 2.7],
   partialGains: [0.55, 0.22],
   partialDecay: [0.09, 0.06],
-  freqMin: 1700,
-  freqMax: 2500,
+  freqMin: 2200,
+  freqMax: 3200,
   outputGainMin: 0.025,
   outputGainMax: 0.06,
-  reverbSend: 0.18,
+  reverbSend: 0.4,
   maxVoices: 16,
 };
 
-const REVERB_DURATION = 1.3; // seconds
+// Major pentatonic (root, M2, M3, P5, M6), in semitones — every twinkle's
+// fundamental snaps to the nearest degree of this scale (anchored at each
+// profile's own freqMin) so a flurry of catches/pickups always sounds
+// musically related instead of continuously/arbitrarily pitched.
+const PENTATONIC_DEGREES = [0, 2, 4, 7, 9];
+
+// With only 5 scale degrees and a fairly narrow speed range, many
+// catches/pickups land on the exact same note — this layers a continuous
+// detune (in cents, applied AFTER the pentatonic snap so there's still a
+// clear tonal center) driven by how far the catch/pickup happened from the
+// player's head, so same-note events still sound distinguishable from each
+// other rather than repeating identically.
+const DISTANCE_PITCH_CENTS = 160; // +/- range
+const DISTANCE_MIN = 0.25; // meters — near captureDistance/attractRadius scale
+const DISTANCE_MAX = 1.8; // meters — Stardust's own spawnRadiusMax
+
+const REVERB_DURATION = 1.9; // seconds — was 1.3, lusher/longer tail
 const REVERB_DECAY_EXPONENT = 3;
 
 function clamp01(x: number): number {
@@ -60,6 +77,30 @@ function clamp01(x: number): number {
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+// Snaps freq to the nearest note of PENTATONIC_DEGREES, in whichever octave
+// (relative to rootFreq) puts it closest.
+function snapToPentatonic(freq: number, rootFreq: number): number {
+  const semitones = 12 * Math.log2(freq / rootFreq);
+  const octave = Math.floor(semitones / 12);
+  const withinOctave = semitones - octave * 12;
+
+  let bestDegree = PENTATONIC_DEGREES[0];
+  let bestDist = Math.abs(withinOctave - bestDegree);
+  for (const degree of PENTATONIC_DEGREES) {
+    const dist = Math.abs(withinOctave - degree);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestDegree = degree;
+    }
+  }
+  // Also consider the next octave's root (12 semitones up) — the scale
+  // wraps, so a note near the top of this octave may be closer to it.
+  const distToNextRoot = Math.abs(withinOctave - 12);
+  const bestSemitones = distToNextRoot < bestDist ? (octave + 1) * 12 : octave * 12 + bestDegree;
+
+  return rootFreq * Math.pow(2, bestSemitones / 12);
 }
 
 function buildReverbImpulse(context: AudioContext): AudioBuffer {
@@ -93,6 +134,7 @@ export class TwinkleSynth {
   private _convolver!: ConvolverNode;
   private _activeCatchVoices = 0;
   private _activePickupVoices = 0;
+  private _scratchListenerPos = new Vector3();
 
   build(listener: AudioListener, scene: Scene): void {
     this._listener = listener;
@@ -105,6 +147,13 @@ export class TwinkleSynth {
     // positional bus every voice sends a portion of its dry signal into,
     // rather than a convolver per voice.
     this._convolver.connect(listener.gain);
+
+    // Browsers start AudioContexts 'suspended' until a real user gesture
+    // unlocks them — attempt the unlock as early as possible (harmless
+    // no-op once already running). Without this, play() below would just
+    // keep retrying resume() on every call until something finally unlocks
+    // it, which still works but wastes a call each time.
+    context.resume().catch(() => {});
   }
 
   playCatch(position: Vector3, speed: number): void {
@@ -121,9 +170,31 @@ export class TwinkleSynth {
 
   private _play(profile: TwinkleProfile, position: Vector3, speed: number, onDone: () => void): void {
     const context = this._listener.context;
+    if (context.state !== 'running') {
+      // Scheduling nodes now would be pointless AND actively harmful: our
+      // cleanup below runs on a real wall-clock setTimeout, which keeps
+      // ticking even while the context is suspended (frozen at whatever
+      // currentTime it was at) — so the nodes would get torn down before
+      // the context ever wakes up to actually render them, i.e. permanent
+      // silence. Skip this one voice (it's a cosmetic sound, not
+      // gameplay-critical) and keep nudging the context toward unlocking so
+      // the very next call succeeds normally.
+      context.resume().catch(() => {});
+      onDone();
+      return;
+    }
+
     const now = context.currentTime;
     const t = clamp01(speed / SPEED_FOR_MAX_BRIGHTNESS);
-    const baseFreq = lerp(profile.freqMin, profile.freqMax, t);
+    const rawFreq = lerp(profile.freqMin, profile.freqMax, t);
+    const scaleFreq = snapToPentatonic(rawFreq, profile.freqMin);
+
+    this._listener.getWorldPosition(this._scratchListenerPos);
+    const distance = position.distanceTo(this._scratchListenerPos);
+    const distanceT = clamp01((distance - DISTANCE_MIN) / (DISTANCE_MAX - DISTANCE_MIN));
+    const cents = lerp(-DISTANCE_PITCH_CENTS, DISTANCE_PITCH_CENTS, distanceT);
+    const baseFreq = scaleFreq * Math.pow(2, cents / 1200);
+
     const brightness = lerp(0.5, 1.0, t);
     const outputPeak = lerp(profile.outputGainMin, profile.outputGainMax, t);
 

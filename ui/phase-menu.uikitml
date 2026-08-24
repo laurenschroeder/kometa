@@ -112,8 +112,8 @@
   </div>
   <button id="btn-stardust" class="phase-button">Stardust</button>
   <button id="btn-pebbles" class="phase-button">Pebbles</button>
-  <button id="btn-constellations" class="phase-button">Constellations</button>
   <button id="btn-seeding" class="phase-button">Seeding</button>
+  <button id="btn-constellations" class="phase-button">Constellations</button>
   <button id="btn-fate-events" class="phase-button">Fate Events</button>
   <button id="btn-launch" class="phase-button">Launch</button>
   <button id="btn-finale" class="phase-button">Finale</button>

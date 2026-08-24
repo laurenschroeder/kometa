@@ -27,6 +27,16 @@ export interface KometaGlobals {
   // Chapter 2.5 — set once by ConstellationsSystem, nothing downstream reads
   // it yet beyond that phase's own notification.
   celestialSymbol: Signal<string | null>;
+  // Weighted RGB blend of Chapter 2's captured pebble-type proportions (see
+  // PEBBLE_TYPES in pebble-type.ts) — set once by PebbleWeavingSystem's win
+  // condition, alongside dominantPebbleType. Read by
+  // PebbleCometPresentationSystem to tint the permanent comet body from
+  // Seeding onward, so the colors gathered in Chapter 2 persist as part of
+  // the comet's look for the rest of the game instead of disappearing when
+  // Chapter 2 ends. Default is an even three-way blend of all three
+  // PEBBLE_TYPES colors — only relevant if the body becomes visible before
+  // Chapter 2 ever completes (e.g. a dev-menu jump straight to Seeding).
+  pebbleTint: Signal<[number, number, number]>;
 }
 
 export function bootstrapGlobals(world: World): KometaGlobals {
@@ -38,6 +48,7 @@ export function bootstrapGlobals(world: World): KometaGlobals {
   globals.gameStarted = signal(false);
   globals.dominantPebbleType = signal(0);
   globals.celestialSymbol = signal(null);
+  globals.pebbleTint = signal([0.567, 0.573, 0.56]);
   return globals;
 }
 

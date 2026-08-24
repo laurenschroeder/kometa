@@ -23,8 +23,8 @@ const MENU_HOLD_SECONDS = 1.5;
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],
   ['btn-pebbles', Phase.Pebbles],
-  ['btn-constellations', Phase.Constellations],
   ['btn-seeding', Phase.Seeding],
+  ['btn-constellations', Phase.Constellations],
   ['btn-fate-events', Phase.FateEvents],
   ['btn-launch', Phase.Launch],
   ['btn-finale', Phase.Finale],

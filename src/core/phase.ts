@@ -14,8 +14,8 @@ export enum Phase {
 export const PHASE_ORDER: readonly Phase[] = [
   Phase.Stardust,
   Phase.Pebbles,
-  Phase.Constellations,
   Phase.Seeding,
+  Phase.Constellations,
   Phase.FateEvents,
   Phase.Launch,
   Phase.Finale,

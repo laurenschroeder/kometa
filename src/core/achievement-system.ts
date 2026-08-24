@@ -13,7 +13,7 @@ import { Phase } from './phase.js';
 const PHASE_COMPLETION_ACHIEVEMENT: Partial<Record<Phase, string>> = {
   [Phase.Pebbles]: 'first-light',
   [Phase.Seeding]: 'pebble-pusher',
-  [Phase.FateEvents]: 'world-seeder',
+  [Phase.Constellations]: 'world-seeder',
   [Phase.Launch]: 'brace-for-impact',
   [Phase.Finale]: 'among-the-stars',
 };

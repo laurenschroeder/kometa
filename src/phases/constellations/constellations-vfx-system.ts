@@ -9,6 +9,7 @@ import {
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
+import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { ConstellationsSystem, N_TYPES } from './constellations-system.js';
 
@@ -26,11 +27,22 @@ const STAR_SIZE = 0.05;
 // PlanetSeedingVfxSystem, the winning constellation's stars persist as
 // permanent sky scenery once a winner is set, so this registers always-on
 // and self-gates visibility via gamePhase. Resets when a fresh loop
-// re-enters Stardust.
+// re-enters Stardust. Stars/dots are now anchored around the big Fate
+// Events planet (see constellation-path.ts's placeConstellationAnchorsAroundPlanet)
+// rather than free-floating in front of the player, so — same reasoning as
+// FateEventVfxSystem's own _planetArrived gate — they stay hidden until
+// PlanetSeedingVfxSystem's rotate/grow transition actually finishes
+// bringing that planet into place; revealing them at their final
+// planet-relative position while the planet is still mid-transition would
+// show stars floating where the planet hasn't visually arrived yet.
 export class ConstellationsVfxSystem extends createSystem({}) {
   private _constellations!: ConstellationsSystem;
+  private _planetSeeding!: PlanetSeedingVfxSystem;
   private _starMats: ShaderMaterial[] = [];
   private _dotMat!: ShaderMaterial;
+  // Reset to false each time Constellations begins (see _onPhaseChange),
+  // flips true once update() sees the planet-growth transition finish.
+  private _revealed = false;
 
   // All indexed [type][slot].
   private _starPoints: Points[][] = [];
@@ -40,6 +52,9 @@ export class ConstellationsVfxSystem extends createSystem({}) {
 
   init(): void {
     this._constellations = this.world.getSystem(ConstellationsSystem)!;
+    // PlanetSeedingVfxSystem must be registered before this system (see
+    // index.ts) so it already exists when this init() runs.
+    this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
     this._dotMat = makeSparkleMaterial({ color: DOT_COLOR });
 
     for (let type = 0; type < N_TYPES; type++) {
@@ -119,7 +134,19 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   // before any Constellations transition — safe to read fresh here, same
   // reasoning as ConstellationsSystem.play().
   private _onPhaseChange(phase: Phase): void {
-    const active = phase === Phase.Constellations;
+    if (phase === Phase.Constellations) {
+      // Reset here (synchronous, before ConstellationsSystem.play() — which
+      // fires later in the same GameDirector transition — actually kicks
+      // off the planet-growth transition) so update()'s later-frame check
+      // can't see a stale "not active" false positive from a previous run.
+      this._revealed = false;
+    }
+    this._applyVisibility(phase);
+    if (phase === Phase.Stardust) this._resetAll();
+  }
+
+  private _applyVisibility(phase: Phase): void {
+    const active = phase === Phase.Constellations && this._revealed;
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
     const winner = this._constellations.getWinner();
 
@@ -130,8 +157,6 @@ export class ConstellationsVfxSystem extends createSystem({}) {
         this._dotPoints[type][slot].visible = isActiveType && active;
       }
     }
-
-    if (phase === Phase.Stardust) this._resetAll();
   }
 
   private _resetAll(): void {
@@ -146,6 +171,12 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   update(_delta: number, time: number): void {
     for (const mat of this._starMats) mat.uniforms.uTime.value = time;
     this._dotMat.uniforms.uTime.value = time;
+
+    const phase = getGlobals(this.world).gamePhase.peek();
+    if (!this._revealed && phase === Phase.Constellations && !this._planetSeeding.isFateTransitionActive()) {
+      this._revealed = true;
+      this._applyVisibility(phase);
+    }
 
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
     const defs = this._constellations.getDefs(dominant);

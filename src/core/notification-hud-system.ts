@@ -139,6 +139,15 @@ export class NotificationHudSystem extends createSystem({
     );
   }
 
+  // Called by EndRunMenuSystem's "Main Menu" choice, alongside
+  // GameDirectorSystem.returnToMenu() — without this, _maybeTriggerBoot's
+  // guard (meant to stop the very first boot's blurb from double-firing)
+  // would also permanently block Stardust's intro blurb from ever playing
+  // again on a second run started fresh from the Start Menu.
+  resetBootTrigger(): void {
+    this._bootTriggered = false;
+  }
+
   private _maybeTriggerBoot(): void {
     if (this._bootTriggered) return;
     if (!this._boxEl || !this._textEl) return;
