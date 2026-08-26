@@ -1,0 +1,40 @@
+name: Build & Deploy to VIVERSE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual triggers
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # Viverse CLI requires Node >= 22.15.0
+          cache: 'npm'
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Install VIVERSE CLI
+        run: npm install -g @viverse/cli
+
+      - name: Authenticate with VIVERSE
+        run: viverse-cli auth login -e "$VVS_EMAIL" -p "$VVS_PASSWORD"
+        env:
+          VVS_EMAIL: ${{ secrets.VVS_EMAIL }}
+          VVS_PASSWORD: ${{ secrets.VVS_PASSWORD }}
+
+      - name: Publish to VIVERSE
+        run: viverse-cli app publish ./dist --app-id "$VVS_APP_ID"
+        env:
+          VVS_APP_ID: ${{ secrets.VVS_APP_ID }}
