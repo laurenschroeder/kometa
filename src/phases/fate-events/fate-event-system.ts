@@ -26,6 +26,20 @@ const LEAVE_GRACE_SECONDS = 0.4;
 // ambient "big fire" effect (see fate-event-vfx-system.ts).
 const VOLATILE_GASSES_TYPE = 2;
 
+// Lightweight "society" differentiation per dominant pebble type — same
+// index order as PEBBLE_TYPES/dominantPebbleType (souls, organics, gasses).
+// Read live from getVisiblePeopleCount()/getBobFrequencyMultiplier() below
+// rather than cached at play() time, since people start appearing already
+// during Constellations (before this system's own play() ever runs) and
+// dominantPebbleType is already final by then — caching would make the
+// count jump (and some already-visible figures vanish) right as FateEvents
+// begins. Color tint already varies per type via getPeopleColor().
+const VISIBLE_PEOPLE_BY_TYPE = [9, N_PEOPLE, 6]; // souls, organics, gasses
+const BOB_FREQUENCY_MULT_BY_TYPE = [1, 1.25, 0.6]; // souls, organics, gasses
+// Fraction of the type's visible people that must be visited to complete
+// the phase early — otherwise it falls back to the timeout (see index.ts).
+const VISIT_FRACTION_TO_COMPLETE = 0.5;
+
 // Gameplay for Fate Events: a big planet appears near the player, populated
 // with N_PEOPLE placeholder figures scattered across its near-facing surface
 // (see sphere-scatter.ts — normals double as each figure's "up" direction).
@@ -37,8 +51,9 @@ const VOLATILE_GASSES_TYPE = 2;
 // an ambient "big fire" effect (globals.dominantPebbleType). Pure simulation
 // here: no mesh/entity creation happens in this file (see
 // FateEventVfxSystem), only surface layout math and proximity/dialogue
-// state. This phase has no win condition — it ends purely by timeout (see
-// index.ts), same as the empty stub it replaces.
+// state. Visiting at least half of the type's visible people (see
+// VISIT_FRACTION_TO_COMPLETE) completes the phase early; otherwise it falls
+// back to the timeout (see index.ts).
 export class FateEventSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
@@ -49,6 +64,8 @@ export class FateEventSystem extends createSystem({
   private _awayTimer!: Float32Array;
   private _lineIndex!: Uint8Array;
   private _lineTimer!: Float32Array;
+  private _visited!: Uint8Array;
+  private _visitedCount = 0;
 
   private _dialogue!: FateDialogueEntry;
   private _color!: [number, number, number];
@@ -73,6 +90,7 @@ export class FateEventSystem extends createSystem({
     this._awayTimer = new Float32Array(N_PEOPLE);
     this._lineIndex = new Uint8Array(N_PEOPLE);
     this._lineTimer = new Float32Array(N_PEOPLE);
+    this._visited = new Uint8Array(N_PEOPLE);
 
     this._dialogue = getFateDialogue(null);
     this._color = PEBBLE_TYPES[0].color;
@@ -95,6 +113,8 @@ export class FateEventSystem extends createSystem({
     this._awayTimer.fill(0);
     this._lineIndex.fill(0);
     this._lineTimer.fill(0);
+    this._visited.fill(0);
+    this._visitedCount = 0;
 
     // Safety net: ConstellationsSystem.play() is the normal trigger for the
     // ring planet's rotate/grow transition (it now runs before this phase —
@@ -106,17 +126,26 @@ export class FateEventSystem extends createSystem({
   }
 
   update(delta: number): void {
+    // Only the type's own visible figures (see VISIBLE_PEOPLE_BY_TYPE) are
+    // reachable — the rest stay hidden scenery (see fate-event-vfx-system.ts's
+    // matching revealCount cap), so they never activate/count as visited.
+    const visibleCount = this.getVisiblePeopleCount();
+
     for (const entity of this.queries.hands.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       this._scratchHandPos.fromArray(posView);
 
-      for (let i = 0; i < N_PEOPLE; i++) {
+      for (let i = 0; i < visibleCount; i++) {
         const dx = this._surfacePositions[i * 3] - this._scratchHandPos.x;
         const dy = this._surfacePositions[i * 3 + 1] - this._scratchHandPos.y;
         const dz = this._surfacePositions[i * 3 + 2] - this._scratchHandPos.z;
         const near = dx * dx + dy * dy + dz * dz <= PROXIMITY_RADIUS * PROXIMITY_RADIUS;
 
         if (near) {
+          if (!this._visited[i]) {
+            this._visited[i] = 1;
+            this._visitedCount++;
+          }
           if (!this._active[i]) {
             this._active[i] = 1;
             this._lineIndex[i] = 0;
@@ -134,8 +163,12 @@ export class FateEventSystem extends createSystem({
       }
     }
 
+    if (this._visitedCount >= Math.ceil(visibleCount * VISIT_FRACTION_TO_COMPLETE)) {
+      getGlobals(this.world).phaseComplete.value = true;
+    }
+
     const lineCount = this._dialogue.lines.length;
-    for (let i = 0; i < N_PEOPLE; i++) {
+    for (let i = 0; i < visibleCount; i++) {
       if (!this._active[i]) continue;
       this._lineTimer[i] += delta;
       if (this._lineTimer[i] >= LINE_CYCLE_SECONDS) {
@@ -176,5 +209,12 @@ export class FateEventSystem extends createSystem({
   }
   getShowFire(): boolean {
     return this._showFire;
+  }
+  // Live (not cached) — see VISIBLE_PEOPLE_BY_TYPE's comment for why.
+  getVisiblePeopleCount(): number {
+    return VISIBLE_PEOPLE_BY_TYPE[getGlobals(this.world).dominantPebbleType.peek()];
+  }
+  getBobFrequencyMultiplier(): number {
+    return BOB_FREQUENCY_MULT_BY_TYPE[getGlobals(this.world).dominantPebbleType.peek()];
   }
 }

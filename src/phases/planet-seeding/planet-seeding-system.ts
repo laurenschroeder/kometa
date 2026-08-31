@@ -2,32 +2,37 @@ import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
-import { placeDots, placePlanets } from '../../vfx/geometry/weave-path.js';
 import { StardustSystem } from '../stardust/stardust-system.js';
 
-// Dropped from 9 to 6 (about a third fewer) and the ring pulled in to
-// match (was 1.3) — a smaller loop to walk, not just a sparser one at the
-// old radius. Roughly preserves the old inter-planet spacing rather than
-// leaving 9-planet-sized gaps between only 6 planets.
-export const N_PLANETS = 6;
-export const N_DOTS = 120;
-// Halved again (was 0.9).
-export const RING_RADIUS = 0.45;
-export const RING_CENTER_Y = 1.2;
-export const WEAVE_AMPLITUDE = 0.3;
+// Kept at 1 (not deleted) so planet-growth-pool.ts — which sizes its pool
+// off N_PLANETS and indexes every call by planet — needs zero internal
+// changes now that Seeding only ever has one planet; every call site here
+// just always passes index 0. See planet-fate-transition.ts/
+// planet-seeding-vfx-system.ts for the same convention.
+export const N_PLANETS = 1;
+export const N_MOONS = 6;
 export const PLANET_RADIUS = 0.11;
-const DOT_TOUCH_RADIUS = 0.09;
-// How close a hand must be to a planet for that planet to "accept" dust —
-// deliberately larger than DOT_TOUCH_RADIUS (a general presence check, not
-// a precise touch) but well under half the ~0.9m gap between neighboring
-// planets, so mostly one planet is "near" at a time as the player walks
-// the loop rather than several at once.
-const NEAR_PLANET_RADIUS = 0.4;
-// Minimum time between two dust landings on the SAME planet, only ticking
-// down while a hand is near it — this is what makes seeding a slow,
-// visible-per-planet trickle keyed to where the player actually is,
-// instead of a global timer dumping dust everywhere at once.
-const LAUNCH_COOLDOWN = 0.35;
+const PLANET_HEIGHT = 1.2;
+// Fixed — the single seed target sits right where the old ring's center
+// used to be, so the player's spatial relationship to Seeding ("a small
+// system floating around you") is unchanged even though it's now one body
+// with orbiting moons instead of a ring of six.
+const PLANET_POSITION: readonly [number, number, number] = [0, PLANET_HEIGHT, 0];
+
+// Moons are grouped into 3 tilted rings of 2, radii/tilts staggered so the
+// whole thing reads as a small solar system rather than one flat disc.
+const MOONS_PER_RING = 2;
+const MOON_RING_RADII = [0.22, 0.3, 0.38];
+const MOON_RING_TILT_DEG = [-35, 0, 35];
+const MOON_BASE_ANGULAR_SPEED = 0.5; // rad/s, alternated +/- and scaled per ring below
+// How close a hand must get to a moon to "bump" it.
+const MOON_BUMP_RADIUS = 0.09;
+// Cooldown per moon after a bump — long enough that a lingering hand
+// doesn't refire every frame, short enough that swinging between a couple
+// of moons still feels responsive.
+const MOON_BUMP_COOLDOWN = 0.6;
+// How much captured stardust a single bump releases toward the planet.
+const BURST_SIZE = 4;
 
 interface QueueItem {
   particleIndex: number;
@@ -35,177 +40,199 @@ interface QueueItem {
 
 export interface LaunchEvent {
   particleIndex: number;
-  targetPlanet: number;
 }
 
 // Gameplay for Chapter 3: the stardust carried in from Chapter 1 (still
 // riding the hand trails — see StardustVfxSystem's gamePhase-driven
-// visibility) gets "spent" here, migrating onto 9 ring-arranged planets —
-// one planet's queue at a time, only while a hand is near THAT planet, at
-// a cooldown-limited trickle (see PlanetSeedingVfxSystem for the actual
-// flight/landing animation and stain-growth effect). The player's own task
-// this phase is tracing a dotted line that weaves over/under the planets
-// by touch — a full loop traced is the win condition. Pure simulation
-// here: no mesh or entity creation happens in this file (see
-// PlanetSeedingVfxSystem), only ring/dot layout math, touch-detection, and
-// the per-planet migration queues/cooldowns.
+// visibility) gets "spent" here onto a single planet. Moons orbit the
+// planet (see comet-autopilot-system.ts's orbit math for the same
+// arbitrary-plane parametric-circle formula this reuses) and act as
+// "valves": bumping one launches a burst of the player's captured stardust
+// toward the planet (see PlanetSeedingVfxSystem for the actual flight/
+// landing animation and stain-growth effect). The phase completes once all
+// captured stardust has been launched. Pure simulation here: no mesh or
+// entity creation happens in this file (see PlanetSeedingVfxSystem), only
+// planet/moon layout math, bump-detection, and the stardust queue.
 export class PlanetSeedingSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
   private _stardust!: StardustSystem;
 
-  private _planetPositions!: Float32Array;
-  private _dotPositions!: Float32Array;
-  private _dotTouched!: Uint8Array;
-  private _touchedCount = 0;
+  private _planetPositionArray!: Float32Array;
 
-  // One migration queue per planet, built fresh every play() from whatever
-  // stardust is currently captured (round-robin assigned across planets for
-  // even distribution) — small (~N_STARDUST/9 each), rebuilt once per
-  // phase entry, not a per-frame cost.
-  private _planetQueues: QueueItem[][] = [];
-  private _planetCooldown!: Float32Array;
-  private _dustPerPlanet!: Uint8Array;
+  // Per-moon orbit parameters, precomputed once in init() — a fixed
+  // (radius, U, W, angularSpeed) tuple per moon, U/W being an orthonormal
+  // basis spanning that moon's (possibly tilted) orbital plane. Advanced
+  // with pure scalar math every frame, no allocation.
+  private _moonRadius!: Float32Array;
+  private _moonU!: Float32Array; // N_MOONS*3
+  private _moonW!: Float32Array; // N_MOONS*3
+  private _moonAngularSpeed!: Float32Array;
+  private _moonAngle!: Float32Array;
+  private _moonPositions!: Float32Array; // N_MOONS*3, live
+  private _moonCooldown!: Float32Array;
+
+  // Single migration queue, rebuilt fresh every play() from whatever
+  // stardust is currently captured — with only one planet there's no need
+  // to distribute across targets, everything just goes to the one queue.
+  private _stardustQueue: QueueItem[] = [];
   private _pendingCount = 0;
+  // Fixed snapshot of the queue's starting size, captured once in play() —
+  // unlike _pendingCount (which drains toward 0), this is the denominator
+  // PlanetSeedingVfxSystem uses so the stain's coverage reaches exactly 1.0
+  // once everything captured has landed.
+  private _totalStardust = 0;
 
-  // Per-frame scratch — which planets a hand is currently near. Reset each
-  // update(), not reallocated.
-  private _nearPlanet!: Uint8Array;
-
-  // This frame's drained launch events. Reassigned (not mutated in place)
-  // only on frames where at least one launch actually happens — during
-  // steady-state play this allocates nothing most frames; the one
-  // exception is stop()'s force-drain, a single one-time per-phase-
-  // transition burst, not a sustained per-frame cost.
+  // This frame's drained launch/bump events. Reassigned (not mutated in
+  // place) only on frames where something actually happens — steady-state
+  // play allocates nothing most frames; the one exception is stop()'s
+  // force-drain, a single one-time per-phase-transition burst.
   private _launchBatch: LaunchEvent[] = [];
+  private _bumpBatch: number[] = [];
 
   private _scratchHandPos!: Vector3;
 
   init(): void {
     this._stardust = this.world.getSystem(StardustSystem)!;
 
-    this._planetPositions = placePlanets(N_PLANETS, RING_RADIUS, RING_CENTER_Y);
-    this._dotPositions = placeDots(N_DOTS, {
-      ringRadius: RING_RADIUS,
-      centerY: RING_CENTER_Y,
-      amplitude: WEAVE_AMPLITUDE,
-      planetCount: N_PLANETS,
-    });
-    this._dotTouched = new Uint8Array(N_DOTS);
+    this._planetPositionArray = new Float32Array(PLANET_POSITION);
 
-    this._planetQueues = Array.from({ length: N_PLANETS }, () => []);
-    this._planetCooldown = new Float32Array(N_PLANETS);
-    this._dustPerPlanet = new Uint8Array(N_PLANETS);
-    this._nearPlanet = new Uint8Array(N_PLANETS);
+    this._moonRadius = new Float32Array(N_MOONS);
+    this._moonU = new Float32Array(N_MOONS * 3);
+    this._moonW = new Float32Array(N_MOONS * 3);
+    this._moonAngularSpeed = new Float32Array(N_MOONS);
+    this._moonAngle = new Float32Array(N_MOONS);
+    this._moonPositions = new Float32Array(N_MOONS * 3);
+    this._moonCooldown = new Float32Array(N_MOONS);
+
+    const u = new Vector3();
+    const w = new Vector3();
+    for (let i = 0; i < N_MOONS; i++) {
+      const ring = Math.floor(i / MOONS_PER_RING);
+      const azimuth = (i / N_MOONS) * Math.PI * 2;
+      const tilt = (MOON_RING_TILT_DEG[ring] * Math.PI) / 180;
+
+      u.set(Math.cos(azimuth), 0, Math.sin(azimuth));
+      w.set(0, 1, 0).applyAxisAngle(u, tilt);
+
+      this._moonU[i * 3] = u.x;
+      this._moonU[i * 3 + 1] = u.y;
+      this._moonU[i * 3 + 2] = u.z;
+      this._moonW[i * 3] = w.x;
+      this._moonW[i * 3 + 1] = w.y;
+      this._moonW[i * 3 + 2] = w.z;
+      this._moonRadius[i] = MOON_RING_RADII[ring];
+      this._moonAngularSpeed[i] = MOON_BASE_ANGULAR_SPEED * (0.8 + ring * 0.2) * (i % 2 === 0 ? 1 : -1);
+    }
 
     this._scratchHandPos = new Vector3();
   }
 
-  // Rebuilds the per-planet migration queues from whatever stardust is
-  // currently captured, and resets the dotted-line's touched state — a
-  // fresh Seeding attempt every time this phase is (re-)entered.
+  // Rebuilds the stardust queue from whatever is currently captured, resets
+  // moon orbit angles/cooldowns — a fresh Seeding attempt every time this
+  // phase is (re-)entered.
   play(): void {
     super.play();
-    this._dotTouched.fill(0);
-    this._touchedCount = 0;
-    this._planetCooldown.fill(0);
-    for (const queue of this._planetQueues) queue.length = 0;
+    this._moonAngle.fill(0);
+    this._moonCooldown.fill(0);
+    this._stardustQueue.length = 0;
 
     const captured = this._stardust.getCapturedIndices();
-    let q = 0;
-    for (let i = 0; i < captured.length; i++, q++) {
-      this._planetQueues[q % N_PLANETS].push({ particleIndex: captured[i] });
+    for (let i = 0; i < captured.length; i++) {
+      this._stardustQueue.push({ particleIndex: captured[i] });
     }
-    for (let p = 0; p < N_PLANETS; p++) this._dustPerPlanet[p] = this._planetQueues[p].length;
-    this._pendingCount = q;
+    this._pendingCount = this._stardustQueue.length;
+    this._totalStardust = this._pendingCount;
   }
 
-  // Force-drains every planet's remaining queue in one synchronous pass, so
-  // no captured stardust is ever orphaned mid-trail if the phase ends (by
-  // timeout or win) before the player has visited every planet.
-  // GameDirectorSystem calls stop() at priority 0, before any priority-30+
-  // system runs that same frame, so this is safe/deterministic.
+  // Force-drains the remaining queue in one synchronous pass, so no
+  // captured stardust is ever orphaned mid-trail if the phase ends (by
+  // timeout or win) before it's all been spent. GameDirectorSystem calls
+  // stop() at priority 0, before any priority-30+ system runs that same
+  // frame, so this is safe/deterministic.
   stop(): void {
     super.stop();
     if (this._pendingCount === 0) return;
-    for (let p = 0; p < N_PLANETS; p++) {
-      const queue = this._planetQueues[p];
-      while (queue.length > 0) this._launchFrom(p, queue.pop()!);
-    }
+    while (this._stardustQueue.length > 0) this._launchFrom(this._stardustQueue.pop()!);
     this._pendingCount = 0;
   }
 
   update(delta: number): void {
-    this._nearPlanet.fill(0);
+    for (let i = 0; i < N_MOONS; i++) {
+      this._moonAngle[i] += this._moonAngularSpeed[i] * delta;
+      const cos = Math.cos(this._moonAngle[i]);
+      const sin = Math.sin(this._moonAngle[i]);
+      const r = this._moonRadius[i];
+      this._moonPositions[i * 3] =
+        PLANET_POSITION[0] + r * (cos * this._moonU[i * 3] + sin * this._moonW[i * 3]);
+      this._moonPositions[i * 3 + 1] =
+        PLANET_POSITION[1] + r * (cos * this._moonU[i * 3 + 1] + sin * this._moonW[i * 3 + 1]);
+      this._moonPositions[i * 3 + 2] =
+        PLANET_POSITION[2] + r * (cos * this._moonU[i * 3 + 2] + sin * this._moonW[i * 3 + 2]);
 
-    for (const entity of this.queries.hands.entities) {
-      const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
-      this._scratchHandPos.fromArray(posView);
-
-      for (let d = 0; d < N_DOTS; d++) {
-        if (this._dotTouched[d]) continue;
-        const dx = this._dotPositions[d * 3] - this._scratchHandPos.x;
-        const dy = this._dotPositions[d * 3 + 1] - this._scratchHandPos.y;
-        const dz = this._dotPositions[d * 3 + 2] - this._scratchHandPos.z;
-        if (dx * dx + dy * dy + dz * dz <= DOT_TOUCH_RADIUS * DOT_TOUCH_RADIUS) {
-          this._dotTouched[d] = 1;
-          this._touchedCount++;
-        }
+      if (this._moonCooldown[i] > 0) {
+        this._moonCooldown[i] = Math.max(0, this._moonCooldown[i] - delta);
       }
-
-      for (let p = 0; p < N_PLANETS; p++) {
-        if (this._nearPlanet[p]) continue;
-        const dx = this._planetPositions[p * 3] - this._scratchHandPos.x;
-        const dy = this._planetPositions[p * 3 + 1] - this._scratchHandPos.y;
-        const dz = this._planetPositions[p * 3 + 2] - this._scratchHandPos.z;
-        if (dx * dx + dy * dy + dz * dz <= NEAR_PLANET_RADIUS * NEAR_PLANET_RADIUS) {
-          this._nearPlanet[p] = 1;
-        }
-      }
-    }
-
-    if (this._touchedCount >= N_DOTS) {
-      getGlobals(this.world).phaseComplete.value = true;
     }
 
     if (this._pendingCount > 0) {
-      for (let p = 0; p < N_PLANETS; p++) {
-        if (this._planetCooldown[p] > 0) {
-          this._planetCooldown[p] = Math.max(0, this._planetCooldown[p] - delta);
+      outer: for (const entity of this.queries.hands.entities) {
+        const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
+        this._scratchHandPos.fromArray(posView);
+
+        for (let i = 0; i < N_MOONS; i++) {
+          if (this._moonCooldown[i] > 0) continue;
+          const dx = this._moonPositions[i * 3] - this._scratchHandPos.x;
+          const dy = this._moonPositions[i * 3 + 1] - this._scratchHandPos.y;
+          const dz = this._moonPositions[i * 3 + 2] - this._scratchHandPos.z;
+          if (dx * dx + dy * dy + dz * dz <= MOON_BUMP_RADIUS * MOON_BUMP_RADIUS) {
+            this._bumpMoon(i);
+            if (this._pendingCount === 0) break outer;
+          }
         }
-        if (!this._nearPlanet[p] || this._planetCooldown[p] > 0) continue;
-        const queue = this._planetQueues[p];
-        if (queue.length === 0) continue;
-        this._launchFrom(p, queue.pop()!);
-        this._planetCooldown[p] = LAUNCH_COOLDOWN;
-        this._pendingCount--;
       }
+    }
+
+    if (this._pendingCount === 0) {
+      getGlobals(this.world).phaseComplete.value = true;
     }
   }
 
-  private _launchFrom(planet: number, item: QueueItem): void {
+  private _bumpMoon(moon: number): void {
+    const count = Math.min(BURST_SIZE, this._stardustQueue.length);
+    for (let k = 0; k < count; k++) this._launchFrom(this._stardustQueue.pop()!);
+    this._pendingCount -= count;
+    this._moonCooldown[moon] = MOON_BUMP_COOLDOWN;
+    this._bumpBatch.push(moon);
+  }
+
+  private _launchFrom(item: QueueItem): void {
     this._stardust.releaseCaptured(item.particleIndex);
-    this._launchBatch.push({ particleIndex: item.particleIndex, targetPlanet: planet });
+    this._launchBatch.push({ particleIndex: item.particleIndex });
   }
 
   // Read-only accessors for PlanetSeedingVfxSystem — callers must not mutate.
   getPlanetPositions(): Float32Array {
-    return this._planetPositions;
+    return this._planetPositionArray;
   }
-  getDotPositions(): Float32Array {
-    return this._dotPositions;
+  getMoonPositions(): Float32Array {
+    return this._moonPositions;
   }
-  getDotTouched(): Uint8Array {
-    return this._dotTouched;
-  }
-  getDustPerPlanet(): Uint8Array {
-    return this._dustPerPlanet;
+  getTotalStardust(): number {
+    return this._totalStardust;
   }
   // Returns this frame's accumulated launch events and clears the batch.
   drainLaunchEvents(): readonly LaunchEvent[] {
     if (this._launchBatch.length === 0) return this._launchBatch;
     const events = this._launchBatch;
     this._launchBatch = [];
+    return events;
+  }
+  // Returns this frame's bumped-moon indices and clears the batch.
+  drainBumpEvents(): readonly number[] {
+    if (this._bumpBatch.length === 0) return this._bumpBatch;
+    const events = this._bumpBatch;
+    this._bumpBatch = [];
     return events;
   }
 }

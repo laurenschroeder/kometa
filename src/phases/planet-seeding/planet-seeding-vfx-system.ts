@@ -25,58 +25,40 @@ import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { makeAtmosphereGlowMaterial } from '../../vfx/shaders/atmosphere-glow-material.js';
 import { makePlanetStainMaterial } from '../../vfx/shaders/planet-stain-material.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
+import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { StardustSystem } from '../stardust/stardust-system.js';
 import { PlanetFateTransition } from './planet-fate-transition.js';
 import { PlanetGrowthPool } from './planet-growth-pool.js';
-import { N_DOTS, N_PLANETS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
+import { N_MOONS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
 
-const DOT_COLOR: [number, number, number] = [0.65, 0.85, 1.0];
 const DUST_COLOR: [number, number, number] = [1.0, 0.96, 0.82];
-const DOT_SIZE = 0.035;
 const DUST_SIZE = 0.03;
 const FLIGHT_DURATION = 0.6;
 const MAX_INFLIGHT = 16;
 const COVERAGE_EASE_RATE = 2.5;
 const BASE_COLOR: [number, number, number] = [0.02, 0.03, 0.05];
 const ATMOSPHERE_SCALE = PLANET_RADIUS * 1.35;
-// Minimum coverage for a planet to count as "seeded" when picking which one
-// becomes the Fate Events planet — below this (including a dev-menu jump
-// straight to Fate Events, which skips Seeding's gameplay entirely and
-// leaves every planet at 0), fall back to a random pick instead.
-const MIN_COVERAGE_FOR_SELECTION = 0.05;
 
-// Planets are Chapter 3's own reveal — they shouldn't be visible while the
-// player is still gathering stardust/pebbles, only from Seeding onward
-// (same "hasn't formed yet" treatment PebbleCometPresentationSystem gives
-// the comet body itself). Constellations now comes right after Seeding (see
-// phase.ts's PHASE_ORDER) and is staged around the same planet as it grows
-// into the Fate Events planet, so it must stay in the visible set, not the
-// hidden one.
+// The planet/moons are Chapter 3's own reveal — they shouldn't be visible
+// while the player is still gathering stardust/pebbles, only from Seeding
+// onward (same "hasn't formed yet" treatment PebbleCometPresentationSystem
+// gives the comet body itself).
 const PLANETS_HIDDEN_DURING = new Set<Phase>([Phase.Stardust, Phase.Pebbles]);
 
-// 9 distinct hues spread across the wheel — "9 different worlds coming
-// alive" rather than one flat seeded color repeated everywhere.
-const STAIN_PALETTE: [number, number, number][] = Array.from({ length: N_PLANETS }, (_, i) =>
-  hslToRgb(i / N_PLANETS, 0.65, 0.55),
-);
+const MOON_VISUAL_RADIUS = 0.035;
+const MOON_FLASH_SCALE = 1.6; // punch multiplier on bump, decays back to 1
+const MOON_FLASH_DECAY_RATE = 9; // 1/s exponential decay
+const MOON_FADE_EASE_RATE = 3; // 1/s, easing the fade-scale to 0 once the Fate transition starts
 
-function hslToRgb(h: number, s: number, l: number): [number, number, number] {
-  const a = s * Math.min(l, 1 - l);
-  const f = (n: number) => {
-    const k = (n + h * 12) % 12;
-    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-  };
-  return [f(0), f(8), f(4)];
-}
-
-// Renders PlanetSeedingSystem's simulation state: 9 persistent planet
-// meshes that grow a colored "seeded" stain as stardust lands on them, the
-// dotted weave-line's touch markers (Seeding-only), and the in-flight dust
-// motes migrating from a hand's trail onto their assigned planet. Not
-// GameDirector-managed — like PebbleCometPresentationSystem, planets are
-// meant to persist as permanent scenery from Seeding onward, so this system
-// registers always-on and self-gates only the dot markers' visibility via
-// gamePhase. Coverage/dot state resets when a fresh loop re-enters Stardust.
+// Renders PlanetSeedingSystem's simulation state: the single planet that
+// grows a colored "seeded" stain as stardust lands on it, the orbiting
+// moons (bumping one triggers a burst of in-flight dust motes toward the
+// planet — see _updateMoons()), and the flight/landing animation itself.
+// Not GameDirector-managed — like PebbleCometPresentationSystem, the planet
+// is meant to persist as permanent scenery from Seeding onward, so this
+// system registers always-on and self-gates via gamePhase. Coverage/moon
+// state resets when a fresh loop re-enters Stardust.
 export class PlanetSeedingVfxSystem extends createSystem({
   hands: { required: [CometBody, CometTrail, HandAnchor] },
 }) {
@@ -85,36 +67,44 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _trailSystem!: CometTrailSystem;
   private _handEntity: Entity | null = null;
 
-  private _planetMeshes: Mesh[] = [];
-  private _planetMaterials: ShaderMaterial[] = [];
-  private _planetEntities: Entity[] = [];
-  private _coverage!: Float32Array;
-  private _coverageTarget!: Float32Array;
-  private _stainCenter!: Float32Array; // N_PLANETS*3, local-space unit direction
-  private _stainSet!: Uint8Array;
-  private _planetsVisible = false;
+  private _planetMesh!: Mesh;
+  private _planetMaterial!: ShaderMaterial;
+  private _planetEntity!: Entity;
+  private _coverage = 0;
+  private _coverageTarget = 0;
+  private _stainCenter = new Vector3(0, 1, 0);
+  private _stainSet = false;
 
   // Class-specific seeding flourishes (blue=hearts, green=growth, red=
   // atmosphere) — see planet-growth-pool.ts/heart-burst-pool.ts and this
-  // file's own _buildAtmospheres(). Which one actually activates is decided
+  // file's own _buildAtmosphere(). Which one actually activates is decided
   // at trigger-time from getGlobals(world).dominantPebbleType, not cached,
   // since this system boots (and builds all three, always) before Pebbles
-  // has ever run.
+  // has ever run. Both pools still take a planet index/positions array (see
+  // planet-growth-pool.ts) — kept as-is rather than rewritten, since with
+  // N_PLANETS pinned to 1 (see planet-seeding-system.ts) they already work
+  // correctly called with index 0, no internal changes needed.
   private _heartBursts!: HeartBurstPool;
   private _growthPool!: PlanetGrowthPool;
-  private _atmosphereMeshes: Mesh[] = [];
-  private _atmosphereMaterials: ShaderMaterial[] = [];
+  private _atmosphereMesh!: Mesh;
+  private _atmosphereMaterial!: ShaderMaterial;
 
-  // Drives the ring-rotate + scale-up transition into becoming the Fate
-  // Events planet — see planet-fate-transition.ts. Always ticked in
-  // update() (a no-op once settled/never started), with the live per-planet
-  // transform it produces written into _planetMeshes every frame.
+  // Drives the rotate-free grow transition into becoming the Fate Events
+  // planet — see planet-fate-transition.ts. Always ticked in update() (a
+  // no-op once settled/never started), with the live transform it produces
+  // written into _planetMesh every frame.
   private _fateTransition!: PlanetFateTransition;
 
-  private _dotGeo!: BufferGeometry;
-  private _dotSize!: Float32Array;
-  private _dotPoints!: Points;
-  private _dotEntity!: Entity;
+  private _moonMeshes: Mesh[] = [];
+  private _moonEntities: Entity[] = [];
+  private _moonMaterial!: ShaderMaterial;
+  // Per-moon "just bumped" pulse — set to 1 on a bump event, decays toward 0
+  // every frame; scale = MOON_VISUAL_RADIUS * (1 + flash*(FLASH_SCALE-1)).
+  private _moonFlash!: Float32Array;
+  // Shared 1->0 scale multiplier, eased once the Fate transition starts —
+  // all moons fade out together rather than traveling with the planet.
+  private _moonFadeScale = 1;
+  private _moonsFading = false;
 
   private _dustGeo!: BufferGeometry;
   private _dustPositions!: Float32Array;
@@ -124,14 +114,15 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _dustMaterial!: ShaderMaterial;
 
   // In-flight dust motes — fixed-capacity, kept compact (swap-remove on
-  // landing, see _update loop) so rendering is always a plain [0,_flightCount).
+  // landing, see _advanceFlights loop) so rendering is always a plain
+  // [0,_flightCount). Only one landing target now (the single planet), so
+  // there's no per-mote target-planet index to track anymore.
   private _flightFromX!: Float32Array;
   private _flightFromY!: Float32Array;
   private _flightFromZ!: Float32Array;
   private _flightDirX!: Float32Array; // local-space unit landing direction
   private _flightDirY!: Float32Array;
   private _flightDirZ!: Float32Array;
-  private _flightTargetPlanet!: Uint8Array;
   private _flightT!: Float32Array;
   private _flightCount = 0;
 
@@ -161,9 +152,9 @@ export class PlanetSeedingVfxSystem extends createSystem({
       if (this._handEntity === entity) this._handEntity = null;
     });
 
-    this._buildPlanets();
-    this._buildAtmospheres();
-    this._buildDots();
+    this._buildPlanet();
+    this._buildAtmosphere();
+    this._buildMoons();
     this._buildDustCloud();
 
     this._heartBursts = new HeartBurstPool();
@@ -179,65 +170,89 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._flightDirX = new Float32Array(MAX_INFLIGHT);
     this._flightDirY = new Float32Array(MAX_INFLIGHT);
     this._flightDirZ = new Float32Array(MAX_INFLIGHT);
-    this._flightTargetPlanet = new Uint8Array(MAX_INFLIGHT);
     this._flightT = new Float32Array(MAX_INFLIGHT);
 
     // signal.subscribe() fires immediately, so visibility/reset state is
-    // correct before the first frame renders.
+    // correct before the first frame renders. Reset must run before the
+    // visibility pass below it (a fresh Stardust entry clears _moonsFading,
+    // which the visibility pass itself reads).
     this.cleanupFuncs.push(
       getGlobals(this.world).gamePhase.subscribe((phase) => {
-        this._dotPoints.visible = phase === Phase.Seeding;
+        if (phase === Phase.Stardust) this._resetScene();
+
         const planetsVisible = !PLANETS_HIDDEN_DURING.has(phase);
-        this._planetsVisible = planetsVisible;
-        for (const mesh of this._planetMeshes) mesh.visible = planetsVisible;
+        this._planetMesh.visible = planetsVisible;
         this._dustPoints.visible = planetsVisible;
-        if (phase === Phase.Stardust) this._resetPlanets();
+        if (!this._moonsFading) {
+          for (const mesh of this._moonMeshes) mesh.visible = planetsVisible;
+        }
+
+        if (phase === Phase.Seeding) {
+          // dominantPebbleType is final by now (Pebbles precedes Seeding —
+          // see phase.ts's PHASE_ORDER) — rebuild the planet's stain shader
+          // (its colors are baked GLSL literals, not live uniforms — see
+          // planet-stain-material.ts) and retint the moons (a live uniform,
+          // no rebuild needed) to match.
+          this._rebuildPlanetMaterial();
+          const dominant = getGlobals(this.world).dominantPebbleType.peek();
+          (this._moonMaterial.uniforms.uBodyColor.value as Vector3).set(...PEBBLE_TYPES[dominant].color);
+        }
       }),
     );
   }
 
-  private _buildAtmospheres(): void {
+  private _buildAtmosphere(): void {
     const positions = this._planetSeeding.getPlanetPositions();
-    for (let p = 0; p < N_PLANETS; p++) {
-      const geo = new SphereGeometry(1, 24, 16);
-      const mat = makeAtmosphereGlowMaterial();
-      const mesh = new Mesh(geo, mat);
-      mesh.name = `atmosphere-${p}`;
-      mesh.position.set(positions[p * 3], positions[p * 3 + 1], positions[p * 3 + 2]);
-      mesh.scale.setScalar(ATMOSPHERE_SCALE);
-      mesh.frustumCulled = false;
-      mesh.visible = false;
-      this._atmosphereMeshes.push(mesh);
-      this._atmosphereMaterials.push(mat);
-      this.world.createTransformEntity(mesh);
-    }
+    const geo = new SphereGeometry(1, 24, 16);
+    const mat = makeAtmosphereGlowMaterial();
+    const mesh = new Mesh(geo, mat);
+    mesh.name = 'atmosphere';
+    mesh.position.set(positions[0], positions[1], positions[2]);
+    mesh.scale.setScalar(ATMOSPHERE_SCALE);
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    this._atmosphereMesh = mesh;
+    this._atmosphereMaterial = mat;
+    this.world.createTransformEntity(mesh);
   }
 
-  private _buildPlanets(): void {
+  private _buildPlanet(): void {
     const positions = this._planetSeeding.getPlanetPositions();
-    this._coverage = new Float32Array(N_PLANETS);
-    this._coverageTarget = new Float32Array(N_PLANETS);
-    this._stainCenter = new Float32Array(N_PLANETS * 3);
-    this._stainSet = new Uint8Array(N_PLANETS);
+    // dominantPebbleType isn't known this early (world boot, well before
+    // Pebbles completes) — this is just a harmless placeholder until the
+    // gamePhase subscribe above rebuilds it on entering Seeding for real.
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
 
-    for (let p = 0; p < N_PLANETS; p++) {
-      // A fresh buildOrganicGeometry() call per planet (not a single shared
-      // instance) — same technique the comet's pebbles/head use for their
-      // rocky look, but each of the 9 "worlds" gets its own random bump
-      // field for visual variety rather than looking like 9 clones. Built
-      // at buildOrganicGeometry's own unit radius (~1) and scaled down via
-      // mesh.scale, same pattern PebbleCometPresentationSystem's head uses
-      // (kHeadGeo + headMesh.scale.setScalar(HEAD_RADIUS)) — the stain
-      // shader normalizes vLocalPos, so it's indifferent to this scale.
+    // A fresh buildOrganicGeometry() call (not a shared instance) — same
+    // technique the comet's pebbles/head use for their rocky look.
+    const geo = buildOrganicGeometry();
+    this._planetMaterial = makePlanetStainMaterial(BASE_COLOR, PEBBLE_TYPES[dominant].color);
+    const mesh = new Mesh(geo, this._planetMaterial);
+    mesh.position.set(positions[0], positions[1], positions[2]);
+    mesh.scale.setScalar(PLANET_RADIUS);
+    mesh.frustumCulled = false;
+    const entity = this.world.createTransformEntity(mesh);
+    entity.addComponent(AudioSource, {
+      src: 'dustLand',
+      positional: true,
+      loop: false,
+      playbackMode: PlaybackMode.Overlap,
+    });
+    this._planetMesh = mesh;
+    this._planetEntity = entity;
+  }
+
+  private _buildMoons(): void {
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    this._moonMaterial = makeToonRimFlatMaterial(PEBBLE_TYPES[dominant].color);
+    this._moonFlash = new Float32Array(N_MOONS);
+
+    for (let i = 0; i < N_MOONS; i++) {
       const geo = buildOrganicGeometry();
-      const mat = makePlanetStainMaterial(BASE_COLOR, STAIN_PALETTE[p]);
-      const mesh = new Mesh(geo, mat);
-      // Position/scale are driven every frame from _fateTransition's live
-      // state (see _updateFateTransition) — these initial values just avoid
-      // a one-frame flash at the origin before the first update() runs.
-      mesh.position.set(positions[p * 3], positions[p * 3 + 1], positions[p * 3 + 2]);
-      mesh.scale.setScalar(PLANET_RADIUS);
+      const mesh = new Mesh(geo, this._moonMaterial);
+      mesh.scale.setScalar(MOON_VISUAL_RADIUS);
       mesh.frustumCulled = false;
+      mesh.visible = false;
       const entity = this.world.createTransformEntity(mesh);
       entity.addComponent(AudioSource, {
         src: 'dustLand',
@@ -245,32 +260,17 @@ export class PlanetSeedingVfxSystem extends createSystem({
         loop: false,
         playbackMode: PlaybackMode.Overlap,
       });
-      this._planetMeshes.push(mesh);
-      this._planetMaterials.push(mat);
-      this._planetEntities.push(entity);
+      this._moonMeshes.push(mesh);
+      this._moonEntities.push(entity);
     }
   }
 
-  private _buildDots(): void {
-    const dotPositions = this._planetSeeding.getDotPositions();
-    this._dotSize = new Float32Array(N_DOTS).fill(DOT_SIZE);
-    const bright = new Float32Array(N_DOTS).fill(0.85);
-    const phase = new Float32Array(N_DOTS);
-    for (let i = 0; i < N_DOTS; i++) phase[i] = Math.random();
-
-    this._dotGeo = new BufferGeometry();
-    // Zero-copy — dot positions never move once placed.
-    this._dotGeo.setAttribute('position', new BufferAttribute(dotPositions, 3));
-    const sizeAttr = new BufferAttribute(this._dotSize, 1);
-    sizeAttr.setUsage(DynamicDrawUsage);
-    this._dotGeo.setAttribute('aSize', sizeAttr);
-    this._dotGeo.setAttribute('aBright', new BufferAttribute(bright, 1));
-    this._dotGeo.setAttribute('aPhase', new BufferAttribute(phase, 1));
-
-    const dotMat = makeSparkleMaterial({ color: DOT_COLOR });
-    this._dotPoints = new Points(this._dotGeo, dotMat);
-    this._dotPoints.frustumCulled = false;
-    this._dotEntity = this.world.createTransformEntity(this._dotPoints);
+  private _rebuildPlanetMaterial(): void {
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    const old = this._planetMaterial;
+    this._planetMaterial = makePlanetStainMaterial(BASE_COLOR, PEBBLE_TYPES[dominant].color);
+    this._planetMesh.material = this._planetMaterial;
+    old.dispose();
   }
 
   private _buildDustCloud(): void {
@@ -295,45 +295,37 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._dustEntity = this.world.createTransformEntity(this._dustPoints);
   }
 
-  private _resetPlanets(): void {
-    this._coverage.fill(0);
-    this._coverageTarget.fill(0);
-    this._stainSet.fill(0);
-    for (const mat of this._planetMaterials) mat.uniforms.uCoverage.value = 0;
+  private _resetScene(): void {
+    this._coverage = 0;
+    this._coverageTarget = 0;
+    this._stainSet = false;
+    this._planetMaterial.uniforms.uCoverage.value = 0;
     this._flightCount = 0;
     this._dustGeo.setDrawRange(0, 0);
 
     this._heartBursts.reset();
     this._growthPool.reset();
-    for (let p = 0; p < N_PLANETS; p++) {
-      this._atmosphereMeshes[p].visible = false;
-      this._atmosphereMaterials[p].uniforms.uIntensity.value = 0;
-    }
+    this._atmosphereMesh.visible = false;
+    this._atmosphereMaterial.uniforms.uIntensity.value = 0;
+
     this._fateTransition.reset(this._planetSeeding.getPlanetPositions());
+
+    this._moonsFading = false;
+    this._moonFadeScale = 1;
+    this._moonFlash.fill(0);
+    for (const mesh of this._moonMeshes) mesh.scale.setScalar(MOON_VISUAL_RADIUS);
   }
 
-  // Called by FateEventVfxSystem.play() — picks whichever planet was seeded
-  // the most (falling back to random when nothing clears
-  // MIN_COVERAGE_FOR_SELECTION, which covers both a genuine tie/no-signal
-  // case and a dev-menu jump straight to Fate Events that skipped Seeding's
-  // gameplay entirely) and kicks off the rotate/grow transition. The chosen
-  // planet's own class-flourish decorations (atmosphere glow, grown-in
-  // people) are hidden rather than carried along — see PlanetGrowthPool's
-  // own comment on hidePlanet() for why.
+  // Called by ConstellationsSystem.play() (with FateEventSystem.play() as a
+  // redundant safety net for dev-menu skips) — kicks off the single
+  // planet's grow transition into the Fate Events planet. Its own class-
+  // flourish decorations (atmosphere glow, grown-in people) are hidden
+  // rather than carried along — see PlanetGrowthPool's own comment on
+  // hidePlanet() for why.
   startFateEventsTransition(): void {
-    let selected = -1;
-    let bestCoverage = MIN_COVERAGE_FOR_SELECTION;
-    for (let p = 0; p < N_PLANETS; p++) {
-      if (this._coverage[p] > bestCoverage) {
-        bestCoverage = this._coverage[p];
-        selected = p;
-      }
-    }
-    if (selected === -1) selected = Math.floor(Math.random() * N_PLANETS);
-
-    this._atmosphereMeshes[selected].visible = false;
-    this._growthPool.hidePlanet(selected);
-    this._fateTransition.start(selected);
+    this._atmosphereMesh.visible = false;
+    this._growthPool.hidePlanet(0);
+    this._fateTransition.start();
   }
 
   isFateTransitionActive(): boolean {
@@ -341,18 +333,13 @@ export class PlanetSeedingVfxSystem extends createSystem({
   }
 
   update(delta: number, time: number): void {
-    this._dotMaterialTime(time);
-
-    const touched = this._planetSeeding.getDotTouched();
-    for (let d = 0; d < N_DOTS; d++) {
-      this._dotSize[d] = touched[d] ? 0 : DOT_SIZE;
-    }
-    (this._dotGeo.getAttribute('aSize') as BufferAttribute).needsUpdate = true;
+    this._dustMaterial.uniforms.uTime.value = time;
 
     this._camRight.setFromMatrixColumn(this.camera.matrixWorld, 0);
     this._camUp.setFromMatrixColumn(this.camera.matrixWorld, 1);
     this._camFwd.setFromMatrixColumn(this.camera.matrixWorld, 2);
 
+    this._updateMoons(delta);
     this._launchQueued();
     this._advanceFlights(delta);
     this._easeCoverage(delta, time);
@@ -361,19 +348,40 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._updateFateTransition(delta);
   }
 
-  private _updateFateTransition(delta: number): void {
-    this._fateTransition.update(delta);
-    const positions = this._fateTransition.getCurrentPositions();
-    const radii = this._fateTransition.getCurrentRadii();
-    for (let p = 0; p < N_PLANETS; p++) {
-      this._planetMeshes[p].position.set(positions[p * 3], positions[p * 3 + 1], positions[p * 3 + 2]);
-      this._planetMeshes[p].scale.setScalar(radii[p]);
+  private _updateMoons(delta: number): void {
+    const positions = this._planetSeeding.getMoonPositions();
+    const flashPull = 1 - Math.exp(-MOON_FLASH_DECAY_RATE * delta);
+    for (let i = 0; i < N_MOONS; i++) {
+      this._moonFlash[i] += (0 - this._moonFlash[i]) * flashPull;
+      const mesh = this._moonMeshes[i];
+      mesh.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+      const scale = MOON_VISUAL_RADIUS * (1 + this._moonFlash[i] * (MOON_FLASH_SCALE - 1)) * this._moonFadeScale;
+      mesh.scale.setScalar(scale);
+    }
+
+    const bumps = this._planetSeeding.drainBumpEvents();
+    for (const moon of bumps) {
+      this._moonFlash[moon] = 1;
+      AudioUtils.play(this._moonEntities[moon]);
+    }
+
+    if (!this._moonsFading && this._fateTransition.isActive()) {
+      this._moonsFading = true;
+    }
+    if (this._moonsFading && this._moonFadeScale > 0) {
+      const fadePull = 1 - Math.exp(-MOON_FADE_EASE_RATE * delta);
+      this._moonFadeScale += (0 - this._moonFadeScale) * fadePull;
+      if (this._moonFadeScale < 0.01) {
+        this._moonFadeScale = 0;
+        for (const mesh of this._moonMeshes) mesh.visible = false;
+      }
     }
   }
 
-  private _dotMaterialTime(time: number): void {
-    (this._dotPoints.material as ShaderMaterial).uniforms.uTime.value = time;
-    this._dustMaterial.uniforms.uTime.value = time;
+  private _updateFateTransition(delta: number): void {
+    this._fateTransition.update(delta);
+    this._planetMesh.position.copy(this._fateTransition.getCurrentPosition());
+    this._planetMesh.scale.setScalar(this._fateTransition.getCurrentRadius());
   }
 
   private _launchQueued(): void {
@@ -405,9 +413,9 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._scratchPos,
       );
 
-      const px = planetPositions[ev.targetPlanet * 3];
-      const py = planetPositions[ev.targetPlanet * 3 + 1];
-      const pz = planetPositions[ev.targetPlanet * 3 + 2];
+      const px = planetPositions[0];
+      const py = planetPositions[1];
+      const pz = planetPositions[2];
       let dx = this._scratchPos.x - px;
       let dy = this._scratchPos.y - py;
       let dz = this._scratchPos.z - pz;
@@ -424,28 +432,28 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightDirX[slot] = dx;
         this._flightDirY[slot] = dy;
         this._flightDirZ[slot] = dz;
-        this._flightTargetPlanet[slot] = ev.targetPlanet;
         this._flightT[slot] = 0;
       } else {
         // In-flight capacity exceeded (only possible during a mass force-
         // drain at phase end) — resolve the landing immediately rather
         // than dropping the mote's effect on the planet.
-        this._applyLanding(ev.targetPlanet, dx, dy, dz);
+        this._applyLanding(dx, dy, dz);
       }
     }
   }
 
   private _advanceFlights(delta: number): void {
+    const planetPositions = this._planetSeeding.getPlanetPositions();
+    const px = planetPositions[0];
+    const py = planetPositions[1];
+    const pz = planetPositions[2];
+
     let i = 0;
     while (i < this._flightCount) {
       const t = Math.min(1, this._flightT[i] + delta / FLIGHT_DURATION);
       this._flightT[i] = t;
       const eased = t * t * (3 - 2 * t);
 
-      const planet = this._flightTargetPlanet[i];
-      const px = this._planetSeeding.getPlanetPositions()[planet * 3];
-      const py = this._planetSeeding.getPlanetPositions()[planet * 3 + 1];
-      const pz = this._planetSeeding.getPlanetPositions()[planet * 3 + 2];
       const landX = px + this._flightDirX[i] * PLANET_RADIUS;
       const landY = py + this._flightDirY[i] * PLANET_RADIUS;
       const landZ = pz + this._flightDirZ[i] * PLANET_RADIUS;
@@ -455,7 +463,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
       this._dustPositions[i * 3 + 2] = this._flightFromZ[i] + (landZ - this._flightFromZ[i]) * eased;
 
       if (t >= 1) {
-        this._applyLanding(planet, this._flightDirX[i], this._flightDirY[i], this._flightDirZ[i]);
+        this._applyLanding(this._flightDirX[i], this._flightDirY[i], this._flightDirZ[i]);
         // Swap-remove: pull the last active slot into this one, don't
         // advance i (the swapped-in entry still needs processing).
         const last = this._flightCount - 1;
@@ -465,7 +473,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightDirX[i] = this._flightDirX[last];
         this._flightDirY[i] = this._flightDirY[last];
         this._flightDirZ[i] = this._flightDirZ[last];
-        this._flightTargetPlanet[i] = this._flightTargetPlanet[last];
         this._flightT[i] = this._flightT[last];
         this._flightCount--;
       } else {
@@ -477,18 +484,15 @@ export class PlanetSeedingVfxSystem extends createSystem({
     (this._dustGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
   }
 
-  private _applyLanding(planet: number, dirX: number, dirY: number, dirZ: number): void {
-    if (!this._stainSet[planet]) {
-      this._stainCenter[planet * 3] = dirX;
-      this._stainCenter[planet * 3 + 1] = dirY;
-      this._stainCenter[planet * 3 + 2] = dirZ;
-      this._stainSet[planet] = 1;
-      const uniform = this._planetMaterials[planet].uniforms.uStainCenter.value as Vector3;
-      uniform.set(dirX, dirY, dirZ);
+  private _applyLanding(dirX: number, dirY: number, dirZ: number): void {
+    if (!this._stainSet) {
+      this._stainCenter.set(dirX, dirY, dirZ);
+      this._stainSet = true;
+      (this._planetMaterial.uniforms.uStainCenter.value as Vector3).set(dirX, dirY, dirZ);
     }
-    const dustPerPlanet = this._planetSeeding.getDustPerPlanet()[planet];
-    this._coverageTarget[planet] += 1 / Math.max(1, dustPerPlanet);
-    AudioUtils.play(this._planetEntities[planet]);
+    const total = this._planetSeeding.getTotalStardust();
+    this._coverageTarget += 1 / Math.max(1, total);
+    AudioUtils.play(this._planetEntity);
 
     // Class-specific flourish — blue/green trigger once per landing; red is
     // purely coverage-driven (see _easeCoverage), since coverage was just
@@ -496,34 +500,31 @@ export class PlanetSeedingVfxSystem extends createSystem({
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
     const planetPositions = this._planetSeeding.getPlanetPositions();
     if (dominant === 0) {
-      const x = planetPositions[planet * 3] + dirX * PLANET_RADIUS;
-      const y = planetPositions[planet * 3 + 1] + dirY * PLANET_RADIUS;
-      const z = planetPositions[planet * 3 + 2] + dirZ * PLANET_RADIUS;
+      const x = planetPositions[0] + dirX * PLANET_RADIUS;
+      const y = planetPositions[1] + dirY * PLANET_RADIUS;
+      const z = planetPositions[2] + dirZ * PLANET_RADIUS;
       this._heartBursts.spawn(x, y, z, dirX, dirY, dirZ);
     } else if (dominant === 1) {
-      this._growthPool.trySpawn(planet, planetPositions, dirX, dirY, dirZ);
+      this._growthPool.trySpawn(0, planetPositions, dirX, dirY, dirZ);
     }
   }
 
   private _easeCoverage(delta: number, time: number): void {
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
-    const selectedForFate = this._fateTransition.getSelectedPlanet();
     const pull = 1 - Math.exp(-COVERAGE_EASE_RATE * delta);
-    for (let p = 0; p < N_PLANETS; p++) {
-      if (this._coverage[p] !== this._coverageTarget[p]) {
-        this._coverage[p] += (this._coverageTarget[p] - this._coverage[p]) * pull;
-        this._planetMaterials[p].uniforms.uCoverage.value = this._coverage[p];
-      }
+    if (this._coverage !== this._coverageTarget) {
+      this._coverage += (this._coverageTarget - this._coverage) * pull;
+      this._planetMaterial.uniforms.uCoverage.value = this._coverage;
+    }
 
-      // The planet that's become (or is becoming) the Fate Events planet
-      // keeps its atmosphere hidden regardless of coverage — see
-      // startFateEventsTransition()'s one-time hide.
-      const showAtmosphere = this._planetsVisible && dominant === 2 && p !== selectedForFate;
-      this._atmosphereMeshes[p].visible = showAtmosphere;
-      if (showAtmosphere) {
-        this._atmosphereMaterials[p].uniforms.uIntensity.value = this._coverage[p];
-        this._atmosphereMaterials[p].uniforms.uTime.value = time;
-      }
+    // Once the planet has begun becoming the Fate Events planet (permanent,
+    // even after the grow animation itself finishes — see hasStarted()'s
+    // comment), its atmosphere stays hidden regardless of coverage.
+    const showAtmosphere = this._planetMesh.visible && dominant === 2 && !this._fateTransition.hasStarted();
+    this._atmosphereMesh.visible = showAtmosphere;
+    if (showAtmosphere) {
+      this._atmosphereMaterial.uniforms.uIntensity.value = this._coverage;
+      this._atmosphereMaterial.uniforms.uTime.value = time;
     }
   }
 }

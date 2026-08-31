@@ -303,13 +303,20 @@ export class FateEventVfxSystem extends createSystem({}) {
       for (const mesh of this._fireMeshes) mesh.visible = showFire;
     }
 
+    // Lightweight "society" cap per dominant type (see fate-event-system.ts's
+    // VISIBLE_PEOPLE_BY_TYPE) — a sparser ghost-town read for volatile
+    // gasses, denser for organics. Read live every frame rather than cached,
+    // same reasoning as FateEventSystem.getVisiblePeopleCount() itself.
+    const maxVisible = this._fateEvents.getVisiblePeopleCount();
+
     if (this._planetArrived) {
       // Progressive during Constellations (tied to how close the player is
-      // to winning); fully revealed for every phase after it — the
-      // constellation must have been won to leave that phase normally, and
-      // a dev-menu jump straight past it should still show everyone.
+      // to winning); fully revealed (up to maxVisible) for every phase after
+      // it — the constellation must have been won to leave that phase
+      // normally, and a dev-menu jump straight past it should still show
+      // everyone the type allows.
       const progress = phase === Phase.Constellations ? this._constellations.getRevealProgress() : 1;
-      const revealCount = Math.floor(progress * this._personGroups.length);
+      const revealCount = Math.min(maxVisible, Math.floor(progress * this._personGroups.length));
       for (let i = 0; i < this._personGroups.length; i++) {
         this._personGroups[i].visible = i < revealCount;
       }
@@ -326,6 +333,9 @@ export class FateEventVfxSystem extends createSystem({}) {
 
     const bobPull = 1 - Math.exp(-BOB_EASE_RATE * delta);
     const bubblePull = 1 - Math.exp(-BUBBLE_EASE_RATE * delta);
+    // Livelier idle bob for organics, sluggish for a gasses "ghost town" —
+    // see fate-event-system.ts's BOB_FREQUENCY_MULT_BY_TYPE.
+    const bobFrequency = JUMP_FREQUENCY * this._fateEvents.getBobFrequencyMultiplier();
 
     for (let i = 0; i < count; i++) {
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
@@ -333,7 +343,7 @@ export class FateEventVfxSystem extends createSystem({}) {
       const targetAmp = active[i] ? JUMP_AMPLITUDE : 0;
       this._bobAmp[i] += (targetAmp - this._bobAmp[i]) * bobPull;
       const bobOffset =
-        this._bobAmp[i] * Math.max(0, Math.sin(time * JUMP_FREQUENCY * Math.PI * 2 + this._bobPhase[i]));
+        this._bobAmp[i] * Math.max(0, Math.sin(time * bobFrequency * Math.PI * 2 + this._bobPhase[i]));
 
       this._scratchPos.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       const group = this._personGroups[i];

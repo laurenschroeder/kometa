@@ -147,14 +147,15 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   });
 
   // PlanetSeedingVfxSystem is registered but, like StardustVfxSystem, never
-  // passed to definePhase() — the 9 planets persist as permanent scenery
-  // from Seeding onward (matching PebbleCometPresentationSystem's own
-  // become-visible-from-Seeding-onward treatment), so it self-gates via
-  // gamePhase instead of being director play()/stop()-managed. Must be
-  // registered before ConstellationsSystem/FateEventSystem below — both
-  // look it up via getSystem() in their own init() (it's what grows a ring
-  // planet into the big Fate-Events planet, now kicked off as Constellations
-  // begins rather than at Fate Events itself).
+  // passed to definePhase() — the planet (and its orbiting moons) persist
+  // as permanent scenery from Seeding onward (matching
+  // PebbleCometPresentationSystem's own become-visible-from-Seeding-onward
+  // treatment), so it self-gates via gamePhase instead of being director
+  // play()/stop()-managed. Must be registered before ConstellationsSystem/
+  // FateEventSystem below — both look it up via getSystem() in their own
+  // init() (it's what grows the Seeding planet into the big Fate-Events
+  // planet, now kicked off as Constellations begins rather than at Fate
+  // Events itself).
   world
     .registerSystem(PlanetSeedingSystem, { priority: 30 })
     .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
