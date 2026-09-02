@@ -16,8 +16,10 @@
     border-radius: 0.4;
     opacity: 0;
     max-width: 36;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 0.6;
   }
 
   .hud-text {
@@ -26,8 +28,14 @@
     text-align: center;
     font-family: hud;
     font-weight: bold;
+    opacity: 0;
   }
 </style>
 <div class="hud-root">
-  <div id="hud-box" class="hud-box"><hudtext id="hud-text" class="hud-text">placeholder</hudtext></div>
+  <div id="hud-box" class="hud-box">
+    <hudtext id="hud-text-0" class="hud-text">placeholder</hudtext>
+    <hudtext id="hud-text-1" class="hud-text">placeholder</hudtext>
+    <hudtext id="hud-text-2" class="hud-text">placeholder</hudtext>
+    <hudtext id="hud-text-3" class="hud-text">placeholder</hudtext>
+  </div>
 </div>

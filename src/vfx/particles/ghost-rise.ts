@@ -11,13 +11,16 @@ import {
 } from '@iwsdk/core';
 
 const GHOST_RADIUS = 0.05;
-const RISE_DURATION = 1.5; // seconds, floating straight up from the origin point
+// Both bumped slightly from 1.5 — the whole Constellations-onward stretch
+// needed more breathing room (see ConstellationsSystem's own COMPLETION_
+// HOLD_SECONDS comment).
+const RISE_DURATION = 2.2; // seconds, floating straight up from the origin point
 const RISE_HEIGHT = 0.2;
-const TRAVEL_DURATION = 1.5; // seconds, easing from the rise's end point to the comet
+const TRAVEL_DURATION = 2.2; // seconds, easing from the rise's end point to the comet
 const ORBIT_RADIUS = 0.045; // once attached, a small permanent circling offset from the comet
 const ORBIT_SPEED = 1.4; // rad/s
 
-// Ascension shimmer — sustained only through Rising+Traveling (~3s total),
+// Ascension shimmer — sustained only through Rising+Traveling (~4.4s total),
 // then fades and hands off to a one-shot "settle" chime the instant it
 // attaches (see _settleAscension). A permanent drone would get tiresome
 // over the rest of a playthrough; the settle chime is the lasting

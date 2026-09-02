@@ -1,4 +1,4 @@
-import { AssetType, DomeGradient, SessionMode, World } from '@iwsdk/core';
+import { AssetType, DomeGradient, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
 import { CometAudioSystem } from './comet/comet-audio-system.js';
 import { CometAutopilotSystem } from './comet/comet-autopilot-system.js';
 import { CometBody } from './comet/comet-body-component.js';
@@ -15,6 +15,7 @@ import { HudText, NotificationHudSystem } from './core/notification-hud-system.j
 import { Phase } from './core/phase.js';
 import { PhaseMenuSystem } from './core/phase-menu-system.js';
 import { StarfieldSystem } from './core/starfield-system.js';
+import { SkyBackdropSystem } from './core/sky-backdrop-system.js';
 import { StartMenuSystem } from './core/start-menu-system.js';
 import { ConstellationsSystem } from './phases/constellations/constellations-system.js';
 import { ConstellationsVfxSystem } from './phases/constellations/constellations-vfx-system.js';
@@ -63,12 +64,37 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
 }).then((world) => {
   bootstrapGlobals(world);
 
+  // Explicit, always-visible fallback for entering XR (see index.html) —
+  // the `offer: 'always'` config above already asks the browser to show its
+  // own native "enter VR" affordance via navigator.xr.offerSession, but
+  // that's a Quest-Browser-specific extension to the WebXR spec; browsers
+  // without it show nothing at all with no other way in. Shown only while
+  // NonImmersive (browser/2D mode) and hidden the instant a session starts;
+  // VisibilityState returns to NonImmersive on its own if the session ends,
+  // which re-shows it — no separate session-end handling needed here.
+  const enterVrButton = document.getElementById('enter-vr-button') as HTMLButtonElement | null;
+  if (enterVrButton) {
+    enterVrButton.addEventListener('click', () => launchXR(world));
+    world.visibilityState.subscribe((state) => {
+      enterVrButton.style.display = state === VisibilityState.NonImmersive ? 'block' : 'none';
+    });
+  }
+
   world.renderer.setClearColor(0x000000, 1.0);
 
+  // A faint navy->teal gradient instead of a pure void — subtle enough not
+  // to read as "daytime sky" in a space setting, just enough haze that the
+  // backdrop isn't flat black. StarfieldSystem's background stars and
+  // SkyBackdropSystem's hero star render over the top of this.
   const root = world.activeLevel.value;
+  const DOME_COLORS: Record<'sky' | 'equator' | 'ground', [number, number, number, number]> = {
+    sky: [0.01, 0.02, 0.05, 1],
+    equator: [0.02, 0.05, 0.07, 1],
+    ground: [0.01, 0.01, 0.02, 1],
+  };
   for (const key of ['sky', 'equator', 'ground'] as const) {
     const v = root.getVectorView(DomeGradient, key) as Float32Array;
-    v[0] = 0; v[1] = 0; v[2] = 0; v[3] = 1;
+    v.set(DOME_COLORS[key]);
   }
   root.setValue(DomeGradient, '_needsUpdate', true);
 
@@ -191,6 +217,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     timeoutSeconds: 120,
   });
 
+  // The hero star that reveals once a constellation is won — never passed to
+  // definePhase(), same self-gated idiom as StardustVfxSystem/
+  // PlanetSeedingVfxSystem/StarfieldSystem. Must be registered after
+  // ConstellationsSystem above, which it looks up via getSystem() in its own
+  // init() (the hero star joins the winning constellation's own star
+  // cluster).
+  world.registerSystem(SkyBackdropSystem, { priority: 5 });
+
   // FateEventVfxSystem is registered but, unlike before, no longer passed to
   // definePhase() — its people now start appearing progressively during
   // Constellations (see its own gamePhase subscription), so it self-gates
@@ -203,7 +237,10 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(FateEventVfxSystem, { priority: 32 });
   director.definePhase(Phase.FateEvents, {
     systems: [world.getSystem(FateEventSystem)!],
-    timeoutSeconds: 35,
+    // Paired with FateEventSystem's own MIN_PHASE_SECONDS (55) — together
+    // they keep this phase at roughly a minute either way, whether the
+    // player lingers with the crowd or rushes through it.
+    timeoutSeconds: 65,
   });
 
   // Per-constellation "situation on Earth" — ambient decorations, the

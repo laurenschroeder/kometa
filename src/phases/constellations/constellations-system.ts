@@ -21,6 +21,30 @@ import { CONSTELLATION_SETS, ConstellationDef } from './constellation-set.js';
 export const N_TYPES = 3;
 const TOUCH_RADIUS = 0.1;
 
+// How long this phase stays open after the trace completes, before flipping
+// globals.phaseComplete — sized to let each name's own completion payoff
+// actually play out (see EarthSituationsVfxSystem._onCompletion/GhostRise)
+// instead of the very next frame yanking the player into Fate Events
+// mid-animation. Dog/Human/Crown trigger the ghost-rise mechanic (a King-
+// fall/Dog-collapse prelude for Crown/Dog, then ~4.4s of rise+travel);
+// Locust reveals its swarm almost instantly; the remaining names (Bird/
+// Giraffe/Horn/Tree/Bow and Arrow) have no completion payoff at all, so
+// DEFAULT is just long enough to read celestialSymbolMessage's own banner
+// (see notification-copy.ts) before moving on. All bumped up from their
+// original values — the whole Constellations-onward stretch was reading as
+// too fast-paced, so each hold now carries a couple extra seconds of buffer
+// on top of its own animation length, not just the bare minimum. Deliberately
+// not imported from earth-situations-vfx-system.ts/ghost-rise.ts — this file
+// only needs a hold duration, not the mechanic itself, so the two stay
+// decoupled (same reasoning as globals.pairedPersonIndex/pairedPersonLine).
+const COMPLETION_HOLD_SECONDS: Record<string, number> = {
+  Crown: 6.8,
+  Dog: 6.4,
+  Human: 5.8,
+  Locust: 4.5,
+};
+const DEFAULT_COMPLETION_HOLD_SECONDS = 6.0;
+
 // Gameplay for Chapter 2.5, staged around the planet at its INTERMEDIATE
 // Constellations waypoint (Seeding runs first — see phase.ts's PHASE_ORDER —
 // and this phase's own play() kicks off Leg A, the spin+recede transition
@@ -55,6 +79,11 @@ export class ConstellationsSystem extends createSystem({
   private _activeType = 0;
   private _activeSlot = 0;
   private _completed = false;
+  // Counts down once _completed flips true (see COMPLETION_HOLD_SECONDS) —
+  // globals.phaseComplete isn't set until this reaches 0, so isComplete()
+  // (which flips immediately) can still drive the completion payoff/hero
+  // star reveal while the phase itself stays open a little longer.
+  private _completionHoldRemaining = 0;
   private _scratchHandPos!: Vector3;
   private _planetSeeding!: PlanetSeedingVfxSystem;
 
@@ -100,6 +129,7 @@ export class ConstellationsSystem extends createSystem({
     this._tracedCount[this._activeType][this._activeSlot] = 0;
     this._startedNotified[this._activeType][this._activeSlot] = false;
     this._completed = false;
+    this._completionHoldRemaining = 0;
 
     // Kicks off Leg A — the spin + recede into the intermediate waypoint
     // this phase's own anchors are staged around (see init()). Leg B (the
@@ -108,8 +138,18 @@ export class ConstellationsSystem extends createSystem({
     this._planetSeeding.startSpinTransition();
   }
 
-  update(): void {
-    if (this._completed) return;
+  update(delta: number): void {
+    if (this._completed) {
+      // Trace already finished — just count down the hold before actually
+      // flipping the phase-complete flag (see COMPLETION_HOLD_SECONDS).
+      if (this._completionHoldRemaining > 0) {
+        this._completionHoldRemaining -= delta;
+        if (this._completionHoldRemaining <= 0) {
+          getGlobals(this.world).phaseComplete.value = true;
+        }
+      }
+      return;
+    }
     const def = CONSTELLATION_SETS[this._activeType][this._activeSlot];
     const notifications = this.world.getSystem(NotificationHudSystem);
     const stars = this._starPositions[this._activeType][this._activeSlot];
@@ -132,16 +172,23 @@ export class ConstellationsSystem extends createSystem({
 
         if (!this._startedNotified[this._activeType][this._activeSlot]) {
           this._startedNotified[this._activeType][this._activeSlot] = true;
+          // notifyNext (not notify) — this is a direct reaction to the
+          // player just touching their first star, so it should play next
+          // rather than getting stuck behind the phase-entry blurb and/or
+          // an achievement popup that may already be queued ahead of it
+          // (both non-urgent, generic copy).
           const { text, holdSeconds } = constellationSpottedMessage(def.name);
-          notifications?.notify(text, holdSeconds);
+          notifications?.notifyNext(text, holdSeconds);
         }
 
         if (this._tracedCount[this._activeType][this._activeSlot] >= def.starCount) {
           this._completed = true;
+          this._completionHoldRemaining = COMPLETION_HOLD_SECONDS[def.name] ?? DEFAULT_COMPLETION_HOLD_SECONDS;
+          // Same reasoning as constellationSpottedMessage above — the
+          // culminating narrative beat, shouldn't get buried in a backlog.
           const { text, holdSeconds } = celestialSymbolMessage(def.name);
-          notifications?.notify(text, holdSeconds);
+          notifications?.notifyNext(text, holdSeconds);
           getGlobals(this.world).celestialSymbol.value = def.name;
-          getGlobals(this.world).phaseComplete.value = true;
           break;
         }
       }

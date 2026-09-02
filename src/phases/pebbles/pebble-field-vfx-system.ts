@@ -62,6 +62,9 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _tintedAttrs!: InstancedBufferAttribute[];
   private _states!: Uint8Array;
   private _assignedType!: Uint8Array;
+  // 0-1 grow-in progress per pebble type, recomputed once a frame (not
+  // per-pebble) — see PebbleWeavingSystem.getTypeRevealProgress().
+  private _typeReveal!: Float32Array;
 
   private _camRight!: Vector3;
   private _camUp!: Vector3;
@@ -84,6 +87,7 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._pebbles = this.world.getSystem(PebbleWeavingSystem)!;
     this._trailSystem = this.world.getSystem(CometTrailSystem)!;
     this._sizes = this._pebbles.getSizes();
+    this._typeReveal = new Float32Array(PEBBLE_TYPES.length);
 
     this._audioListener = new AudioListener();
     this.player.head.add(this._audioListener);
@@ -152,6 +156,9 @@ export class PebbleFieldVfxSystem extends createSystem({
     const positions = this._pebbles.getPositions();
     this._states = this._pebbles.getStates();
     this._assignedType = this._pebbles.getAssignedType();
+    for (let t = 0; t < this._typeReveal.length; t++) {
+      this._typeReveal[t] = this._pebbles.getTypeRevealProgress(t);
+    }
     const states = this._states;
     const n = this._pebbles.getParticleCount();
     for (let i = 0; i < n; i++) {
@@ -203,7 +210,12 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _setInstance(i: number, pos: Vector3): void {
     const variant = this._variant[i];
     const local = this._localIdx[i];
-    this._scratchScale.setScalar(this._sizes[i] * PEBBLE_MESH_SCALE);
+    // Scaled by its own type's grow-in progress (see _typeReveal) — a
+    // not-yet-revealed pebble sits at scale 0, invisible without needing a
+    // separate visibility flag, then grows in as its type's HUD line
+    // spawns (see PebbleWeavingSystem.getTypeRevealProgress).
+    const reveal = this._typeReveal[this._assignedType[i]];
+    this._scratchScale.setScalar(this._sizes[i] * PEBBLE_MESH_SCALE * reveal);
     this._scratchMat4.compose(pos, this._rot[i], this._scratchScale);
     this._meshes[variant].setMatrixAt(local, this._scratchMat4);
 

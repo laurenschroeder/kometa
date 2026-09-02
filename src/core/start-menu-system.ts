@@ -19,17 +19,30 @@ import { getGlobals } from './globals.js';
 // easy constant to retune.
 const DWELL_SECONDS = 1.8;
 
+// Start no longer uses a dwell button — pinching with BOTH hands at once
+// (select on controllers, pinch on hand tracking — same gesture
+// CometHandoffSystem/PhaseMenuSystem already rely on, see their own
+// comments) starts the game. Held briefly rather than firing instantly so a
+// single-frame overlap between two otherwise-unrelated pinches can't
+// false-trigger it.
+const DOUBLE_PINCH_HOLD_SECONDS = 0.35;
+// Gentle pulse on the hint text while waiting — same "flash while inviting
+// interaction" idiom as ConstellationsVfxSystem's untouched-star flash.
+const START_HINT_PULSE_FREQ = 0.6; // Hz
+const START_HINT_MIN_OPACITY = 0.45;
+
 interface DwellButtonEntry {
   fillEl: UIKit.Component<any>;
   action: () => void;
 }
 
-// Gates the whole game behind Start/Achievements dwell-select buttons: hold
-// your hand/controller ray over a button (no trigger press) and its fill
-// bar grows over DWELL_SECONDS; reaching full fires the action. Start hands
-// off to GameDirectorSystem.start() and flips globals.gameStarted (so
-// NotificationHudSystem's phase blurbs can begin — see its own comments);
-// Achievements swaps to a locked/unlocked list read from achievement-store.
+// Gates the whole game behind starting the experience: Achievements still
+// uses a dwell-select button (hold your hand/controller ray over it, no
+// trigger press, and its fill bar grows over DWELL_SECONDS; reaching full
+// fires the action), but Start is now a two-handed pinch gesture instead of
+// a button (see DOUBLE_PINCH_HOLD_SECONDS) — hands off to
+// GameDirectorSystem.start() and flips globals.gameStarted (so
+// NotificationHudSystem's phase blurbs can begin — see its own comments).
 export class StartMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
 }) {
@@ -40,6 +53,11 @@ export class StartMenuSystem extends createSystem({
   private _hoveredId: string | null = null;
   private _dwellElapsed = 0;
   private _triggered = false;
+
+  private _startHintEl: UIKit.Component<any> | null = null;
+  private _startAction: (() => void) | null = null;
+  private _pinchHoldSeconds = 0;
+  private _startTriggered = false;
 
   init(): void {
     // GameDirectorSystem must be registered before this system (see
@@ -76,12 +94,14 @@ export class StartMenuSystem extends createSystem({
         if (panelEntity.index !== entity.index) return;
         const doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
 
-        this._registerButton(doc, 'btn-start', 'fill-start', () => {
+        this._startHintEl = doc.getElementById('start-hint');
+        this._startAction = () => {
           this._director.start();
           getGlobals(this.world).gameStarted.value = true;
           this._panelObject.visible = false;
           entity.removeComponent(RayInteractable);
-        });
+        };
+
         this._registerButton(doc, 'btn-achievements', 'fill-achievements', () => {
           this._refreshAchievementRows(doc);
           this._setPage(doc, 'page-achievements');
@@ -94,18 +114,46 @@ export class StartMenuSystem extends createSystem({
     );
   }
 
-  update(delta: number): void {
-    if (!this._hoveredId || this._triggered) return;
-    const entry = this._buttons.get(this._hoveredId);
-    if (!entry) return;
+  update(delta: number, time: number): void {
+    if (this._hoveredId && !this._triggered) {
+      const entry = this._buttons.get(this._hoveredId);
+      if (entry) {
+        this._dwellElapsed += delta;
+        const t = Math.min(1, this._dwellElapsed / DWELL_SECONDS);
+        entry.fillEl.setProperties({ width: `${t * 100}%` });
 
-    this._dwellElapsed += delta;
-    const t = Math.min(1, this._dwellElapsed / DWELL_SECONDS);
-    entry.fillEl.setProperties({ width: `${t * 100}%` });
+        if (t >= 1) {
+          this._triggered = true;
+          entry.action();
+        }
+      }
+    }
 
-    if (t >= 1) {
-      this._triggered = true;
-      entry.action();
+    this._updateStartPinch(delta, time);
+  }
+
+  // Both hands pinching (select) at once, held briefly, starts the game —
+  // see DOUBLE_PINCH_HOLD_SECONDS's own comment.
+  private _updateStartPinch(delta: number, time: number): void {
+    if (this._startTriggered || !this._startAction) return;
+
+    if (this._startHintEl) {
+      const pulse = 0.5 + 0.5 * Math.sin(time * START_HINT_PULSE_FREQ * Math.PI * 2);
+      const opacity = START_HINT_MIN_OPACITY + (1 - START_HINT_MIN_OPACITY) * pulse;
+      this._startHintEl.setProperties({ opacity } as Record<string, unknown>);
+    }
+
+    const leftPinching = this.input.xr.gamepads.left?.getSelecting() ?? false;
+    const rightPinching = this.input.xr.gamepads.right?.getSelecting() ?? false;
+
+    if (leftPinching && rightPinching) {
+      this._pinchHoldSeconds += delta;
+      if (this._pinchHoldSeconds >= DOUBLE_PINCH_HOLD_SECONDS) {
+        this._startTriggered = true;
+        this._startAction();
+      }
+    } else {
+      this._pinchHoldSeconds = 0;
     }
   }
 
@@ -162,6 +210,8 @@ export class StartMenuSystem extends createSystem({
     this._hoveredId = null;
     this._dwellElapsed = 0;
     this._triggered = false;
+    this._pinchHoldSeconds = 0;
+    this._startTriggered = false;
     this._panelObject.visible = true;
     this._entity.addComponent(RayInteractable);
   }

@@ -3,9 +3,19 @@ import { PEBBLE_TYPES } from '../phases/pebbles/pebble-type.js';
 
 // Single source of truth for the notification HUD's per-phase blurb + how
 // long it stays up — edit copy here, not in ui/notification-hud.uikitml.
+// `text` may contain '\n' to split across multiple lines (up to
+// NotificationHudSystem's MAX_LINES) — each line spawns in staggered, one
+// after another, rather than all fading in together (see LINE_STAGGER_
+// SECONDS). A plain single-line string still fades in as one block, exactly
+// as before.
 export interface NotificationCopy {
   text: string;
   holdSeconds: number;
+  // Silent gap (no box shown) before this message starts fading in — unlike
+  // back-to-back queued messages (which fade in the instant the previous one
+  // finishes fading out), this actually pauses first. Omit for the default
+  // (no gap).
+  delaySeconds?: number;
 }
 
 // Every phase gets a sequence (most are one message) — NotificationHudSystem
@@ -13,13 +23,18 @@ export interface NotificationCopy {
 // fully fading out before the next fades in.
 export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Stardust]: [
-    { text: 'You are stardust unformed. Gather yourself into being.', holdSeconds: 3.4 },
-    { text: 'Move your hand around to collect stardust.', holdSeconds: 3.5 },
-    { text: 'The faster you swing, the further you go.', holdSeconds: 3.5 },
+    { text: 'You are stardust unformed. Gather yourself into being.', holdSeconds: 5.4 },
+    { text: 'Move your hand around to collect stardust.', holdSeconds: 5.5 },
+    { text: 'The faster you swing, the further you go.', holdSeconds: 5.5 },
+    {
+      text: 'If you want to control the comet with a different hand, simply pinch it with your other hand and it will move over.',
+      holdSeconds: 5,
+      delaySeconds: 5,
+    },
   ],
   [Phase.Pebbles]: [
     {
-      text: 'Three paths call to you: the dust of souls, the pulse of living things, the violence of raw gasses.',
+      text: 'Three paths call to you\nthe blue dust of souls\nthe green pulse of living things\nthe red violence of raw gasses.',
       holdSeconds: 5.5,
     },
     {
@@ -31,29 +46,39 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
 
   [Phase.Seeding]: [
     {
-      text: 'Follow the glowing path around your planets. Linger near each one to seed it with stardust.',
+      text: 'Take a spin around this planet. Linger near its surface to seed it with stardust.',
       holdSeconds: 4,
     },
   ],
+  // Constellations onward: holds bumped up from their original values —
+  // this whole stretch (transitions and notifications alike) was reading as
+  // too fast-paced. See PlanetSpinTransition's own SPIN_DURATION comment for
+  // the matching transition-side bump.
   [Phase.Constellations]: [
+    { text: 'Many years later…', holdSeconds: 3.5 },
     {
-      text: 'Some blinking stars. Let them guide you.',
-      holdSeconds: 4,
+      text: 'A whole society has developed, thanks to the resources you seeded the planet with.',
+      holdSeconds: 5.5,
+    },
+    { text: "Let's take a look around.", holdSeconds: 3 },
+    {
+      text: 'Let the stars guide you — the people on the planet seem very interested in them.',
+      holdSeconds: 6.5,
     },
   ],
   [Phase.FateEvents]: [
-    { text: 'The planet you seeded has grown into a world of its own. Go and see what you have made.', holdSeconds: 3.6 },
+    { text: 'The planet you seeded has grown into a world of its own. Go and see what you have made.', holdSeconds: 6.1 },
   ],
   [Phase.Launch]: [
     {
       text: 'You can choose to continue orbiting this planet indefinitely, or fling yourself into space forever.',
-      holdSeconds: 4.5,
+      holdSeconds: 7,
     },
   ],
   [Phase.Finale]: [
     {
       text: 'What began as scattered dust has become a comet whole — watch it find its place among the stars.',
-      holdSeconds: 4.2,
+      holdSeconds: 6.7,
     },
   ],
 };
@@ -82,7 +107,7 @@ export function pebbleCompletionMessage(typeName: string): NotificationCopy {
 export function constellationSpottedMessage(name: string): NotificationCopy {
   return {
     text: `The creatures of a nearby planet have spied you near the ${name} constellation…`,
-    holdSeconds: 3.5,
+    holdSeconds: 6,
   };
 }
 
@@ -99,7 +124,7 @@ const CELESTIAL_SYMBOL_LINES: Record<string, string> = {
   Horn: 'The horns were already sounding for the festival. Now they say you are the reason to celebrate.',
   Bird: 'The birds were always going to sing tonight. Now they say it is a song for you.',
   Giraffe: 'The giraffes graze on, same as any other night. Tonight, someone below decided that means something.',
-  Tree: 'The trees have swayed like this for a hundred years. Tonight, they say it is because you are watching.',
+  Tree: 'The trees have swayed like this for a hundred years. Tonight, they say it is because you have passed by.',
   Locust: 'The locusts were already coming this season. Tonight, they have found something else to blame.',
   'Bow and Arrow': 'The war was already close to breaking out. Tonight, they have found a banner to rally under.',
   Crown: 'The king was already failing. Tonight, they have found something to blame for it.',
@@ -107,7 +132,7 @@ const CELESTIAL_SYMBOL_LINES: Record<string, string> = {
 
 export function celestialSymbolMessage(name: string): NotificationCopy {
   const line = CELESTIAL_SYMBOL_LINES[name] ?? `It's been realized, you are the celestial symbol of ${name}.`;
-  return { text: line, holdSeconds: 4 };
+  return { text: line, holdSeconds: 6.5 };
 }
 
 // Fired once by OrbitalLaunchSystem.play() — a retrospective beat right as
@@ -133,7 +158,7 @@ export function civilizationReflectionMessage(celestialSymbol: string | null): N
   const line =
     (celestialSymbol && CIVILIZATION_REFLECTION_LINES[celestialSymbol]) ??
     'Whatever was already unfolding down there will keep unfolding without you. But for one night, they looked up and saw you in it.';
-  return { text: line, holdSeconds: 4.5 };
+  return { text: line, holdSeconds: 7 };
 }
 
 // Fired once by EndRunMenuSystem, right before the "time is done" message —
@@ -145,7 +170,19 @@ export function cometNameMessage(dominantType: number, celestialSymbol: string |
   const name = celestialSymbol ?? PEBBLE_TYPES[dominantType]?.name ?? 'the unnamed';
   return {
     text: `You leave as ${name}, remembered in the sky above the world you touched.`,
-    holdSeconds: 4,
+    holdSeconds: 6.5,
+  };
+}
+
+// Fired by FateEventSystem.stop() if the player lingered near one of the
+// phase's two featured figures (see fate-dialogue.ts's NAMED_FIGURES_BY_TYPE)
+// more than the other — a small personalized callback rather than a generic
+// phase-end message. Silent if the player never meaningfully engaged with
+// either. Anonymous — the figures no longer carry a display name.
+export function farewellMessage(): NotificationCopy {
+  return {
+    text: "They watch you go, and don't look away.",
+    holdSeconds: 5.7,
   };
 }
 
@@ -153,7 +190,7 @@ export function cometNameMessage(dominantType: number, celestialSymbol: string |
 // right before its Main-Menu/New-Comet choice panel appears.
 export const END_RUN_MESSAGE: NotificationCopy = {
   text: 'Your time with the comet is done.',
-  holdSeconds: 3.2,
+  holdSeconds: 5.7,
 };
 
 // Fired by OrbitalLaunchSystem the moment the player commits to one of the
@@ -161,11 +198,11 @@ export const END_RUN_MESSAGE: NotificationCopy = {
 // dynamic messages above.
 export const ORBIT_COMMIT_MESSAGE: NotificationCopy = {
   text: 'You will stay as a light in their sky, forever watching over the world you shaped.',
-  holdSeconds: 3.4,
+  holdSeconds: 5.9,
 };
 export const UNKNOWN_COMMIT_MESSAGE: NotificationCopy = {
   text: 'You will leave them to carry your story onward without you.',
-  holdSeconds: 3.4,
+  holdSeconds: 5.9,
 };
 
 // Queued right after the commit message above (same call site) — coaches
@@ -173,9 +210,12 @@ export const UNKNOWN_COMMIT_MESSAGE: NotificationCopy = {
 // detaches once real speed is built up rather than on a fixed timer, and
 // CometAutopilotSystem carries whatever velocity exists at that instant
 // into orbit/launch. One shared sequence for both choices — the physical
-// instruction is identical either way.
+// instruction is identical either way. Holds bumped up a bit less than the
+// rest of this Constellations-onward pass (see NOTIFICATION_COPY's own
+// comment) — this sequence is meant to read as a quickening countdown, not
+// a leisurely one, but it still needed a little more room.
 export const LAUNCH_BUILDUP_SEQUENCE: NotificationCopy[] = [
-  { text: 'Swing your comet to build up speed.', holdSeconds: 2 },
-  { text: 'Faster!', holdSeconds: 1.8 },
-  { text: 'Keep going!', holdSeconds: 1.8 },
+  { text: 'Swing your comet to build up speed.', holdSeconds: 3 },
+  { text: 'Faster!', holdSeconds: 2.5 },
+  { text: 'Keep going!', holdSeconds: 2.5 },
 ];

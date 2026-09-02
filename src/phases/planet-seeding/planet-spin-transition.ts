@@ -12,7 +12,10 @@ import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from './planet-seeding-system.
 export const INTERMEDIATE_PLANET_CENTER: [number, number, number] = [0, 1.2, -1.6];
 export const INTERMEDIATE_PLANET_RADIUS = 0.5;
 
-const SPIN_DURATION = 4.0; // seconds — a bit longer than Leg B's 3.5s to give the accelerate/decelerate arc room
+// Bumped from 4.0 — the whole Constellations-onward stretch of the game
+// (transitions + notifications) was reading as too fast-paced; a bit longer
+// than Leg B's own bump gives the accelerate/decelerate arc more room.
+const SPIN_DURATION = 6.5;
 // Peak angular speed (rad/s), reached mid-transition — see the sin(pi*s)
 // envelope in update() below.
 const MAX_SPIN_SPEED = 7;
@@ -63,6 +66,19 @@ export class PlanetSpinTransition {
     const endOffset = new Vector3(...INTERMEDIATE_PLANET_CENTER).sub(this._faceRef);
     this._growEndD = endOffset.length() - INTERMEDIATE_PLANET_RADIUS;
     this._growEndDir = endOffset.normalize();
+  }
+
+  // Overwrites _currentPos/_currentRadius directly, without touching
+  // _active/_started/_elapsed — for when Seeding's own live head-following
+  // planet (see planet-seeding-system.ts) has been driving the mesh up to
+  // this point. Without this, start() would snapshot whatever stale
+  // position this instance last held from build() (its own construction-
+  // time default), causing a visible jump instead of continuing smoothly
+  // from wherever the player actually left the planet floating. Call once,
+  // immediately before start().
+  syncCurrentState(planetPosition: Float32Array, radius: number): void {
+    this._currentPos.fromArray(planetPosition);
+    this._currentRadius = radius;
   }
 
   start(): void {

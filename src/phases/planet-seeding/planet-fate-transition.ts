@@ -2,7 +2,9 @@ import { Vector3 } from '@iwsdk/core';
 import { PLANET_CENTER, PLANET_RADIUS as FATE_PLANET_RADIUS } from '../fate-events/fate-event-system.js';
 import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from './planet-seeding-system.js';
 
-const GROW_DURATION = 3.5; // seconds — the planet growing/receding into place
+// Bumped from 3.5 — see PlanetSpinTransition's own SPIN_DURATION comment;
+// the whole Constellations-onward stretch needed more breathing room.
+const GROW_DURATION = 6.0; // seconds — the planet growing/receding into place
 
 function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);

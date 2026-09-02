@@ -51,15 +51,28 @@ export class HudText extends UIKit.Container {
 }
 
 const HUD_BOX_ID = 'hud-box';
-const HUD_TEXT_ID = 'hud-text';
+// One HudText slot per potential line (see ui/notification-hud.uikitml) —
+// a message's text is split on '\n' (see NotificationCopy's own comment)
+// and distributed across however many of these it needs; unused slots stay
+// hidden. MAX_LINES caps how many lines a single notify() call can show.
+const HUD_TEXT_IDS = ['hud-text-0', 'hud-text-1', 'hud-text-2', 'hud-text-3'];
+const MAX_LINES = HUD_TEXT_IDS.length;
 
 // Exported so callers that need to know how long a queued notify() sequence
 // actually takes on screen (fade-in + hold + fade-out per message, back to
 // back) can compute it themselves — see OrbitalLaunchSystem's buildup timer.
 export const FADE_SECONDS = 0.5;
+// Delay between each line's own fade-in start, once a multi-line message
+// begins its "In" phase — line i starts fading in at i*LINE_STAGGER_SECONDS
+// and takes FADE_SECONDS to reach full opacity, so lines visibly cascade in
+// one after another instead of the whole block appearing at once. A
+// single-line message (the common case) is unaffected — line 0 always
+// starts at t=0, same as before this existed.
+const LINE_STAGGER_SECONDS = 1.8;
 
 enum FadeState {
   Idle,
+  Delay,
   In,
   Hold,
   Out,
@@ -79,12 +92,18 @@ export class NotificationHudSystem extends createSystem({
 }) {
   private _doc: UIKitDocument | null = null;
   private _boxEl: UIKit.Container | null = null;
-  private _textEl: HudText | null = null;
+  private _textEls: (HudText | null)[] = [];
+  // How many of _textEls the current message actually uses — the rest stay
+  // hidden. Set fresh each _pump().
+  private _lineCount = 1;
   private _active = false;
   private _state = FadeState.Idle;
   private _elapsed = 0;
   private _holdSeconds = 0;
-  private _queue: { text: string; holdSeconds: number }[] = [];
+  private _queue: { text: string; holdSeconds: number; delaySeconds: number }[] = [];
+  // Held during FadeState.Delay — the message waiting out its silent gap
+  // before _beginShow() actually puts it on screen.
+  private _pending: { text: string; holdSeconds: number; delaySeconds: number } | null = null;
   private _bootTriggered = false;
 
   init(): void {
@@ -119,7 +138,7 @@ export class NotificationHudSystem extends createSystem({
         if (panelEntity.index !== entity.index) return;
         this._doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
         this._boxEl = this._doc.getElementById(HUD_BOX_ID) as UIKit.Container | null;
-        this._textEl = this._doc.getElementById(HUD_TEXT_ID) as HudText | null;
+        this._textEls = HUD_TEXT_IDS.map((id) => this._doc!.getElementById(id) as HudText | null);
         this._maybeTriggerBoot();
       },
       true,
@@ -150,7 +169,7 @@ export class NotificationHudSystem extends createSystem({
 
   private _maybeTriggerBoot(): void {
     if (this._bootTriggered) return;
-    if (!this._boxEl || !this._textEl) return;
+    if (!this._boxEl || !this._textEls[0]) return;
     if (!getGlobals(this.world).gameStarted.peek()) return;
     this._bootTriggered = true;
     this._triggerPhase(getGlobals(this.world).gamePhase.peek());
@@ -159,29 +178,77 @@ export class NotificationHudSystem extends createSystem({
   private _triggerPhase(phase: Phase): void {
     const sequence = NOTIFICATION_COPY[phase];
     if (!sequence) return;
-    for (const entry of sequence) this.notify(entry.text, entry.holdSeconds);
+    for (const entry of sequence) this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0);
   }
 
   // Public entry point for anything that wants a message on this HUD —
   // phase blurbs (above) and achievement-unlock popups (AchievementSystem)
   // both funnel through here. Queues if a message is already showing so a
-  // burst of unlocks doesn't clobber what's currently on screen.
-  notify(text: string, holdSeconds: number): void {
-    this._queue.push({ text, holdSeconds });
+  // burst of unlocks doesn't clobber what's currently on screen. delaySeconds
+  // is a silent gap before THIS message starts fading in — see
+  // NotificationCopy's own comment; 0 (the default) behaves exactly as
+  // before, fading in the instant the previous message finishes fading out.
+  notify(text: string, holdSeconds: number, delaySeconds = 0): void {
+    this._queue.push({ text, holdSeconds, delaySeconds });
+    if (this._state === FadeState.Idle) this._pump();
+  }
+
+  // Same as notify(), but jumps to the FRONT of the queue instead of the
+  // back — for messages tied to a specific moment the player just caused
+  // (e.g. ConstellationsSystem's "you've been spotted" the instant a hand
+  // touches the first star), which should read as a reaction to that
+  // moment rather than getting buried behind whatever generic/lower-
+  // priority copy (phase-entry blurbs, achievement popups) happened to
+  // already be queued first. Still can't interrupt a message ALREADY on
+  // screen — only reorders what's waiting.
+  notifyNext(text: string, holdSeconds: number, delaySeconds = 0): void {
+    this._queue.unshift({ text, holdSeconds, delaySeconds });
     if (this._state === FadeState.Idle) this._pump();
   }
 
   private _pump(): void {
-    if (!this._boxEl || !this._textEl) return;
+    if (!this._boxEl || !this._textEls[0]) return;
     const next = this._queue.shift();
     if (!next) return;
 
-    this._textEl.setText(next.text);
+    this._active = true;
+    this._elapsed = 0;
+    if (next.delaySeconds > 0) {
+      this._pending = next;
+      this._state = FadeState.Delay;
+    } else {
+      this._beginShow(next);
+    }
+  }
+
+  // Actually puts a message on screen — either immediately from _pump() (no
+  // delay) or once FadeState.Delay's wait finishes (see update()).
+  private _beginShow(next: { text: string; holdSeconds: number }): void {
+    const lines = next.text.split('\n');
+    this._lineCount = Math.min(lines.length, MAX_LINES);
+    for (let i = 0; i < MAX_LINES; i++) {
+      const el = this._textEls[i];
+      if (!el) continue;
+      if (i < this._lineCount) {
+        el.setText(lines[i]);
+        el.setProperties({ display: 'flex', opacity: 0 });
+      } else {
+        el.setProperties({ display: 'none' });
+      }
+    }
     this._holdSeconds = next.holdSeconds;
     this._state = FadeState.In;
     this._elapsed = 0;
-    this._active = true;
     this._setBoxVisible(true, 0);
+  }
+
+  // Total time the "In" phase takes for the current message — the last
+  // line's own fade-in (starting at (lineCount-1)*LINE_STAGGER_SECONDS)
+  // finishes exactly here, so Hold begins the instant every line is fully
+  // visible. A single-line message reduces to plain FADE_SECONDS, unchanged
+  // from before staggered lines existed.
+  private _inDurationSeconds(): number {
+    return FADE_SECONDS + Math.max(0, this._lineCount - 1) * LINE_STAGGER_SECONDS;
   }
 
   update(delta: number): void {
@@ -189,10 +256,23 @@ export class NotificationHudSystem extends createSystem({
 
     this._elapsed += delta;
 
+    if (this._state === FadeState.Delay) {
+      if (this._elapsed >= (this._pending?.delaySeconds ?? 0)) {
+        const next = this._pending!;
+        this._pending = null;
+        this._beginShow(next);
+      }
+      return;
+    }
+
     if (this._state === FadeState.In) {
-      const t = Math.min(1, this._elapsed / FADE_SECONDS);
-      this._setOpacity(t);
-      if (t >= 1) {
+      const boxT = Math.min(1, this._elapsed / FADE_SECONDS);
+      this._setBoxOpacity(boxT);
+      for (let i = 0; i < this._lineCount; i++) {
+        const lineT = Math.min(1, Math.max(0, (this._elapsed - i * LINE_STAGGER_SECONDS) / FADE_SECONDS));
+        this._textEls[i]?.setProperties({ opacity: lineT });
+      }
+      if (this._elapsed >= this._inDurationSeconds()) {
         this._state = FadeState.Hold;
         this._elapsed = 0;
       }
@@ -203,7 +283,10 @@ export class NotificationHudSystem extends createSystem({
       }
     } else if (this._state === FadeState.Out) {
       const t = Math.min(1, this._elapsed / FADE_SECONDS);
-      this._setOpacity(1 - t);
+      this._setBoxOpacity(1 - t);
+      for (let i = 0; i < this._lineCount; i++) {
+        this._textEls[i]?.setProperties({ opacity: 1 - t });
+      }
       if (t >= 1) {
         this._setBoxVisible(false, 0);
         this._active = false;
@@ -213,7 +296,7 @@ export class NotificationHudSystem extends createSystem({
     }
   }
 
-  private _setOpacity(opacity: number): void {
+  private _setBoxOpacity(opacity: number): void {
     this._boxEl!.setProperties({ opacity });
   }
 

@@ -1,8 +1,8 @@
 import { createSystem, Entity, Vector3 } from '@iwsdk/core';
 import { getGlobals } from '../core/globals.js';
 import { Phase } from '../core/phase.js';
-import { PLANET_CENTER, PLANET_RADIUS } from '../phases/fate-events/fate-event-system.js';
 import { OrbitalLaunchSystem } from '../phases/orbital-launch/orbital-launch-system.js';
+import { PlanetSeedingVfxSystem } from '../phases/planet-seeding/planet-seeding-vfx-system.js';
 import { CometBody } from './comet-body-component.js';
 import { HandAnchor, HandSide } from './hand-anchor-component.js';
 
@@ -142,13 +142,21 @@ export class CometAutopilotSystem extends createSystem({
     this._scratchVel.fromArray(velView);
     this._mode = this._orbitalLaunch.getChoice() === 'launch' ? 'launch' : 'orbit';
 
+    // Live, not the old fixed Fate Events PLANET_CENTER/PLANET_RADIUS — by
+    // the time a detach can actually happen, Launch's Leg C (see
+    // orbital-launch-system.ts/planet-seeding-vfx-system.ts) has long since
+    // receded/shrunk the planet to its left-side Launch position, and orbit
+    // needs to circle THAT, not the big planet's now-empty former spot.
+    const planetPos = this.world.getSystem(PlanetSeedingVfxSystem)!.getLivePlanetPosition();
+    const planetRadius = this.world.getSystem(PlanetSeedingVfxSystem)!.getLivePlanetRadius();
+
     if (this._mode === 'orbit') {
       this._scratchRadial.set(
-        this._scratchPos.x - PLANET_CENTER[0],
-        this._scratchPos.y - PLANET_CENTER[1],
-        this._scratchPos.z - PLANET_CENTER[2],
+        this._scratchPos.x - planetPos.x,
+        this._scratchPos.y - planetPos.y,
+        this._scratchPos.z - planetPos.z,
       );
-      this._orbitRadius = Math.max(this._scratchRadial.length(), PLANET_RADIUS + ORBIT_RADIUS_MARGIN);
+      this._orbitRadius = Math.max(this._scratchRadial.length(), planetRadius + ORBIT_RADIUS_MARGIN);
       this._orbitU.copy(this._scratchRadial).normalize();
 
       // Tangential component of the detach velocity: the part perpendicular
@@ -183,9 +191,9 @@ export class CometAutopilotSystem extends createSystem({
         // planet (same default the launch always had before).
         this._launchDir
           .set(
-            this._scratchPos.x - PLANET_CENTER[0],
-            this._scratchPos.y - PLANET_CENTER[1],
-            this._scratchPos.z - PLANET_CENTER[2],
+            this._scratchPos.x - planetPos.x,
+            this._scratchPos.y - planetPos.y,
+            this._scratchPos.z - planetPos.z,
           )
           .normalize();
         this._launchSpeed = LAUNCH_INITIAL_SPEED;
@@ -199,15 +207,20 @@ export class CometAutopilotSystem extends createSystem({
     const velView = this._entity.getVectorView(CometBody, 'velocity') as Float32Array;
 
     if (this._mode === 'orbit') {
+      // Read live every frame (not just captured once at detach) — by the
+      // time this matters (Launch onward) Leg C has settled, so this is a
+      // no-op read in practice, but it keeps the orbit correct even in the
+      // (currently unreachable) case of it still animating.
+      const planetPos = this.world.getSystem(PlanetSeedingVfxSystem)!.getLivePlanetPosition();
       this._orbitAngle += this._orbitAngularSpeed * delta;
       const cos = Math.cos(this._orbitAngle);
       const sin = Math.sin(this._orbitAngle);
       const u = this._orbitU;
       const w = this._orbitW;
       const r = this._orbitRadius;
-      posView[0] = PLANET_CENTER[0] + r * (cos * u.x + sin * w.x);
-      posView[1] = PLANET_CENTER[1] + r * (cos * u.y + sin * w.y);
-      posView[2] = PLANET_CENTER[2] + r * (cos * u.z + sin * w.z);
+      posView[0] = planetPos.x + r * (cos * u.x + sin * w.x);
+      posView[1] = planetPos.y + r * (cos * u.y + sin * w.y);
+      posView[2] = planetPos.z + r * (cos * u.z + sin * w.z);
       const tangentialMag = r * this._orbitAngularSpeed;
       velView[0] = tangentialMag * (-sin * u.x + cos * w.x);
       velView[1] = tangentialMag * (-sin * u.y + cos * w.y);

@@ -6,6 +6,12 @@ export interface SparkleParams {
   depthWrite?: boolean;
   transparent?: boolean;
   pointSizeFactor?: number;
+  // Opt-in "hero star" look: long thin additive cross-arms reaching toward
+  // the point sprite's outer edge (an 8-point star via a second 45°-rotated
+  // pair), instead of the default short glint clipped inside the core.
+  // Default off — existing callers (stardust motes, seeding dust,
+  // constellation stars) render unchanged.
+  spiky?: boolean;
 }
 
 // A glitter/star point sprite — a soft core plus a faint 4-point cross glint,
@@ -17,6 +23,7 @@ export interface SparkleParams {
 export function makeSparkleMaterial(params: SparkleParams): ShaderMaterial {
   const pointSizeFactor = params.pointSizeFactor ?? 300.0;
   const [r, g, b] = params.color;
+  const spiky = params.spiky ?? false;
 
   const vertexShader = `
     attribute float aSize;
@@ -33,7 +40,38 @@ export function makeSparkleMaterial(params: SparkleParams): ShaderMaterial {
     }
   `;
 
-  const fragmentShader = `
+  // Long arms reach toward the sprite's edge (d up to ~0.5) rather than
+  // being clipped inside the small bright core, unlike the default glint —
+  // that's what makes this read as a spiky "hero" star instead of a soft
+  // twinkle. exp() falloff across the short axis keeps each arm thin;
+  // smoothstep along the long axis tapers it to a point before the edge.
+  const SPIKY_FRAGMENT = `
+    uniform float uTime;
+    varying float vBright;
+    varying float vPhase;
+    void main() {
+      vec2  uv = gl_PointCoord - 0.5;
+      float d  = length(uv);
+      if (d > 0.5) discard;
+
+      float twinkle = 0.5 + 0.5 * sin(uTime * 3.0 + vPhase * 6.2831);
+      float core = smoothstep(0.12, 0.0, d);
+
+      float armX = exp(-abs(uv.y) * 60.0) * smoothstep(0.5, 0.0, abs(uv.x));
+      float armY = exp(-abs(uv.x) * 60.0) * smoothstep(0.5, 0.0, abs(uv.y));
+      vec2  duv  = vec2(uv.x * 0.7071 - uv.y * 0.7071, uv.x * 0.7071 + uv.y * 0.7071);
+      float armD1 = exp(-abs(duv.y) * 60.0) * smoothstep(0.5, 0.0, abs(duv.x));
+      float armD2 = exp(-abs(duv.x) * 60.0) * smoothstep(0.5, 0.0, abs(duv.y));
+      float spikes = max(max(armX, armY), max(armD1, armD2) * 0.6);
+
+      float alpha = clamp(core + spikes * 0.85, 0.0, 1.0) * vBright * (0.5 + 0.5 * twinkle);
+      gl_FragColor = vec4(${r.toFixed(4)}, ${g.toFixed(4)}, ${b.toFixed(4)}, alpha);
+    }
+  `;
+
+  const fragmentShader = spiky
+    ? SPIKY_FRAGMENT
+    : `
     uniform float uTime;
     varying float vBright;
     varying float vPhase;

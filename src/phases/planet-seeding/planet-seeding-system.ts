@@ -2,6 +2,7 @@ import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
+import { MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
 import { StardustSystem } from '../stardust/stardust-system.js';
 
 // Kept at 1 (not deleted) so planet-growth-pool.ts — which sizes its pool
@@ -12,27 +13,69 @@ import { StardustSystem } from '../stardust/stardust-system.js';
 export const N_PLANETS = 1;
 export const N_MOONS = 6;
 export const PLANET_RADIUS = 0.11;
-const PLANET_HEIGHT = 1.2;
-// Fixed — the single seed target sits right where the old ring's center
-// used to be, so the player's spatial relationship to Seeding ("a small
-// system floating around you") is unchanged even though it's now one body
-// with orbiting moons instead of a ring of six.
-const PLANET_POSITION: readonly [number, number, number] = [0, PLANET_HEIGHT, 0];
+// Harmless placeholder for _planetPositionArray before the first update()
+// frame ever runs (this system's update() is director-gated to Phase.Seeding
+// — see index.ts — so nothing reads a "wrong" position before then; VFX's
+// own build()-time snapshot just needs *some* starting value). Real position
+// is driven every frame below, easing toward the player's head.
+const PLANET_INITIAL_POSITION: readonly [number, number, number] = [0, 1.5, -0.6];
+
+// The planet floats loosely in front of the player's head rather than
+// sitting at a fixed world point — eased toward a target recomputed every
+// frame from the live camera transform, so turning to look elsewhere slowly
+// drags the planet back in front of you instead of leaving it behind.
+const PLANET_FOLLOW_DISTANCE = 0.6; // ~2 feet
+// Deliberately slow (1/s time-constant ~1s) — "very gentle," a loose float
+// rather than a locked-to-view HUD element (contrast NotificationHudSystem's
+// much tighter Follower settings).
+const PLANET_FOLLOW_EASE_RATE = 1.0;
+
+// How close a hand must get to the planet's own SURFACE (not center) to
+// drop a pebble — three inches, simple proximity rather than any gesture
+// requirement, so "get near it" is the whole mechanic.
+const SURFACE_TRIGGER_DISTANCE = 0.0762; // 3 inches
+// Pacing between drops while a hand lingers within range — without this a
+// stationary hand would dump the whole queue in one frame.
+const FALL_COOLDOWN_SECONDS = 0.2;
+// Half the planet's coverage cells (see CELL_DIRS) must be colored to
+// complete the phase — see getCoverageFraction()/COVERAGE_WIN_FRACTION.
+const COVERAGE_WIN_FRACTION = 0.5;
 
 // Moons are grouped into 3 tilted rings of 2, radii/tilts staggered so the
 // whole thing reads as a small solar system rather than one flat disc.
+// Purely decorative — bumping one still flashes/chimes for the fun of it
+// (see MOON_BUMP_RADIUS/COOLDOWN below), but has no effect on seeding;
+// getting near the planet's own surface (see SURFACE_TRIGGER_DISTANCE) is
+// the only way to seed.
 const MOONS_PER_RING = 2;
 const MOON_RING_RADII = [0.22, 0.3, 0.38];
 const MOON_RING_TILT_DEG = [-35, 0, 35];
 const MOON_BASE_ANGULAR_SPEED = 0.5; // rad/s, alternated +/- and scaled per ring below
-// How close a hand must get to a moon to "bump" it.
 const MOON_BUMP_RADIUS = 0.09;
-// Cooldown per moon after a bump — long enough that a lingering hand
-// doesn't refire every frame, short enough that swinging between a couple
-// of moons still feels responsive.
 const MOON_BUMP_COOLDOWN = 0.6;
-// How much captured stardust a single bump releases toward the planet.
-const BURST_SIZE = 4;
+
+// Evenly-spread unit directions across the sphere (Fibonacci lattice) — the
+// planet's fixed set of "coverage cells." A landing is assigned to whichever
+// cell direction it's nearest to; once a cell has received one landing it's
+// permanently "colored" (see PlanetSeedingSystem.play()/_dropPebble) and
+// never reassigned to a different cell — this is what keeps a colored patch
+// from ever disappearing, unlike the old shader ring-buffer design. Count
+// must match planet-stain-material.ts's MAX_SPLATS (the shader's uniform
+// arrays are sized to it, one permanent slot per cell).
+function buildFibonacciSphere(count: number): Float32Array {
+  const out = new Float32Array(count * 3);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < count; i++) {
+    const y = count > 1 ? 1 - (i / (count - 1)) * 2 : 0;
+    const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = goldenAngle * i;
+    out[i * 3] = Math.cos(theta) * radiusAtY;
+    out[i * 3 + 1] = y;
+    out[i * 3 + 2] = Math.sin(theta) * radiusAtY;
+  }
+  return out;
+}
+const CELL_DIRS = buildFibonacciSphere(MAX_SPLATS);
 
 interface QueueItem {
   particleIndex: number;
@@ -40,30 +83,47 @@ interface QueueItem {
 
 export interface LaunchEvent {
   particleIndex: number;
+  // Which coverage cell this landing claimed/refreshed, and the exact local
+  // unit direction it lands at — see PlanetSeedingVfxSystem's _launchQueued/
+  // _addSplat, which write straight into that cell's own permanent shader
+  // slot rather than a rotating ring-buffer index.
+  cellIndex: number;
+  dirX: number;
+  dirY: number;
+  dirZ: number;
 }
 
 // Gameplay for Chapter 3: the stardust carried in from Chapter 1 (still
 // riding the hand trails — see StardustVfxSystem's gamePhase-driven
-// visibility) gets "spent" here onto a single planet. Moons orbit the
-// planet (see comet-autopilot-system.ts's orbit math for the same
-// arbitrary-plane parametric-circle formula this reuses) and act as
-// "valves": bumping one launches a burst of the player's captured stardust
-// toward the planet (see PlanetSeedingVfxSystem for the actual flight/
-// landing animation and stain-growth effect). The phase completes once all
-// captured stardust has been launched. Pure simulation here: no mesh or
+// visibility) gets "spent" here onto a single planet that floats loosely in
+// front of the player's head (see PLANET_FOLLOW_DISTANCE/EASE_RATE).
+// Getting a hand within three inches of the planet's own surface drops a
+// pebble off the comet, which falls under gravity and lands as a colored
+// patch (see SURFACE_TRIGGER_DISTANCE/FALL_COOLDOWN_SECONDS and
+// PlanetSeedingVfxSystem for the actual fall animation/stain rendering) —
+// moons still orbit and flash when bumped, but are decoration only. The
+// phase completes once half the planet's fixed coverage cells have been
+// colored (see CELL_DIRS/COVERAGE_WIN_FRACTION/getCoverageFraction) — not
+// simply once the stardust queue empties, so a player can run out of
+// captured stardust before finishing (the phase's own timeoutSeconds in
+// index.ts is the safety net for that). Pure simulation here: no mesh or
 // entity creation happens in this file (see PlanetSeedingVfxSystem), only
-// planet/moon layout math, bump-detection, and the stardust queue.
+// planet/moon layout math, proximity-detection, and the stardust queue.
 export class PlanetSeedingSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
   private _stardust!: StardustSystem;
 
   private _planetPositionArray!: Float32Array;
+  private _camPos!: Vector3;
+  private _camFwd!: Vector3;
+  private _followTarget!: Vector3;
 
   // Per-moon orbit parameters, precomputed once in init() — a fixed
   // (radius, U, W, angularSpeed) tuple per moon, U/W being an orthonormal
   // basis spanning that moon's (possibly tilted) orbital plane. Advanced
-  // with pure scalar math every frame, no allocation.
+  // with pure scalar math every frame, no allocation. Orbit center is the
+  // planet's own LIVE position (_planetPositionArray), not a fixed point.
   private _moonRadius!: Float32Array;
   private _moonU!: Float32Array; // N_MOONS*3
   private _moonW!: Float32Array; // N_MOONS*3
@@ -77,11 +137,11 @@ export class PlanetSeedingSystem extends createSystem({
   // to distribute across targets, everything just goes to the one queue.
   private _stardustQueue: QueueItem[] = [];
   private _pendingCount = 0;
-  // Fixed snapshot of the queue's starting size, captured once in play() —
-  // unlike _pendingCount (which drains toward 0), this is the denominator
-  // PlanetSeedingVfxSystem uses so the stain's coverage reaches exactly 1.0
-  // once everything captured has landed.
-  private _totalStardust = 0;
+  private _fallCooldown = 0;
+
+  // Which of CELL_DIRS' coverage cells have been colored — see _dropPebble.
+  private _cellColored!: Uint8Array;
+  private _coloredCount = 0;
 
   // This frame's drained launch/bump events. Reassigned (not mutated in
   // place) only on frames where something actually happens — steady-state
@@ -95,7 +155,10 @@ export class PlanetSeedingSystem extends createSystem({
   init(): void {
     this._stardust = this.world.getSystem(StardustSystem)!;
 
-    this._planetPositionArray = new Float32Array(PLANET_POSITION);
+    this._planetPositionArray = new Float32Array(PLANET_INITIAL_POSITION);
+    this._camPos = new Vector3();
+    this._camFwd = new Vector3();
+    this._followTarget = new Vector3();
 
     this._moonRadius = new Float32Array(N_MOONS);
     this._moonU = new Float32Array(N_MOONS * 3);
@@ -125,24 +188,30 @@ export class PlanetSeedingSystem extends createSystem({
       this._moonAngularSpeed[i] = MOON_BASE_ANGULAR_SPEED * (0.8 + ring * 0.2) * (i % 2 === 0 ? 1 : -1);
     }
 
+    this._cellColored = new Uint8Array(MAX_SPLATS);
     this._scratchHandPos = new Vector3();
   }
 
   // Rebuilds the stardust queue from whatever is currently captured, resets
-  // moon orbit angles/cooldowns — a fresh Seeding attempt every time this
-  // phase is (re-)entered.
+  // moon orbit angles/cooldowns, the coverage cells, and the planet back to
+  // its default float spot (it'll ease back in front of the player within
+  // the first second or so) — a fresh Seeding attempt every time this phase
+  // is (re-)entered.
   play(): void {
     super.play();
+    this._planetPositionArray.set(PLANET_INITIAL_POSITION);
     this._moonAngle.fill(0);
     this._moonCooldown.fill(0);
+    this._fallCooldown = 0;
     this._stardustQueue.length = 0;
+    this._cellColored.fill(0);
+    this._coloredCount = 0;
 
     const captured = this._stardust.getCapturedIndices();
     for (let i = 0; i < captured.length; i++) {
       this._stardustQueue.push({ particleIndex: captured[i] });
     }
     this._pendingCount = this._stardustQueue.length;
-    this._totalStardust = this._pendingCount;
   }
 
   // Force-drains the remaining queue in one synchronous pass, so no
@@ -153,62 +222,114 @@ export class PlanetSeedingSystem extends createSystem({
   stop(): void {
     super.stop();
     if (this._pendingCount === 0) return;
-    while (this._stardustQueue.length > 0) this._launchFrom(this._stardustQueue.pop()!);
+    while (this._stardustQueue.length > 0) this._dropPebble(this._stardustQueue.pop()!);
     this._pendingCount = 0;
   }
 
   update(delta: number): void {
+    this._updatePlanetPosition(delta);
+    this._updateMoons(delta);
+
+    if (this._fallCooldown > 0) {
+      this._fallCooldown = Math.max(0, this._fallCooldown - delta);
+    }
+
+    if (this._pendingCount > 0) {
+      for (const entity of this.queries.hands.entities) {
+        const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
+        this._scratchHandPos.fromArray(posView);
+
+        // Moons: proximity flash only, no stardust interaction — see the
+        // class comment and MOON_BUMP_RADIUS's own comment above.
+        for (let i = 0; i < N_MOONS; i++) {
+          if (this._moonCooldown[i] > 0) continue;
+          const mdx = this._moonPositions[i * 3] - this._scratchHandPos.x;
+          const mdy = this._moonPositions[i * 3 + 1] - this._scratchHandPos.y;
+          const mdz = this._moonPositions[i * 3 + 2] - this._scratchHandPos.z;
+          if (mdx * mdx + mdy * mdy + mdz * mdz <= MOON_BUMP_RADIUS * MOON_BUMP_RADIUS) {
+            this._moonCooldown[i] = MOON_BUMP_COOLDOWN;
+            this._bumpBatch.push(i);
+          }
+        }
+
+        if (this._fallCooldown <= 0) {
+          const pdx = this._scratchHandPos.x - this._planetPositionArray[0];
+          const pdy = this._scratchHandPos.y - this._planetPositionArray[1];
+          const pdz = this._scratchHandPos.z - this._planetPositionArray[2];
+          const distToCenter = Math.sqrt(pdx * pdx + pdy * pdy + pdz * pdz);
+          if (distToCenter - PLANET_RADIUS <= SURFACE_TRIGGER_DISTANCE) {
+            const inv = distToCenter > 1e-5 ? 1 / distToCenter : 0;
+            this._dropPebble(this._stardustQueue.pop()!, pdx * inv, pdy * inv, pdz * inv);
+            this._fallCooldown = FALL_COOLDOWN_SECONDS;
+            if (this._pendingCount === 0) break;
+          }
+        }
+      }
+    }
+  }
+
+  private _updatePlanetPosition(delta: number): void {
+    this.camera.getWorldPosition(this._camPos);
+    this.camera.getWorldDirection(this._camFwd);
+    this._followTarget.copy(this._camPos).addScaledVector(this._camFwd, PLANET_FOLLOW_DISTANCE);
+
+    const pull = 1 - Math.exp(-PLANET_FOLLOW_EASE_RATE * delta);
+    this._planetPositionArray[0] += (this._followTarget.x - this._planetPositionArray[0]) * pull;
+    this._planetPositionArray[1] += (this._followTarget.y - this._planetPositionArray[1]) * pull;
+    this._planetPositionArray[2] += (this._followTarget.z - this._planetPositionArray[2]) * pull;
+  }
+
+  private _updateMoons(delta: number): void {
     for (let i = 0; i < N_MOONS; i++) {
       this._moonAngle[i] += this._moonAngularSpeed[i] * delta;
       const cos = Math.cos(this._moonAngle[i]);
       const sin = Math.sin(this._moonAngle[i]);
       const r = this._moonRadius[i];
       this._moonPositions[i * 3] =
-        PLANET_POSITION[0] + r * (cos * this._moonU[i * 3] + sin * this._moonW[i * 3]);
+        this._planetPositionArray[0] + r * (cos * this._moonU[i * 3] + sin * this._moonW[i * 3]);
       this._moonPositions[i * 3 + 1] =
-        PLANET_POSITION[1] + r * (cos * this._moonU[i * 3 + 1] + sin * this._moonW[i * 3 + 1]);
+        this._planetPositionArray[1] + r * (cos * this._moonU[i * 3 + 1] + sin * this._moonW[i * 3 + 1]);
       this._moonPositions[i * 3 + 2] =
-        PLANET_POSITION[2] + r * (cos * this._moonU[i * 3 + 2] + sin * this._moonW[i * 3 + 2]);
+        this._planetPositionArray[2] + r * (cos * this._moonU[i * 3 + 2] + sin * this._moonW[i * 3 + 2]);
 
       if (this._moonCooldown[i] > 0) {
         this._moonCooldown[i] = Math.max(0, this._moonCooldown[i] - delta);
       }
     }
+  }
 
-    if (this._pendingCount > 0) {
-      outer: for (const entity of this.queries.hands.entities) {
-        const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
-        this._scratchHandPos.fromArray(posView);
+  // Pops one item off the queue, assigns it to whichever coverage cell its
+  // landing direction is nearest to, and — only the first time that cell is
+  // ever hit — marks it colored and checks the win condition. A later
+  // landing on an already-colored cell still visually falls/refreshes that
+  // same permanent splat slot (see LaunchEvent's own comment) but doesn't
+  // count toward coverage again. dirX/Y/Z default to straight "down" for
+  // stop()'s force-drain, which has no real hand position to derive a
+  // landing point from — any direction is fine there since the phase is
+  // already ending.
+  private _dropPebble(item: QueueItem, dirX = 0, dirY = -1, dirZ = 0): void {
+    this._stardust.releaseCaptured(item.particleIndex);
+    this._pendingCount--;
 
-        for (let i = 0; i < N_MOONS; i++) {
-          if (this._moonCooldown[i] > 0) continue;
-          const dx = this._moonPositions[i * 3] - this._scratchHandPos.x;
-          const dy = this._moonPositions[i * 3 + 1] - this._scratchHandPos.y;
-          const dz = this._moonPositions[i * 3 + 2] - this._scratchHandPos.z;
-          if (dx * dx + dy * dy + dz * dz <= MOON_BUMP_RADIUS * MOON_BUMP_RADIUS) {
-            this._bumpMoon(i);
-            if (this._pendingCount === 0) break outer;
-          }
-        }
+    let best = 0;
+    let bestDot = -Infinity;
+    for (let c = 0; c < MAX_SPLATS; c++) {
+      const dot = dirX * CELL_DIRS[c * 3] + dirY * CELL_DIRS[c * 3 + 1] + dirZ * CELL_DIRS[c * 3 + 2];
+      if (dot > bestDot) {
+        bestDot = dot;
+        best = c;
       }
     }
 
-    if (this._pendingCount === 0) {
-      getGlobals(this.world).phaseComplete.value = true;
+    if (!this._cellColored[best]) {
+      this._cellColored[best] = 1;
+      this._coloredCount++;
+      if (this._coloredCount >= Math.ceil(MAX_SPLATS * COVERAGE_WIN_FRACTION)) {
+        getGlobals(this.world).phaseComplete.value = true;
+      }
     }
-  }
 
-  private _bumpMoon(moon: number): void {
-    const count = Math.min(BURST_SIZE, this._stardustQueue.length);
-    for (let k = 0; k < count; k++) this._launchFrom(this._stardustQueue.pop()!);
-    this._pendingCount -= count;
-    this._moonCooldown[moon] = MOON_BUMP_COOLDOWN;
-    this._bumpBatch.push(moon);
-  }
-
-  private _launchFrom(item: QueueItem): void {
-    this._stardust.releaseCaptured(item.particleIndex);
-    this._launchBatch.push({ particleIndex: item.particleIndex });
+    this._launchBatch.push({ particleIndex: item.particleIndex, cellIndex: best, dirX, dirY, dirZ });
   }
 
   // Read-only accessors for PlanetSeedingVfxSystem — callers must not mutate.
@@ -218,8 +339,10 @@ export class PlanetSeedingSystem extends createSystem({
   getMoonPositions(): Float32Array {
     return this._moonPositions;
   }
-  getTotalStardust(): number {
-    return this._totalStardust;
+  // 0-1 fraction of coverage cells colored so far — drives the volatile-
+  // gasses atmosphere glow's intensity (see PlanetSeedingVfxSystem).
+  getCoverageFraction(): number {
+    return this._coloredCount / MAX_SPLATS;
   }
   // Returns this frame's accumulated launch events and clears the batch.
   drainLaunchEvents(): readonly LaunchEvent[] {

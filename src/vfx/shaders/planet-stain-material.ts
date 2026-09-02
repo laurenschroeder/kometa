@@ -17,10 +17,16 @@ const OUTLINE_GLSL = `
   float edge    = (1.0 - ndotv) + wobble;
 `;
 
-// Bounds the per-planet splat ring buffer — see PlanetSeedingVfxSystem's
-// own MAX_SPLATS/_addSplat, which must stay in sync with this value (the
-// uniform arrays below are sized to it at shader-compile time).
-export const MAX_SPLATS = 24;
+// Number of fixed coverage cells spread evenly across the planet's surface
+// (see planet-seeding-system.ts's CELL_DIRS, a Fibonacci-sphere layout built
+// from this exact count) — also sizes the uniform arrays below at
+// shader-compile time. Each cell owns a permanent splat slot: once a pebble
+// lands nearest a cell, that cell's uSplatBirth/Color/Center are set ONCE
+// and never reassigned to a different cell, so — unlike the old ring-buffer
+// design — a splat can never be silently evicted by a later, unrelated
+// landing. PlanetSeedingSystem's own win condition is "half of these cells
+// have been colored" (see its COVERAGE_WIN_FRACTION).
+export const MAX_SPLATS = 40;
 // Dot-product threshold a fully-grown splat reaches — 0.93 ≈ a ~21.6°
 // angular cap, a local patch on the planet's small (~0.11m) radius rather
 // than something that could cover the whole sphere on its own; many
@@ -33,14 +39,12 @@ const SPLAT_SOFTNESS = 0.05;
 // Each landing (see PlanetSeedingVfxSystem._addSplat) drops a small colored
 // disc — the color of whichever pebble fell — at the exact surface point the
 // player was near, growing in over SPLAT_GROW_SECONDS from a point to
-// MAX_SPLAT_DOT. Replaces the old single global stain-center/coverage
-// design: instead of one blob expanding from wherever the first dust
-// happened to land, color now visibly follows the player around the
-// planet's surface, and — since each splat's color is independently rolled
-// from the comet's own pebble-type mix — the surface reads as multi-colored
-// rather than a single flat hue. uSplatCount gates the loop below at
-// whichever slot the ring buffer has reached; slots beyond it hold stale
-// data from a previous loop of the buffer but are never read.
+// MAX_SPLAT_DOT. Color visibly follows the player around the planet's
+// surface, and — since each splat's color is independently rolled from the
+// comet's own pebble-type mix — the surface reads as multi-colored rather
+// than a single flat hue. uSplatBirth defaults to -1 ("not yet colored");
+// the loop below skips any cell still at that sentinel, so cells fill in in
+// whatever order the player actually visits rather than a fixed prefix.
 export function makePlanetStainMaterial(baseColor: [number, number, number]): ShaderMaterial {
   const vertexShader = `
     varying vec3 vViewNormal;
@@ -58,7 +62,6 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
 
   const fragmentShader = `
     uniform float uTime;
-    uniform int   uSplatCount;
     uniform vec3  uSplatCenter[${MAX_SPLATS}];
     uniform vec3  uSplatColor[${MAX_SPLATS}];
     uniform float uSplatBirth[${MAX_SPLATS}];
@@ -77,7 +80,7 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
       vec3 bodyCol = ${vec3Glsl(baseColor)};
       vec3 localDir = normalize(vLocalPos);
       for (int i = 0; i < ${MAX_SPLATS}; i++) {
-        if (i >= uSplatCount) break;
+        if (uSplatBirth[i] < 0.0) continue;
         float age    = max(0.0, uTime - uSplatBirth[i]);
         float growT  = clamp(age / ${SPLAT_GROW_SECONDS.toFixed(4)}, 0.0, 1.0);
         float threshold = mix(1.0, ${MAX_SPLAT_DOT.toFixed(4)}, growT);
@@ -93,12 +96,11 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
 
   const splatCenters: Vector3[] = Array.from({ length: MAX_SPLATS }, () => new Vector3(0, 1, 0));
   const splatColors: Vector3[] = Array.from({ length: MAX_SPLATS }, () => new Vector3(0, 0, 0));
-  const splatBirths: number[] = new Array(MAX_SPLATS).fill(0);
+  const splatBirths: number[] = new Array(MAX_SPLATS).fill(-1);
 
   return new ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
-      uSplatCount: { value: 0 },
       uSplatCenter: { value: splatCenters },
       uSplatColor: { value: splatColors },
       uSplatBirth: { value: splatBirths },

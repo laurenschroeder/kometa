@@ -26,7 +26,11 @@ import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-sys
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { ConstellationsSystem, N_TYPES } from './constellations-system.js';
 
-const STAR_SIZE = 0.05;
+// Bumped from 0.05 — the interactive constellation stars read as much too
+// small at arm's length; TOUCHED_SIZE_MULT still applies on top of this, so
+// bumping this one constant makes both the untouched (flashing) and traced
+// (lit/solid) states bigger, in the same proportion as before.
+const STAR_SIZE = 0.15;
 // Untouched stars pulse between a dim and a bright extreme rather than a
 // continuous ambient twinkle (that's the shader's own built-in modulation,
 // still layered on top) — a deliberate on/off "flash" reads as "not yet

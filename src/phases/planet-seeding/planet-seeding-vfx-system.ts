@@ -32,6 +32,7 @@ import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { StardustSystem } from '../stardust/stardust-system.js';
 import { PlanetFateTransition } from './planet-fate-transition.js';
 import { PlanetGrowthPool } from './planet-growth-pool.js';
+import { PlanetLaunchTransition } from './planet-launch-transition.js';
 import { PlanetSpinTransition } from './planet-spin-transition.js';
 import { N_MOONS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
 
@@ -88,12 +89,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _planetEntity!: Entity;
   private _coverage = 0;
   private _coverageTarget = 0;
-  // Ring buffer over the planet material's uSplatCenter/uSplatColor/
-  // uSplatBirth uniform arrays (see planet-stain-material.ts) — each landing
-  // writes one slot and advances the index, wrapping once MAX_SPLATS is
-  // reached (oldest splat quietly stops being drawn, replaced by the newest).
-  private _splatWriteIdx = 0;
-  private _splatCount = 0;
   // This frame's time, stashed so _applyLanding/_addSplat (called from
   // _advanceFlights/_launchQueued, neither of which receives time directly)
   // can stamp a splat's birth for the shader's grow-in animation.
@@ -113,18 +108,21 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _atmosphereMesh!: Mesh;
   private _atmosphereMaterial!: ShaderMaterial;
 
-  // Two-leg journey from Seeding to Fate Events. Leg A (_spinTransition, see
+  // Three-leg journey from Seeding onward. Leg A (_spinTransition, see
   // planet-spin-transition.ts) fires at Seeding->Constellations: spins the
   // planet while receding it to an intermediate, still-reachable waypoint.
-  // Leg B (_fateTransition, unchanged from before — see
-  // planet-fate-transition.ts) now fires later, at Constellations->
-  // FateEvents: the final grow/zoom-in to Fate Events' true PLANET_CENTER/
-  // PLANET_RADIUS. Both are always ticked in update() (a no-op once settled/
-  // never started); _updatePlanetTransitions() decides each frame which
-  // one's output actually drives _planetMesh, based on whether Leg B has
-  // been started yet.
+  // Leg B (_fateTransition — see planet-fate-transition.ts) fires at
+  // Constellations->FateEvents: the grow/zoom-in to Fate Events' true
+  // PLANET_CENTER/PLANET_RADIUS. Leg C (_launchTransition — see
+  // planet-launch-transition.ts) fires at FateEvents->Launch: recedes and
+  // shrinks the planet back down, off to the player's left, next to the
+  // orbit choice. All three are always ticked in update() (a no-op once
+  // settled/never started); _updatePlanetTransitions() decides each frame
+  // which one's output actually drives _planetMesh, based on which (if any)
+  // has been started, in C > B > A priority order.
   private _spinTransition!: PlanetSpinTransition;
   private _fateTransition!: PlanetFateTransition;
+  private _launchTransition!: PlanetLaunchTransition;
   private _audioListener!: AudioListener;
   private _spinSynth!: PlanetSpinSynth;
 
@@ -161,6 +159,11 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _flightDirX!: Float32Array; // local-space unit landing direction
   private _flightDirY!: Float32Array;
   private _flightDirZ!: Float32Array;
+  // Which coverage cell (see planet-seeding-system.ts's CELL_DIRS) this
+  // mote's landing already claimed/refreshed — carried through to
+  // _applyLanding/_addSplat, which write straight into that cell's own
+  // permanent shader slot.
+  private _flightCellIndex!: Uint8Array;
   // Picked once at launch (see pickWeightedPebbleColor) and carried through
   // to landing, so a mote's in-flight color matches the splat it leaves.
   private _flightColorR!: Float32Array;
@@ -203,11 +206,13 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._heartBursts = new HeartBurstPool();
     this._heartBursts.build(this.world);
     this._growthPool = new PlanetGrowthPool();
-    this._growthPool.build(this.world, this._planetSeeding.getPlanetPositions());
+    this._growthPool.build(this.world, this._planetEntity);
     this._spinTransition = new PlanetSpinTransition();
     this._spinTransition.build(this._planetSeeding.getPlanetPositions());
     this._fateTransition = new PlanetFateTransition();
     this._fateTransition.build(this._planetSeeding.getPlanetPositions());
+    this._launchTransition = new PlanetLaunchTransition();
+    this._launchTransition.build(this._planetSeeding.getPlanetPositions(), PLANET_RADIUS);
 
     // Own AudioListener for the rev-up synth — same reason
     // StardustVfxSystem/PebbleFieldVfxSystem each need one: IWSDK's own
@@ -224,6 +229,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._flightDirX = new Float32Array(MAX_INFLIGHT);
     this._flightDirY = new Float32Array(MAX_INFLIGHT);
     this._flightDirZ = new Float32Array(MAX_INFLIGHT);
+    this._flightCellIndex = new Uint8Array(MAX_INFLIGHT);
     this._flightColorR = new Float32Array(MAX_INFLIGHT);
     this._flightColorG = new Float32Array(MAX_INFLIGHT);
     this._flightColorB = new Float32Array(MAX_INFLIGHT);
@@ -347,9 +353,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _resetScene(): void {
     this._coverage = 0;
     this._coverageTarget = 0;
-    this._splatWriteIdx = 0;
-    this._splatCount = 0;
-    this._planetMaterial.uniforms.uSplatCount.value = 0;
+    (this._planetMaterial.uniforms.uSplatBirth.value as number[]).fill(-1);
     this._flightCount = 0;
     this._dustGeo.setDrawRange(0, 0);
 
@@ -360,6 +364,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
 
     this._spinTransition.reset(this._planetSeeding.getPlanetPositions());
     this._fateTransition.reset(this._planetSeeding.getPlanetPositions());
+    this._launchTransition.reset(this._planetSeeding.getPlanetPositions(), PLANET_RADIUS);
     this._spinSynth.stop();
 
     this._moonsFading = false;
@@ -377,6 +382,11 @@ export class PlanetSeedingVfxSystem extends createSystem({
   startSpinTransition(): void {
     this._atmosphereMesh.visible = false;
     this._growthPool.hidePlanet(0);
+    // Leg A must pick up from wherever the player actually left the planet
+    // floating (see planet-seeding-system.ts's head-following), not the
+    // stale spawn-point _spinTransition was built() with — see
+    // syncCurrentState()'s own comment.
+    this._spinTransition.syncCurrentState(this._planetSeeding.getPlanetPositions(), PLANET_RADIUS);
     this._spinTransition.start();
     this._spinSynth.start(this._spinTransition.getCurrentPosition());
   }
@@ -408,6 +418,28 @@ export class PlanetSeedingVfxSystem extends createSystem({
 
   isFateTransitionActive(): boolean {
     return this._fateTransition.isActive();
+  }
+
+  // Called by OrbitalLaunchSystem.play() — Leg C, the planet receding and
+  // shrinking away as Launch begins. targetPos/targetRadius come from the
+  // caller (its own left-side orbit-choice zone center, and Seeding's small
+  // PLANET_RADIUS) rather than being owned here, since OrbitalLaunchSystem
+  // is what actually knows where its choice zones live. Reads straight from
+  // the mesh's own current live transform (not Leg B's transition object
+  // directly) so this works correctly even on a dev-menu skip that jumped
+  // straight to Launch, bypassing Legs A/B entirely.
+  startLaunchRecedeTransition(targetPos: Vector3, targetRadius: number): void {
+    this._launchTransition.syncCurrentState(this._planetMesh.position, this._planetMesh.scale.x);
+    this._launchTransition.start(targetPos, targetRadius);
+  }
+
+  // True once Leg C has actually reached its target (started AND no longer
+  // active) — read by OrbitalLaunchSystem to withhold the orbit/unknown
+  // choice zones until the planet has visibly finished receding/shrinking
+  // into its left-side spot, rather than letting a player standing right
+  // there commit mid-animation.
+  isLaunchTransitionSettled(): boolean {
+    return this._launchTransition.hasStarted() && !this._launchTransition.isActive();
   }
 
   // Live world position/radius the planet mesh is CURRENTLY at — whichever
@@ -473,21 +505,42 @@ export class PlanetSeedingVfxSystem extends createSystem({
   private _updatePlanetTransitions(delta: number): void {
     this._spinTransition.update(delta);
     this._fateTransition.update(delta);
+    this._launchTransition.update(delta);
 
     if (this._spinTransition.isActive()) {
       this._spinSynth.update(this._spinTransition.getProgress(), this._spinTransition.getAngularSpeedNorm());
     }
 
-    // Leg B's output only takes over once it's actually been triggered
-    // (Constellations->FateEvents) — until then the mesh follows Leg A
-    // (mid-spin, or settled at the intermediate waypoint once it finishes).
-    const useLegB = this._fateTransition.hasStarted();
-    const pos = useLegB ? this._fateTransition.getCurrentPosition() : this._spinTransition.getCurrentPosition();
-    const radius = useLegB ? this._fateTransition.getCurrentRadius() : this._spinTransition.getCurrentRadius();
-    this._planetMesh.position.copy(pos);
+    // Four states, in order: pure Seeding (no leg has ever started — the
+    // mesh instead follows PlanetSeedingSystem's own live head-following
+    // position every frame), Leg A (mid-spin, or settled at the
+    // intermediate waypoint once it finishes), Leg B (zoom-in to Fate
+    // Events, once triggered), Leg C (recede/shrink away for Launch, once
+    // triggered — takes priority over everything once started, same as B
+    // over A).
+    const useLegC = this._launchTransition.hasStarted();
+    const useLegB = !useLegC && this._fateTransition.hasStarted();
+    const useLegA = !useLegC && !useLegB && this._spinTransition.hasStarted();
+    let radius: number;
+    if (useLegC) {
+      this._planetMesh.position.copy(this._launchTransition.getCurrentPosition());
+      radius = this._launchTransition.getCurrentRadius();
+    } else if (useLegB) {
+      this._planetMesh.position.copy(this._fateTransition.getCurrentPosition());
+      radius = this._fateTransition.getCurrentRadius();
+    } else if (useLegA) {
+      this._planetMesh.position.copy(this._spinTransition.getCurrentPosition());
+      radius = this._spinTransition.getCurrentRadius();
+    } else {
+      const live = this._planetSeeding.getPlanetPositions();
+      this._planetMesh.position.set(live[0], live[1], live[2]);
+      radius = PLANET_RADIUS;
+    }
     this._planetMesh.scale.setScalar(radius);
-    // Leg B never rotates (a "zoom in," not a spin) — rotation only ever
-    // comes from Leg A, holding its final settled angle once it stops.
+    this._atmosphereMesh.position.copy(this._planetMesh.position);
+    // Leg B/C never rotate (a "zoom in"/"recede," not a spin) — rotation
+    // only ever comes from Leg A, holding its final settled angle once it
+    // stops.
     this._planetMesh.rotation.y = this._spinTransition.getCurrentRotationY();
   }
 
@@ -496,7 +549,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
     if (events.length === 0) return;
 
     const dustField = this._stardust.getCapturedField();
-    const planetPositions = this._planetSeeding.getPlanetPositions();
 
     for (const ev of events) {
       const handEntity = this._handEntity;
@@ -506,6 +558,11 @@ export class PlanetSeedingVfxSystem extends createSystem({
       const samples = handEntity.getValue(CometTrail, 'samples') as number;
       const stride = handEntity.getValue(CometTrail, 'stride') as number;
 
+      // Origin ("falls from you") — same trail-sampling technique every
+      // other flight-mote system here uses. The LANDING point/cell,
+      // though, is authoritative from gameplay (ev.dirX/Y/Z/cellIndex,
+      // computed in PlanetSeedingSystem from where the hand actually was
+      // when it triggered), not re-derived from this sampled origin.
       sampleTrailOffset(
         trail,
         samples,
@@ -520,17 +577,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._scratchPos,
       );
 
-      const px = planetPositions[0];
-      const py = planetPositions[1];
-      const pz = planetPositions[2];
-      let dx = this._scratchPos.x - px;
-      let dy = this._scratchPos.y - py;
-      let dz = this._scratchPos.z - pz;
-      const len = Math.max(1e-5, Math.sqrt(dx * dx + dy * dy + dz * dz));
-      dx /= len;
-      dy /= len;
-      dz /= len;
-
       const weights = getGlobals(this.world).pebbleTypeWeights.peek();
       const color = pickWeightedPebbleColor(weights);
 
@@ -539,9 +585,10 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightFromX[slot] = this._scratchPos.x;
         this._flightFromY[slot] = this._scratchPos.y;
         this._flightFromZ[slot] = this._scratchPos.z;
-        this._flightDirX[slot] = dx;
-        this._flightDirY[slot] = dy;
-        this._flightDirZ[slot] = dz;
+        this._flightDirX[slot] = ev.dirX;
+        this._flightDirY[slot] = ev.dirY;
+        this._flightDirZ[slot] = ev.dirZ;
+        this._flightCellIndex[slot] = ev.cellIndex;
         this._flightColorR[slot] = color[0];
         this._flightColorG[slot] = color[1];
         this._flightColorB[slot] = color[2];
@@ -550,7 +597,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
         // In-flight capacity exceeded (only possible during a mass force-
         // drain at phase end) — resolve the landing immediately rather
         // than dropping the mote's effect on the planet.
-        this._applyLanding(dx, dy, dz, color);
+        this._applyLanding(ev.cellIndex, ev.dirX, ev.dirY, ev.dirZ, color);
       }
     }
   }
@@ -565,18 +612,24 @@ export class PlanetSeedingVfxSystem extends createSystem({
     while (i < this._flightCount) {
       const t = Math.min(1, this._flightT[i] + delta / FLIGHT_DURATION);
       this._flightT[i] = t;
-      const eased = t * t * (3 - 2 * t);
+      // Horizontal drift eases smoothly; vertical falls with an ease-IN
+      // curve (starts slow, accelerates) — the classic "falling under
+      // gravity" character — while still landing exactly on target at
+      // t=1 regardless of the curve shape, since both axes interpolate
+      // between the same two fixed endpoints.
+      const easedXZ = t * t * (3 - 2 * t);
+      const easedY = t * t;
 
       const landX = px + this._flightDirX[i] * PLANET_RADIUS;
       const landY = py + this._flightDirY[i] * PLANET_RADIUS;
       const landZ = pz + this._flightDirZ[i] * PLANET_RADIUS;
 
-      this._dustPositions[i * 3] = this._flightFromX[i] + (landX - this._flightFromX[i]) * eased;
-      this._dustPositions[i * 3 + 1] = this._flightFromY[i] + (landY - this._flightFromY[i]) * eased;
-      this._dustPositions[i * 3 + 2] = this._flightFromZ[i] + (landZ - this._flightFromZ[i]) * eased;
+      this._dustPositions[i * 3] = this._flightFromX[i] + (landX - this._flightFromX[i]) * easedXZ;
+      this._dustPositions[i * 3 + 1] = this._flightFromY[i] + (landY - this._flightFromY[i]) * easedY;
+      this._dustPositions[i * 3 + 2] = this._flightFromZ[i] + (landZ - this._flightFromZ[i]) * easedXZ;
 
       if (t >= 1) {
-        this._applyLanding(this._flightDirX[i], this._flightDirY[i], this._flightDirZ[i], [
+        this._applyLanding(this._flightCellIndex[i], this._flightDirX[i], this._flightDirY[i], this._flightDirZ[i], [
           this._flightColorR[i],
           this._flightColorG[i],
           this._flightColorB[i],
@@ -590,6 +643,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightDirX[i] = this._flightDirX[last];
         this._flightDirY[i] = this._flightDirY[last];
         this._flightDirZ[i] = this._flightDirZ[last];
+        this._flightCellIndex[i] = this._flightCellIndex[last];
         this._flightColorR[i] = this._flightColorR[last];
         this._flightColorG[i] = this._flightColorG[last];
         this._flightColorB[i] = this._flightColorB[last];
@@ -611,28 +665,27 @@ export class PlanetSeedingVfxSystem extends createSystem({
     (this._dustGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
   }
 
-  private _addSplat(dirX: number, dirY: number, dirZ: number, color: [number, number, number]): void {
-    const idx = this._splatWriteIdx;
+  // Writes straight into cellIndex's own permanent slot — never a rotating
+  // ring-buffer index — so an already-colored cell just gets its splat
+  // refreshed (new color/regrown birth) rather than a DIFFERENT cell's
+  // splat ever being evicted. See planet-stain-material.ts's own comment.
+  private _addSplat(cellIndex: number, dirX: number, dirY: number, dirZ: number, color: [number, number, number]): void {
     const centers = this._planetMaterial.uniforms.uSplatCenter.value as Vector3[];
     const colors = this._planetMaterial.uniforms.uSplatColor.value as Vector3[];
     const births = this._planetMaterial.uniforms.uSplatBirth.value as number[];
-    centers[idx].set(dirX, dirY, dirZ);
-    colors[idx].set(color[0], color[1], color[2]);
-    births[idx] = this._time;
-    this._splatWriteIdx = (idx + 1) % MAX_SPLATS;
-    this._splatCount = Math.min(MAX_SPLATS, this._splatCount + 1);
-    this._planetMaterial.uniforms.uSplatCount.value = this._splatCount;
+    centers[cellIndex].set(dirX, dirY, dirZ);
+    colors[cellIndex].set(color[0], color[1], color[2]);
+    births[cellIndex] = this._time;
   }
 
   private _applyLanding(
+    cellIndex: number,
     dirX: number,
     dirY: number,
     dirZ: number,
     color: [number, number, number],
   ): void {
-    this._addSplat(dirX, dirY, dirZ, color);
-    const total = this._planetSeeding.getTotalStardust();
-    this._coverageTarget += 1 / Math.max(1, total);
+    this._addSplat(cellIndex, dirX, dirY, dirZ, color);
     AudioUtils.play(this._planetEntity);
 
     // Class-specific flourish — blue/green trigger once per landing; red is
@@ -646,12 +699,17 @@ export class PlanetSeedingVfxSystem extends createSystem({
       const z = planetPositions[2] + dirZ * PLANET_RADIUS;
       this._heartBursts.spawn(x, y, z, dirX, dirY, dirZ);
     } else if (dominant === 1) {
-      this._growthPool.trySpawn(0, planetPositions, dirX, dirY, dirZ);
+      this._growthPool.trySpawn(0, dirX, dirY, dirZ);
     }
   }
 
   private _easeCoverage(delta: number, time: number): void {
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    // Read live from gameplay's own coverage-cell count — see
+    // PlanetSeedingSystem.getCoverageFraction() — rather than incrementing
+    // a separate tally here, so this always exactly matches the same
+    // number the win condition uses.
+    this._coverageTarget = this._planetSeeding.getCoverageFraction();
     const pull = 1 - Math.exp(-COVERAGE_EASE_RATE * delta);
     if (this._coverage !== this._coverageTarget) {
       this._coverage += (this._coverageTarget - this._coverage) * pull;

@@ -1,4 +1,4 @@
-import { Group, Mesh, ShaderMaterial, Vector3, World } from '@iwsdk/core';
+import { Entity, Group, Mesh, ShaderMaterial, Vector3, World } from '@iwsdk/core';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
@@ -11,8 +11,12 @@ const POOL_SIZE = N_PLANETS * PER_PLANET_CAP;
 // sprouting mound on Seeding's PLANET_RADIUS=0.11 planet (~0.03m diameter) —
 // not person-shaped (see this class's own comment: no people during
 // Seeding, that reveal now happens later — see FateEventVfxSystem's
-// spin-driven civilization forming).
-const GROWTH_TARGET_SCALE = 0.02;
+// spin-driven civilization forming). Sprouts are parented under the
+// planet's own (already PLANET_RADIUS-scaled) mesh entity — three.js
+// compounds a child's local scale/position with its parent's, so both this
+// target size and trySpawn's position below are pre-divided by PLANET_RADIUS
+// to cancel that compounding back out to the intended absolute world size.
+const GROWTH_TARGET_SCALE = 0.02 / PLANET_RADIUS;
 const GROWTH_EASE_RATE = 2.0; // 1/s exponential ease, same idiom as _easeCoverage
 
 // Green class's seeding flourish: "cause life to grow" — tiny rock/sprout
@@ -37,7 +41,14 @@ export class PlanetGrowthPool {
   private _upAxis = new Vector3(0, 1, 0);
   private _dirVec = new Vector3();
 
-  build(world: World, planetPositions: Float32Array): void {
+  // parentEntity is the planet's own transform entity (see
+  // PlanetSeedingVfxSystem's _planetEntity) — sprouts are parented under it
+  // (not the world root) so they inherit the planet's live position for
+  // free as it eases around following the player's head, rather than each
+  // needing its own per-frame re-derivation from a stale spawn-time
+  // snapshot. positions set below are therefore LOCAL to the planet, not
+  // world-absolute.
+  build(world: World, parentEntity: Entity): void {
     this._material = makeToonRimFlatMaterial(PEBBLE_TYPES[1].color);
 
     for (let planet = 0; planet < N_PLANETS; planet++) {
@@ -45,33 +56,26 @@ export class PlanetGrowthPool {
         const group = new Group();
         group.add(new Mesh(buildOrganicGeometry(), this._material));
         group.name = `growth-sprout-${planet}-${local}`;
-        group.position.set(planetPositions[planet * 3], planetPositions[planet * 3 + 1], planetPositions[planet * 3 + 2]);
         group.scale.setScalar(0);
         group.visible = false;
         this._groups.push(group);
-        world.createTransformEntity(group);
+        world.createTransformEntity(group, parentEntity);
       }
     }
   }
 
-  trySpawn(
-    planet: number,
-    planetPositions: Float32Array,
-    dirX: number,
-    dirY: number,
-    dirZ: number,
-  ): boolean {
+  trySpawn(planet: number, dirX: number, dirY: number, dirZ: number): boolean {
     const localIndex = this._countPerPlanet[planet];
     if (localIndex >= PER_PLANET_CAP) return false;
     this._countPerPlanet[planet] = localIndex + 1;
 
     const slot = planet * PER_PLANET_CAP + localIndex;
     const group = this._groups[slot];
-    group.position.set(
-      planetPositions[planet * 3] + dirX * PLANET_RADIUS,
-      planetPositions[planet * 3 + 1] + dirY * PLANET_RADIUS,
-      planetPositions[planet * 3 + 2] + dirZ * PLANET_RADIUS,
-    );
+    // Unit-direction local offset (NOT multiplied by PLANET_RADIUS) — the
+    // parent mesh's own PLANET_RADIUS scale already stretches this out to
+    // sit exactly on the surface; multiplying here too would compound and
+    // land it deep inside the planet instead.
+    group.position.set(dirX, dirY, dirZ);
     this._dirVec.set(dirX, dirY, dirZ);
     group.quaternion.setFromUnitVectors(this._upAxis, this._dirVec);
     group.visible = true;

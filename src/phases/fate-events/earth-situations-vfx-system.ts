@@ -54,6 +54,24 @@ const GHOST_COLOR_DOG: [number, number, number] = [0.75, 0.87, 1.0];
 const GHOST_COLOR_HUMAN: [number, number, number] = [1.0, 1.0, 1.0];
 const GHOST_COLOR_KING: [number, number, number] = [1.0, 0.86, 0.4];
 
+// "What happens" beat before the ghost actually rises (see _onCompletion/
+// update()'s _pendingCollapse handling) — the king visibly topples off his
+// tower, the dog visibly sinks/fades, giving the completion a moment of
+// physical weight instead of the body just vanishing the instant the ghost
+// triggers. Human has no separate body to animate (the ghost rises straight
+// from the paired crowd figure's own position), so it skips this beat
+// entirely. Sized together with ConstellationsSystem's own
+// COMPLETION_HOLD_SECONDS, which holds the phase open long enough for
+// collapse + GhostRise's rise/travel (~4.4s) to fully play out before Fate
+// Events begins.
+// Both bumped slightly — see ConstellationsSystem's own COMPLETION_HOLD_
+// SECONDS comment; the whole Constellations-onward stretch needed more
+// breathing room, though these particular beats stay comparatively snappy.
+const KING_COLLAPSE_DURATION = 1.6;
+const KING_TOPPLE_ANGLE = (100 * Math.PI) / 180; // past horizontal, reads as a genuine fall
+const DOG_COLLAPSE_DURATION = 1.1;
+const DOG_SINK_DEPTH = 0.02;
+
 // Same phase-eligibility guard idiom used throughout this phase (see
 // PLANET_ARRIVAL_ELIGIBLE_FROM/SPIN_ELIGIBLE_FROM in fate-event-vfx-system.ts)
 // — this system's own update() runs from world boot, so reading
@@ -123,6 +141,12 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _machines!: DecorationSet;
   private _king!: DecorationSet;
   private _kingBody!: Group; // the king's own figure, hidden separately once he dies
+  private _dogMeshes!: Mesh[]; // one per _dogs.groups[i], for the collapse beat's local sink/shrink
+  private _dogBaseScales!: Vector3[];
+
+  // "What happens" beat between a constellation completing and its ghost
+  // actually rising — see KING_COLLAPSE_DURATION's comment. Null when idle.
+  private _pendingCollapse: { kind: 'king' | 'dog'; elapsed: number } | null = null;
 
   private _ghost!: GhostRise;
   private _locusts!: LocustPool;
@@ -177,12 +201,16 @@ export class EarthSituationsVfxSystem extends createSystem({
 
   private _buildDogs(): void {
     const material = makeToonRimFlatMaterial(DOG_COLOR);
+    this._dogMeshes = [];
+    this._dogBaseScales = [];
     this._dogs = buildDecorationSet(DOG_COUNT, () => {
       const group = new Group();
       const mesh = new Mesh(buildOrganicGeometry(), material);
       mesh.scale.set(1.5, 0.85, 2.1);
       mesh.scale.multiplyScalar(0.035);
       group.add(mesh);
+      this._dogMeshes.push(mesh);
+      this._dogBaseScales.push(mesh.scale.clone());
       return group;
     });
     this._registerSet(this._dogs);
@@ -285,6 +313,39 @@ export class EarthSituationsVfxSystem extends createSystem({
       this._wasComplete = true;
       this._onCompletion(name);
     }
+
+    this._updatePendingCollapse(delta);
+  }
+
+  // Advances the King-topple/Dog-sink beat (see KING_COLLAPSE_DURATION's
+  // comment) — once it finishes, hides the body and hands off to the ghost
+  // exactly like the old immediate version did.
+  private _updatePendingCollapse(delta: number): void {
+    const collapse = this._pendingCollapse;
+    if (!collapse) return;
+    collapse.elapsed += delta;
+
+    if (collapse.kind === 'king') {
+      const t = clamp01(collapse.elapsed / KING_COLLAPSE_DURATION);
+      this._kingBody.rotation.x = -smoothstep(t) * KING_TOPPLE_ANGLE;
+      if (t >= 1) {
+        this._kingBody.visible = false;
+        this._ghost.trigger(this._king.groups[0].position, GHOST_COLOR_KING);
+        this._pendingCollapse = null;
+      }
+    } else {
+      const t = clamp01(collapse.elapsed / DOG_COLLAPSE_DURATION);
+      const eased = smoothstep(t);
+      const mesh = this._dogMeshes[0];
+      const base = this._dogBaseScales[0];
+      mesh.scale.set(base.x * (1 - eased), base.y * (1 - eased), base.z * (1 - eased));
+      mesh.position.y = -DOG_SINK_DEPTH * eased;
+      if (t >= 1) {
+        this._dogs.groups[0].visible = false;
+        this._ghost.trigger(this._dogs.groups[0].position, GHOST_COLOR_DOG);
+        this._pendingCollapse = null;
+      }
+    }
   }
 
   private _updateSet(
@@ -322,9 +383,12 @@ export class EarthSituationsVfxSystem extends createSystem({
       globals.pairedPersonLine.value = FATE_DIALOGUE[name].pairedLine ?? null;
 
       if (name === 'Dog') {
-        this._ghost.trigger(this._dogs.groups[0].position, GHOST_COLOR_DOG);
-        this._dogs.groups[0].visible = false; // that dog's body is gone, only its ghost remains
+        // Sinks/shrinks over DOG_COLLAPSE_DURATION before the ghost actually
+        // rises — see _updatePendingCollapse.
+        this._pendingCollapse = { kind: 'dog', elapsed: 0 };
       } else {
+        // No body to collapse — the ghost rises straight from the paired
+        // crowd figure's own position.
         const positions = this._fateEvents.getSurfacePositions();
         this._scratchGhostOrigin.set(
           positions[pairedIndex * 3],
@@ -334,8 +398,9 @@ export class EarthSituationsVfxSystem extends createSystem({
         this._ghost.trigger(this._scratchGhostOrigin, GHOST_COLOR_HUMAN);
       }
     } else if (name === 'Crown') {
-      this._ghost.trigger(this._king.groups[0].position, GHOST_COLOR_KING);
-      this._kingBody.visible = false; // the king's body is gone, tower stands empty
+      // Topples over KING_COLLAPSE_DURATION before the ghost actually rises
+      // and the body hides — see _updatePendingCollapse.
+      this._pendingCollapse = { kind: 'king', elapsed: 0 };
     } else if (name === 'Locust') {
       this._locusts.revealUpTo(99); // "the locusts multiply" — reveal the rest of the pool
     }
@@ -347,6 +412,12 @@ export class EarthSituationsVfxSystem extends createSystem({
       for (const group of set.groups) group.visible = false;
     }
     this._kingBody.visible = true;
+    this._kingBody.rotation.x = 0;
+    for (let i = 0; i < this._dogMeshes.length; i++) {
+      this._dogMeshes[i].scale.copy(this._dogBaseScales[i]);
+      this._dogMeshes[i].position.y = 0;
+    }
+    this._pendingCollapse = null;
     this._ghost.reset();
     this._locusts.reset();
     this._wasComplete = false;

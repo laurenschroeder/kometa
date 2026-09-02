@@ -62,6 +62,16 @@
     font-weight: bold;
   }
 
+  .start-hint {
+    color: #ffffff;
+    font-size: 2.2;
+    text-align: center;
+    font-family: hud;
+    font-weight: bold;
+    margin-top: 1.4;
+    margin-bottom: 1.4;
+  }
+
   .ach-list {
     display: flex;
     flex-direction: column;
@@ -100,10 +110,7 @@
 <div class="menu-root">
   <div id="page-main" class="page-main">
     <hudtext class="title">Kometa</hudtext>
-    <div id="btn-start" class="dwell-button">
-      <div id="fill-start" class="dwell-fill"></div>
-      <hudtext class="dwell-label">Start</hudtext>
-    </div>
+    <hudtext id="start-hint" class="start-hint">Pinch with both hands to start</hudtext>
     <div id="btn-achievements" class="dwell-button">
       <div id="fill-achievements" class="dwell-fill"></div>
       <hudtext class="dwell-label">Achievements</hudtext>

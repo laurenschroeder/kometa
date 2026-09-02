@@ -10,22 +10,40 @@ import {
 } from '../../core/notification-copy.js';
 import { FADE_SECONDS, NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { OrbitalLaunchSynth } from '../../vfx/audio/orbital-launch-synth.js';
+import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from '../planet-seeding/planet-seeding-system.js';
+import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 
-// Direction from the player toward the big Fate Events planet — player
-// origin is ~(0,·,0) and PLANET_CENTER is at x=0, so "toward the planet" is
-// simply straight ahead (-Z), same convention FateEventSystem itself
-// already bakes in via its own towardPlayer=(0,0,1) cap-scatter direction.
-export const ORBIT_DIR: [number, number, number] = [0, 0, -1];
-// ORBIT_DIR rotated -90° about Y (player's right) — arbitrary choice, flip
-// the sign on both components to put it on the left instead.
-export const UNKNOWN_DIR: [number, number, number] = [1, 0, 0];
+// 45 degrees front-left/front-right — used both as the fixed placeholder
+// direction before this system has ever played (see init()) and as the
+// basis play() rotates the player's ACTUAL forward direction around to
+// place both zones — see _placeZones(). Once placed, both zones are fixed
+// in world space for the rest of the phase; they do NOT keep re-centering
+// as the player turns their head afterward (a deliberate simplification —
+// "the choices move out in front of you once, based on where you're
+// currently facing," not a constantly-chasing HUD element).
+export const ORBIT_DIR: [number, number, number] = [-Math.SQRT1_2, 0, -Math.SQRT1_2];
+export const UNKNOWN_DIR: [number, number, number] = [Math.SQRT1_2, 0, -Math.SQRT1_2];
+const CHOICE_ANGLE_RAD = Math.PI / 4; // 45°
+const UP_AXIS = new Vector3(0, 1, 0);
+
 // Zone-center distance from the player — reach-scale (comparable to
-// PROXIMITY_RADIUS/NEAR_PLANET_RADIUS elsewhere), not "walk to the planet"
-// (there's no locomotion; the planet's own near surface is ~0.6m away on a
-// different bearing, well past ORBIT_DIR's reach).
+// PROXIMITY_RADIUS/NEAR_PLANET_RADIUS elsewhere; there's no locomotion, so
+// both zones must be within arm's reach). The orbit zone doubles as exactly
+// where Leg C settles the receded/shrunk planet (see play()) — the unknown
+// zone marks empty space on the mirrored bearing to the front-right.
 export const ARROW_DISTANCE = 0.9;
+// Fixed placeholder height for the pre-play() init() default only (see
+// ORBIT_DIR's own comment) — play() replaces both zones with the player's
+// actual live head position/height at that moment.
 export const ARROW_HEIGHT = 1.3;
 export const ZONE_RADIUS = 0.35;
+// How long the comet must stay continuously inside a zone before it
+// actually commits — long enough that just swinging through on the way to
+// somewhere else can't accidentally lock in a choice; leaving a zone resets
+// its own charge to 0 immediately (see _updateCharge), so this is a true
+// "hold it there," not a cumulative dwell timer.
+export const CHARGE_SECONDS = 1.0;
+
 // Total on-screen time of one notify() call: fade-in + hold + fade-out,
 // back to back with no gap between queued messages (see
 // NotificationHudSystem._pump()/update()).
@@ -46,29 +64,35 @@ const MIN_DETACH_SPEED = 1.0;
 export type LaunchChoice = 'orbit' | 'launch';
 type LaunchState = 'choosing' | 'committed' | 'detached';
 
-// Gameplay for the orbit-or-launch choice: two zones sit ARROW_DISTANCE
-// from the player along ORBIT_DIR/UNKNOWN_DIR (see
-// OrbitalLaunchVfxSystem for the arrows/labels marking them). Touching
-// either commits to that choice; the comet keeps behaving completely
-// normally (still hand-tracked, still springs/snaps/throws) while the
-// player is coached to swing it faster — once the commit +
-// LAUNCH_BUILDUP_SEQUENCE notification queue finishes playing out on the
-// HUD (see notifyDuration/_commit) AND the comet is somewhere in front of
-// the player (IN_VIEW_COS), detach fires — regardless of how fast the comet
-// actually ends up moving. Whatever the comet's raw swing velocity happened
-// to be at that instant is NOT trusted for direction (a mid-swing sample
-// can easily point sideways or backward even while the comet itself sits in
-// front of the player) — _detach() snaps the direction to the camera's
-// actual forward vector at that moment, keeping only the swing's speed, so
-// the comet reliably flies off into the area the player is looking at
-// rather than wherever the swing physics happened to be pointing. HandAnchor
-// removal at that point is the entire detach mechanism (see
-// CometAutopilotSystem, an always-on system that picks up driving the comet
-// the instant it drops HandAnchor and excludes/re-includes it purely via
-// that component's presence — it's also what reads the comet's velocity at
-// that instant to carry momentum smoothly into orbit/launch). Pure
-// simulation here: no mesh/entity creation happens in this file (see
-// OrbitalLaunchVfxSystem).
+// Gameplay for the orbit-or-launch choice: the instant this phase begins,
+// both zones are placed 45° left/right of wherever the player is currently
+// facing, ARROW_DISTANCE away (see play()/_placeZones) — then stay fixed in
+// world space for the rest of the phase (see OrbitalLaunchVfxSystem for the
+// arrows/labels marking them). Holding the comet continuously inside one
+// for CHARGE_SECONDS commits to that choice (see _updateCharge) — a
+// deliberate "charge up," not an instant touch, so a comet just swinging
+// past on its way elsewhere can't accidentally lock in a choice; stepping
+// back out resets that zone's charge to 0. Once committed, the comet keeps
+// behaving completely normally (still hand-tracked, still springs/snaps/
+// throws) while the player is coached to swing it faster — detach is
+// gated on BOTH the commit message AND the full LAUNCH_BUILDUP_SEQUENCE
+// notification queue finishing playing out on the HUD (see notifyDuration/
+// _commit, which sums every one of those messages' own on-screen time into
+// _detachAtSeconds) AND the comet being somewhere in front of the player
+// (IN_VIEW_COS) — regardless of how fast the comet actually ends up moving.
+// Whatever the comet's raw swing velocity happened to be at that instant is
+// NOT trusted for direction (a mid-swing sample can easily point sideways
+// or backward even while the comet itself sits in front of the player) —
+// _detach() snaps the direction to the camera's actual forward vector at
+// that moment, keeping only the swing's speed, so the comet reliably flies
+// off into the area the player is looking at rather than wherever the swing
+// physics happened to be pointing. HandAnchor removal at that point is the
+// entire detach mechanism (see CometAutopilotSystem, an always-on system
+// that picks up driving the comet the instant it drops HandAnchor and
+// excludes/re-includes it purely via that component's presence — it's also
+// what reads the comet's velocity at that instant to carry momentum
+// smoothly into orbit/launch). Pure simulation here: no mesh/entity
+// creation happens in this file (see OrbitalLaunchVfxSystem).
 export class OrbitalLaunchSystem extends createSystem({
   bodies: { required: [CometBody, HandAnchor] },
 }) {
@@ -76,6 +100,11 @@ export class OrbitalLaunchSystem extends createSystem({
   private _choice: LaunchChoice | null = null;
   private _committedElapsed = 0;
   private _detachAtSeconds = 0;
+  // Seconds continuously spent inside each zone this "choosing" spell — see
+  // CHARGE_SECONDS. Read by OrbitalLaunchVfxSystem (getOrbit/UnknownCharge01)
+  // to fill in the zone as a visible charge-up cue.
+  private _orbitCharge = 0;
+  private _unknownCharge = 0;
   // GameDirectorSystem.definePhase() calls stop() on every phase system
   // immediately at registration time (a normalization step, before
   // director.start() has ever run) — without this guard, that boot-time
@@ -85,6 +114,11 @@ export class OrbitalLaunchSystem extends createSystem({
 
   private _orbitZoneCenter!: Vector3;
   private _unknownZoneCenter!: Vector3;
+  // Direction each zone sits along, from wherever the player was facing
+  // when play() placed them — read by OrbitalLaunchVfxSystem to orient each
+  // arrow. Fixed once play() sets it, same as the zone centers themselves.
+  private _orbitDirLive!: Vector3;
+  private _unknownDirLive!: Vector3;
   private _scratchPos!: Vector3;
   private _scratchVel!: Vector3;
   private _camPos!: Vector3;
@@ -110,6 +144,8 @@ export class OrbitalLaunchSystem extends createSystem({
       ARROW_HEIGHT,
       UNKNOWN_DIR[2] * ARROW_DISTANCE,
     );
+    this._orbitDirLive = new Vector3(...ORBIT_DIR);
+    this._unknownDirLive = new Vector3(...UNKNOWN_DIR);
     this._scratchPos = new Vector3();
     this._scratchVel = new Vector3();
     this._camPos = new Vector3();
@@ -123,6 +159,14 @@ export class OrbitalLaunchSystem extends createSystem({
     this._state = 'choosing';
     this._choice = null;
     this._committedElapsed = 0;
+    this._orbitCharge = 0;
+    this._unknownCharge = 0;
+
+    // Places both zones 45° left/right of wherever the player is actually
+    // facing RIGHT NOW, ARROW_DISTANCE away — a one-time placement (see the
+    // class comment); they stay put in world space from here on, unlike
+    // Seeding's continuously head-following planet.
+    this._placeZones();
 
     // Retrospective "what you leave behind" beat, fired the instant Launch
     // begins (i.e. right as Fate Events ends, however it ended) — queues
@@ -132,6 +176,15 @@ export class OrbitalLaunchSystem extends createSystem({
     const celestialSymbol = getGlobals(this.world).celestialSymbol.peek();
     const { text, holdSeconds } = civilizationReflectionMessage(celestialSymbol);
     this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);
+
+    // Leg C: the planet recedes/shrinks away to exactly where the orbit
+    // choice zone was just placed (see ORBIT_DIR's own comment) — fired
+    // here, at phase start, so the transition (see planet-launch-
+    // transition.ts's RECEDE_DURATION) has finished well before the player
+    // could plausibly swing up to speed and detach.
+    this.world
+      .getSystem(PlanetSeedingVfxSystem)
+      ?.startLaunchRecedeTransition(this._orbitZoneCenter, SEEDING_PLANET_RADIUS);
   }
 
   // Fallback for "player never chooses" or "never swings fast enough": if
@@ -153,21 +206,73 @@ export class OrbitalLaunchSystem extends createSystem({
 
     if (this._state === 'committed') this._committedElapsed += delta;
 
+    // Withhold both choice zones until the planet has actually finished
+    // receding/shrinking into its left-side spot (Leg C — see play()'s
+    // startLaunchRecedeTransition() call) — otherwise a player already
+    // standing at the orbit zone could commit while the planet is still
+    // mid-animation, well before either zone visibly reads as "in its
+    // place." Checked once per frame rather than per-hand below.
+    const readyToChoose =
+      this._state !== 'choosing' ||
+      (this.world.getSystem(PlanetSeedingVfxSystem)?.isLaunchTransitionSettled() ?? true);
+
+    let inOrbitZone = false;
+    let inUnknownZone = false;
+
     for (const entity of this.queries.bodies.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       this._scratchPos.fromArray(posView);
 
       if (this._state === 'choosing') {
+        if (!readyToChoose) continue;
         if (this._scratchPos.distanceToSquared(this._orbitZoneCenter) <= ZONE_RADIUS * ZONE_RADIUS) {
-          this._commit('orbit');
+          inOrbitZone = true;
         } else if (this._scratchPos.distanceToSquared(this._unknownZoneCenter) <= ZONE_RADIUS * ZONE_RADIUS) {
-          this._commit('launch');
+          inUnknownZone = true;
         }
       } else if (this._state === 'committed') {
         if (this._committedElapsed >= this._detachAtSeconds && this._isCometInView(this._scratchPos)) {
           this._detach();
         }
       }
+    }
+
+    if (this._state === 'choosing') this._updateCharge(delta, inOrbitZone, inUnknownZone);
+  }
+
+  // One-time zone placement — 45° left/right of the player's forward
+  // direction at the moment this is called, ARROW_DISTANCE away, using the
+  // player's actual head position/height (not a fixed world Y). See the
+  // class comment for why this only runs once (from play()) rather than
+  // continuously re-centering every frame.
+  private _placeZones(): void {
+    this.camera.getWorldPosition(this._camPos);
+    this.camera.getWorldDirection(this._camFwd);
+
+    this._orbitDirLive.copy(this._camFwd).applyAxisAngle(UP_AXIS, CHOICE_ANGLE_RAD);
+    this._unknownDirLive.copy(this._camFwd).applyAxisAngle(UP_AXIS, -CHOICE_ANGLE_RAD);
+
+    this._orbitZoneCenter.copy(this._camPos).addScaledVector(this._orbitDirLive, ARROW_DISTANCE);
+    this._unknownZoneCenter.copy(this._camPos).addScaledVector(this._unknownDirLive, ARROW_DISTANCE);
+  }
+
+  // Charges whichever zone the comet is currently inside toward
+  // CHARGE_SECONDS, committing once it fills — stepping outside a zone (or
+  // crossing straight into the other one) resets its charge to 0 rather
+  // than letting partial dwell time carry over, so a comet just passing
+  // through on a wide swing can't accidentally lock in a choice.
+  private _updateCharge(delta: number, inOrbitZone: boolean, inUnknownZone: boolean): void {
+    if (inOrbitZone) {
+      this._unknownCharge = 0;
+      this._orbitCharge += delta;
+      if (this._orbitCharge >= CHARGE_SECONDS) this._commit('orbit');
+    } else if (inUnknownZone) {
+      this._orbitCharge = 0;
+      this._unknownCharge += delta;
+      if (this._unknownCharge >= CHARGE_SECONDS) this._commit('launch');
+    } else {
+      this._orbitCharge = 0;
+      this._unknownCharge = 0;
     }
   }
 
@@ -186,12 +291,18 @@ export class OrbitalLaunchSystem extends createSystem({
     this._choice = choice;
     this._state = 'committed';
     this._committedElapsed = 0;
+    this._orbitCharge = 0;
+    this._unknownCharge = 0;
     const notifications = this.world.getSystem(NotificationHudSystem);
     const { text, holdSeconds } = choice === 'orbit' ? ORBIT_COMMIT_MESSAGE : UNKNOWN_COMMIT_MESSAGE;
     notifications?.notify(text, holdSeconds);
     // _scratchPos was just set to the comet's current position by update()'s
     // own per-entity loop, right before this was called.
     this._synth.playCommit(choice === 'orbit' ? 'orbit' : 'launch', this._scratchPos);
+    // Detach is gated on every one of these (see notifyDuration) finishing
+    // its own on-screen time — the "faster/keep going" buildup must fully
+    // play out before the comet is allowed to leave, not just the initial
+    // commit message.
     let detachAt = notifyDuration(holdSeconds);
     for (const entry of LAUNCH_BUILDUP_SEQUENCE) {
       notifications?.notify(entry.text, entry.holdSeconds);
@@ -233,5 +344,18 @@ export class OrbitalLaunchSystem extends createSystem({
   }
   getUnknownZoneCenter(): Vector3 {
     return this._unknownZoneCenter;
+  }
+  getOrbitDirLive(): Vector3 {
+    return this._orbitDirLive;
+  }
+  getUnknownDirLive(): Vector3 {
+    return this._unknownDirLive;
+  }
+  // 0-1 charge-up progress for each zone — see CHARGE_SECONDS/_updateCharge.
+  getOrbitCharge01(): number {
+    return Math.min(1, this._orbitCharge / CHARGE_SECONDS);
+  }
+  getUnknownCharge01(): number {
+    return Math.min(1, this._unknownCharge / CHARGE_SECONDS);
   }
 }

@@ -20,7 +20,7 @@ import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js'
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
-import { FateEventSystem } from './fate-event-system.js';
+import { FateEventSystem, NAMED_FIGURE_COUNT } from './fate-event-system.js';
 
 const JUMP_FREQUENCY = 5; // Hz
 const JUMP_AMPLITUDE = 0.045; // scaled with PERSON_HEIGHT's 2.2x bump
@@ -104,6 +104,11 @@ const WAR_COLOR: [number, number, number] = [0.75, 0.08, 0.05];
 const WAR_COLOR_EASE_RATE = 2;
 const LOCUST_FLINCH_FREQUENCY = 11; // Hz — much faster/jerkier than the normal jump bob
 const LOCUST_FLINCH_AMPLITUDE = 0.018;
+
+// Warm gold outline (vs. the crowd's default white rim) — the only visual
+// cue that a figure is one of the two named ones, alongside the name shown
+// in its speech bubble (see _drawBubbleText's caller).
+const NAMED_RIM_COLOR: [number, number, number] = [1, 0.85, 0.45];
 
 const N_FIRE_QUADS = 8;
 const FIRE_RING_RADIUS = 0.4;
@@ -190,6 +195,11 @@ export class FateEventVfxSystem extends createSystem({}) {
   private _planetArrived = false;
 
   private _peopleMaterial!: ReturnType<typeof makeToonRimFlatMaterial>;
+  // Own material instances for the two named figures (gold rim instead of
+  // the crowd's default white) — makeToonRimFlatMaterial's uBodyColor is a
+  // live uniform, but rim color is baked in at construction, so they can't
+  // just share _peopleMaterial with a per-instance tint override.
+  private _namedMaterials: ReturnType<typeof makeToonRimFlatMaterial>[] = [];
   private _personGroups: Group[] = [];
   private _personEntities: Entity[] = [];
   private _rightArms: Mesh[] = [];
@@ -274,6 +284,7 @@ export class FateEventVfxSystem extends createSystem({}) {
       const color = PEBBLE_TYPES[dominant].color;
       this._baseBodyColor = color;
       (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+      for (const mat of this._namedMaterials) (mat.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
     } else if (phase === Phase.FateEvents) {
       // celestialSymbol is resolved by now — pick up the real (possibly
       // dialogue-overridden) color, and reveal bubbles: people are already
@@ -281,6 +292,7 @@ export class FateEventVfxSystem extends createSystem({}) {
       const color = this._fateEvents.getPeopleColor();
       this._baseBodyColor = color;
       (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+      for (const mat of this._namedMaterials) (mat.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
       for (const mesh of this._bubbleMeshes) mesh.visible = true;
     } else if (phase === Phase.Stardust) {
       this._resetAll();
@@ -321,13 +333,17 @@ export class FateEventVfxSystem extends createSystem({}) {
     const initialDominant = getGlobals(this.world).dominantPebbleType.peek();
     this._peopleMaterial = makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color);
     this._baseBodyColor = PEBBLE_TYPES[initialDominant].color;
+    for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
+      this._namedMaterials.push(makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color, NAMED_RIM_COLOR));
+    }
     this._bobPhase = new Float32Array(count);
     this._bobAmp = new Float32Array(count);
     this._armRestZ = new Float32Array(count);
 
     for (let i = 0; i < count; i++) {
       this._bobPhase[i] = Math.random() * Math.PI * 2;
-      const { group, rightArm } = buildPlaceholderPerson(this._peopleMaterial);
+      const material = i < NAMED_FIGURE_COUNT ? this._namedMaterials[i] : this._peopleMaterial;
+      const { group, rightArm } = buildPlaceholderPerson(material);
       group.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
       group.quaternion.setFromUnitVectors(this._upAxis, this._normalVec);
@@ -446,6 +462,12 @@ export class FateEventVfxSystem extends createSystem({}) {
     // PlanetSpinTransition.getProgress()), so no separate clamping needed
     // to prevent regression once fully formed.
     const spinProgress = SPIN_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    // 1.0 at Fate Events' own full PLANET_RADIUS, shrinking in lockstep the
+    // rest of the time — keeps the crowd correctly sized relative to the
+    // planet through Leg A's smaller intermediate radius and Leg C's later
+    // recede/shrink for Launch, not just fixed at their Fate-Events-tuned
+    // absolute size forever once formed.
+    const radiusScale = this._planetSeeding.getLivePlanetRadius() / this._fateEvents.getPlanetRadius();
     for (let i = 0; i < this._personGroups.length; i++) {
       const group = this._personGroups[i];
       if (i >= maxVisible) {
@@ -455,7 +477,7 @@ export class FateEventVfxSystem extends createSystem({}) {
       const t = clamp01((spinProgress - i / this._personGroups.length) / STAGGER_WINDOW);
       const formed = smoothstep(t);
       group.visible = formed > 0;
-      group.scale.setScalar(formed);
+      group.scale.setScalar(formed * radiusScale);
     }
 
     this.camera.getWorldPosition(this._camWorldPos);
@@ -502,8 +524,12 @@ export class FateEventVfxSystem extends createSystem({}) {
 
       if (active[i] && this._lastLineIndex[i] !== lineIndex[i]) {
         this._lastLineIndex[i] = lineIndex[i];
-        const lines = this._fateEvents.getDialogueLinesFor(i);
-        this._drawBubbleText(i, lines[lineIndex[i]] ?? '');
+        // getLineText already routes through getDialogueLinesFor for
+        // non-featured figures (see fate-event-system.ts), so the
+        // paired-ghost override still applies — the two featured figures'
+        // own arc just takes priority.
+        const text = this._fateEvents.getLineText(i);
+        this._drawBubbleText(i, text);
       }
 
       bubbleMesh.position

@@ -10,7 +10,7 @@ import {
   Vector3,
 } from '@iwsdk/core';
 import { buildOrbitalArrow } from '../../vfx/geometry/orbital-arrow.js';
-import { OrbitalLaunchSystem, ORBIT_DIR, UNKNOWN_DIR, ZONE_RADIUS } from './orbital-launch-system.js';
+import { OrbitalLaunchSystem, ZONE_RADIUS } from './orbital-launch-system.js';
 
 const ORBIT_COLOR = 0x4a9aff;
 const UNKNOWN_COLOR = 0x7a3aff;
@@ -23,6 +23,18 @@ const LABEL_CANVAS_H = 128;
 
 const COUNTDOWN_PULSE_FREQ = 2.5;
 const COUNTDOWN_PULSE_AMOUNT = 0.12;
+
+// Charge-up cue while a zone is being held (see OrbitalLaunchSystem's
+// CHARGE_SECONDS/getOrbit/UnknownCharge01) — the zone visibly grows and
+// brightens toward these peak values as it fills, so "hold it here" reads
+// clearly rather than the zone just silently committing after a beat.
+const CHARGE_MAX_SCALE = 1.4;
+const CHARGE_BASE_OPACITY = 0.55;
+const CHARGE_MAX_OPACITY = 1.0;
+// 1/s exponential ease rate smoothing the visual toward the real charge
+// value — charge itself still resets to 0 the instant a hand leaves the
+// zone (see _updateCharge), this just keeps the *visual* from snapping.
+const CHARGE_VISUAL_EASE_RATE = 6;
 
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
@@ -60,11 +72,20 @@ function drawLabel(text: string): CanvasTexture {
   return new CanvasTexture(canvas);
 }
 
+const LABEL_OFFSET_Y = ZONE_RADIUS + LABEL_GAP;
+
 interface Choice {
   arrow: Group;
   zone: Mesh;
+  zoneMaterial: MeshBasicMaterial;
   label: Mesh;
+  // Both live references into OrbitalLaunchSystem's own Vector3 fields
+  // (same object identity every call, mutated in place there) — reading
+  // them here each frame automatically reflects the zone's current
+  // head-following position/orientation with no extra plumbing.
   center: Vector3;
+  liveDir: Vector3;
+  chargeVisual: number; // eased 0-1, see CHARGE_VISUAL_EASE_RATE
 }
 
 // Renders OrbitalLaunchSystem's choice: two arrows (Orbit/The Great
@@ -90,24 +111,29 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     this._zAxis = new Vector3(0, 0, 1);
     this._upAxis = new Vector3(0, 1, 0);
 
-    this._orbit = this._buildChoice(ORBIT_DIR, ORBIT_COLOR, 'Orbit', this._orbitalLaunch.getOrbitZoneCenter());
+    this._orbit = this._buildChoice(
+      ORBIT_COLOR,
+      'Orbit',
+      this._orbitalLaunch.getOrbitZoneCenter(),
+      this._orbitalLaunch.getOrbitDirLive(),
+    );
     this._unknown = this._buildChoice(
-      UNKNOWN_DIR,
       UNKNOWN_COLOR,
       'The Great Unknown',
       this._orbitalLaunch.getUnknownZoneCenter(),
+      this._orbitalLaunch.getUnknownDirLive(),
     );
   }
 
-  private _buildChoice(dir: [number, number, number], color: number, text: string, center: Vector3): Choice {
+  private _buildChoice(color: number, text: string, center: Vector3, liveDir: Vector3): Choice {
     const material = new MeshBasicMaterial({ color });
     const arrow = buildOrbitalArrow(material);
     arrow.position.copy(center);
-    arrow.quaternion.setFromUnitVectors(this._upAxis, new Vector3(dir[0], dir[1], dir[2]));
+    arrow.quaternion.setFromUnitVectors(this._upAxis, liveDir);
     arrow.visible = false;
     this.world.createTransformEntity(arrow);
 
-    const zoneMat = new MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.8 });
+    const zoneMat = new MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: CHARGE_BASE_OPACITY });
     const zone = new Mesh(new SphereGeometry(ZONE_RADIUS, 16, 12), zoneMat);
     zone.position.copy(center);
     zone.visible = false;
@@ -116,11 +142,11 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     const texture = drawLabel(text);
     const labelMat = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
     const label = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), labelMat);
-    label.position.copy(center).add(new Vector3(0, ZONE_RADIUS + LABEL_GAP, 0));
+    label.position.set(center.x, center.y + LABEL_OFFSET_Y, center.z);
     label.visible = false;
     this.world.createTransformEntity(label);
 
-    return { arrow, zone, label, center };
+    return { arrow, zone, zoneMaterial: zoneMat, label, center, liveDir, chargeVisual: 0 };
   }
 
   play(): void {
@@ -131,6 +157,8 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       choice.zone.visible = true;
       choice.label.visible = true;
       choice.zone.scale.setScalar(1);
+      choice.zoneMaterial.opacity = CHARGE_BASE_OPACITY;
+      choice.chargeVisual = 0;
     }
   }
 
@@ -153,6 +181,19 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     }
     this._lastState = state;
 
+    // center/liveDir are live references into OrbitalLaunchSystem's own
+    // fields, which _placeZones() sets ONCE when the phase begins (not
+    // continuously — see that class's own comment) — re-applying them here
+    // every frame is what picks up that one-time placement (init()'s own
+    // _buildChoice call ran with only the pre-play() placeholder values),
+    // and is otherwise a harmless no-op once they've settled.
+    for (const choice of [this._orbit, this._unknown]) {
+      choice.arrow.position.copy(choice.center);
+      choice.arrow.quaternion.setFromUnitVectors(this._upAxis, choice.liveDir);
+      choice.zone.position.copy(choice.center);
+      choice.label.position.set(choice.center.x, choice.center.y + LABEL_OFFSET_Y, choice.center.z);
+    }
+
     this.camera.getWorldPosition(this._camWorldPos);
     for (const choice of [this._orbit, this._unknown]) {
       if (!choice.label.visible) continue;
@@ -162,7 +203,19 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       }
     }
 
-    if (state === 'committed') {
+    if (state === 'choosing') {
+      const pull = 1 - Math.exp(-CHARGE_VISUAL_EASE_RATE * delta);
+      const targets: [Choice, number][] = [
+        [this._orbit, this._orbitalLaunch.getOrbitCharge01()],
+        [this._unknown, this._orbitalLaunch.getUnknownCharge01()],
+      ];
+      for (const [choice, target] of targets) {
+        choice.chargeVisual += (target - choice.chargeVisual) * pull;
+        choice.zone.scale.setScalar(1 + choice.chargeVisual * (CHARGE_MAX_SCALE - 1));
+        choice.zoneMaterial.opacity =
+          CHARGE_BASE_OPACITY + choice.chargeVisual * (CHARGE_MAX_OPACITY - CHARGE_BASE_OPACITY);
+      }
+    } else if (state === 'committed') {
       const winning = this._orbitalLaunch.getChoice() === 'orbit' ? this._orbit : this._unknown;
       const pulse = 1 + Math.sin(time * COUNTDOWN_PULSE_FREQ * Math.PI * 2) * COUNTDOWN_PULSE_AMOUNT;
       winning.zone.scale.setScalar(pulse);

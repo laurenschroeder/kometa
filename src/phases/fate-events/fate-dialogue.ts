@@ -19,8 +19,14 @@ export interface FateDialogueEntry {
 
 export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
   // soul dust
-  Dog: { lines: ['WOOF WOOF WOOF WOOF BARK PAW PAW'], pairedLine: 'I keep thinking about Luna' },
-  Human: { lines: ['That comet reminds me of someone I know', '<3'], pairedLine: 'I feel like Lilah is still here' },
+  Dog: {
+    lines: ['WOOF WOOF WOOF WOOF', 'ruff ruff'],
+    pairedLine: 'I keep thinking about Luna'
+  },
+  Human: {
+    lines: ['That comet reminds me of someone I know', '<3'],
+    pairedLine: 'I wonder if that was her visiting us..'
+  },
   Horn: {
     lines: [
       "This comet is bringing good news! Let's celebrate some more!",
@@ -57,6 +63,67 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
     color: [1.0, 0.82, 0.15],
   },
 };
+
+// The two featured figures (see fate-event-system.ts's NAMED_FIGURE_COUNT) —
+// always person-indices 0/1 — get their own short 3-line arc per dominant
+// pebble type instead of sharing the ambient crowd's cycling lines. Written
+// per pebble type (not per constellation, unlike FATE_DIALOGUE above) to
+// keep the content scope manageable — 2 figures x 3 lines x 3 types. Unlike
+// the ambient crowd, these PROGRESS and hold on the last line rather than
+// wrapping back to the start (see fate-event-system.ts's update()). No
+// display name — their speech bubbles show only the line text, same as the
+// ambient crowd's.
+export interface NamedFigureArc {
+  lines: string[];
+}
+
+// Indexed by dominantPebbleType (0=soul dust, 1=organic matter, 2=volatile
+// gasses — see pebble-type.ts). Organics' pair leans slightly more
+// expressive than the ambient crowd's pure animal-sound onomatopoeia, while
+// staying in the same naturalistic register.
+export const NAMED_FIGURES_BY_TYPE: [NamedFigureArc, NamedFigureArc][] = [
+  [
+    {
+      lines: [
+        "You remind me of someone..",
+        "They're with you now, I can feel it.",
+      ],
+    },
+    {
+      lines: [
+        'Whoa... are you really made of stardust?',
+        "I want to go wherever you're going.",
+        "Will I see you again?",
+
+      ],
+    },
+  ],
+  [
+    {
+      lines: [
+        'Welcome to our lush planet!', "The harvest hasn't been this good in years.", "Thank you for that!"],
+    },
+    {
+      lines: ['*sniff sniff* You smell like rain.', "We haven't needed rain since you came.", "Don't tell me that's a coincidence."],
+    },
+  ],
+  [
+    {
+      lines: [
+        'The sky is bleeding red again...',
+        'Every omen before you came true.',
+        'Just leave, and take your curse with you!!',
+      ],
+    },
+    {
+      lines: [
+        "You don't scare me, comet.",
+        "We rebuilt after the locusts. We'll rebuild again.",
+
+      ],
+    },
+  ],
+];
 
 const FATE_DIALOGUE_NAMES = Object.keys(FATE_DIALOGUE);
 

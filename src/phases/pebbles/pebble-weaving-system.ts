@@ -47,6 +47,28 @@ const CAPTURED_SPREAD_BASE = 0.024;
 const CAPTURED_SPREAD_GROWTH = 0.038;
 const CAPTURED_DEPTH_RATIO = 1.6;
 
+// When each pebble type visually pops into the field — timed to roughly
+// track the Pebbles-intro HUD notification's own per-line stagger (see
+// notification-copy.ts's Phase.Pebbles entry, and NotificationHudSystem's
+// LINE_STAGGER_SECONDS/FADE_SECONDS: line 0 is the generic "Three paths"
+// line, lines 1-3 name soul dust/organic matter/volatile gasses in that
+// order), so each type's pebbles grow in right as their own line finishes
+// fading in. A local, independently-tuned constant rather than an import
+// from notification-hud-system.ts — this is a cosmetic sync (gameplay/VFX
+// stay decoupled, same reasoning as ConstellationsSystem's own
+// COMPLETION_HOLD_SECONDS), not a hard dependency; PebbleFieldVfxSystem
+// reads getTypeRevealProgress() every frame to scale each pebble in.
+const TYPE_REVEAL_AT_SECONDS: readonly [number, number, number] = [2.3, 4.1, 5.9];
+const TYPE_REVEAL_GROW_SECONDS = 0.5;
+
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
+}
+function smoothstep(t: number): number {
+  const c = clamp01(t);
+  return c * c * (3 - 2 * c);
+}
+
 // Gameplay for Chapter 2: the ambient pebbles hidden away during Chapter 1
 // (see the HIDDEN_DURING_PHASES note in pebble-comet-presentation-system.ts)
 // fill the playspace here instead, gathered the exact same way stardust
@@ -66,6 +88,9 @@ export class PebbleWeavingSystem extends createSystem({
   private _hasWon = false;
   private _captureEvents: PebbleCaptureEvent[] = [];
   private _attractEvents: PebbleAttractEvent[] = [];
+  // Seconds since this phase's own play() — drives getTypeRevealProgress()
+  // below, see TYPE_REVEAL_AT_SECONDS's own comment.
+  private _elapsed = 0;
 
   private _hand!: GatherHandInput;
   private _scratchVel!: Vector3;
@@ -125,9 +150,11 @@ export class PebbleWeavingSystem extends createSystem({
     this._hasWon = false;
     this._captureEvents.length = 0;
     this._attractEvents.length = 0;
+    this._elapsed = 0;
   }
 
   update(delta: number): void {
+    this._elapsed += delta;
     this._hand.seen = false;
     for (const entity of this.queries.hands.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
@@ -192,6 +219,10 @@ export class PebbleWeavingSystem extends createSystem({
   // per-instance coloring.
   getAssignedType(): Uint8Array {
     return this._field.assignedType;
+  }
+  // 0-1 grow-in progress for a pebble type — see TYPE_REVEAL_AT_SECONDS.
+  getTypeRevealProgress(type: number): number {
+    return smoothstep((this._elapsed - TYPE_REVEAL_AT_SECONDS[type]) / TYPE_REVEAL_GROW_SECONDS);
   }
 
   // Returns this frame's capture events and clears the queue — see

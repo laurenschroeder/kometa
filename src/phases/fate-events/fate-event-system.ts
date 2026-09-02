@@ -2,10 +2,12 @@ import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
+import { farewellMessage } from '../../core/notification-copy.js';
+import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { scatterOnSphereCap } from '../../vfx/geometry/sphere-scatter.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
-import { FateDialogueEntry, getFateDialogue } from './fate-dialogue.js';
+import { FateDialogueEntry, getFateDialogue, NamedFigureArc, NAMED_FIGURES_BY_TYPE } from './fate-dialogue.js';
 
 export const PLANET_CENTER: [number, number, number] = [0, 1.3, -2.0];
 export const PLANET_RADIUS = 1.4;
@@ -39,6 +41,23 @@ const BOB_FREQUENCY_MULT_BY_TYPE = [1, 1.25, 0.6]; // souls, organics, gasses
 // Fraction of the type's visible people that must be visited to complete
 // the phase early — otherwise it falls back to the timeout (see index.ts).
 const VISIT_FRACTION_TO_COMPLETE = 0.5;
+// Floor on how soon the visit-based win condition above can actually fire —
+// without this, a player who happens to visit half the crowd quickly could
+// end the phase in well under 20s, barely getting to fly around/hear from
+// anyone before Launch's shrinking planet shows up. Paired with index.ts's
+// own timeoutSeconds (65) so this phase always lasts roughly a minute either
+// way, whether the player lingers or rushes.
+const MIN_PHASE_SECONDS = 55;
+
+// The first two people (always within range — VISIBLE_PEOPLE_BY_TYPE's
+// smallest value is 6) get individual identity instead of sharing the
+// ambient crowd's dialogue — see NAMED_FIGURES_BY_TYPE. Exported so
+// FateEventVfxSystem uses the same indices for its gold-rim material swap.
+export const NAMED_FIGURE_COUNT = 2;
+// Minimum accumulated near-time (see _namedDwell) before stop()'s farewell
+// message will name a figure at all — guards against firing for a player
+// who barely brushed past one on their way to somewhere else.
+const NAMED_DWELL_THRESHOLD = 0.5;
 
 // Gameplay for Fate Events: a big planet appears near the player, populated
 // with N_PEOPLE placeholder figures scattered across its near-facing surface
@@ -52,8 +71,10 @@ const VISIT_FRACTION_TO_COMPLETE = 0.5;
 // here: no mesh/entity creation happens in this file (see
 // FateEventVfxSystem), only surface layout math and proximity/dialogue
 // state. Visiting at least half of the type's visible people (see
-// VISIT_FRACTION_TO_COMPLETE) completes the phase early; otherwise it falls
-// back to the timeout (see index.ts).
+// VISIT_FRACTION_TO_COMPLETE) completes the phase — but not before
+// MIN_PHASE_SECONDS has passed, so the player always gets roughly a minute
+// to fly around and hear from people regardless of how fast they visit;
+// otherwise it falls back to the timeout (see index.ts).
 export class FateEventSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
@@ -66,6 +87,16 @@ export class FateEventSystem extends createSystem({
   private _lineTimer!: Float32Array;
   private _visited!: Uint8Array;
   private _visitedCount = 0;
+  // Seconds since play() — gates the visit-based win condition below (see
+  // MIN_PHASE_SECONDS).
+  private _elapsed = 0;
+
+  // Cached per play() from NAMED_FIGURES_BY_TYPE[dominantPebbleType] — see
+  // that table's own comment for why this is a fixed placeholder until then.
+  private _namedArcs!: [NamedFigureArc, NamedFigureArc];
+  // Accumulated near-time per named figure, reset each play() — read in
+  // stop() to decide who (if anyone) gets the farewell message.
+  private _namedDwell!: Float32Array;
 
   private _dialogue!: FateDialogueEntry;
   private _color!: [number, number, number];
@@ -91,8 +122,10 @@ export class FateEventSystem extends createSystem({
     this._lineIndex = new Uint8Array(N_PEOPLE);
     this._lineTimer = new Float32Array(N_PEOPLE);
     this._visited = new Uint8Array(N_PEOPLE);
+    this._namedDwell = new Float32Array(NAMED_FIGURE_COUNT);
 
     this._dialogue = getFateDialogue(null);
+    this._namedArcs = NAMED_FIGURES_BY_TYPE[0];
     this._color = PEBBLE_TYPES[0].color;
 
     this._scratchHandPos = new Vector3();
@@ -106,6 +139,7 @@ export class FateEventSystem extends createSystem({
     const globals = getGlobals(this.world);
     const dominantType = globals.dominantPebbleType.peek();
     this._dialogue = getFateDialogue(globals.celestialSymbol.peek());
+    this._namedArcs = NAMED_FIGURES_BY_TYPE[dominantType];
     this._color = this._dialogue.color ?? PEBBLE_TYPES[dominantType].color;
     this._showFire = dominantType === VOLATILE_GASSES_TYPE;
 
@@ -115,6 +149,8 @@ export class FateEventSystem extends createSystem({
     this._lineTimer.fill(0);
     this._visited.fill(0);
     this._visitedCount = 0;
+    this._namedDwell.fill(0);
+    this._elapsed = 0;
 
     // Primary trigger for Leg B — the final grow/zoom-in from wherever
     // Constellations' spin transition (Leg A) left the planet, to Fate
@@ -127,7 +163,24 @@ export class FateEventSystem extends createSystem({
     this.world.getSystem(PlanetSeedingVfxSystem)?.startFateEventsTransition();
   }
 
+  // The "branching" payoff: if the player lingered near one of the two
+  // featured figures more than the other, they get a one-line (anonymous —
+  // see farewellMessage) farewell as the phase ends — silent if neither
+  // crossed NAMED_DWELL_THRESHOLD (the player never meaningfully engaged
+  // with either). A tie (including both at 0) also stays silent rather than
+  // arbitrarily picking one.
+  stop(): void {
+    super.stop();
+    const [a, b] = this._namedDwell;
+    if (a === b || Math.max(a, b) < NAMED_DWELL_THRESHOLD) return;
+    const notifications = this.world.getSystem(NotificationHudSystem);
+    const { text, holdSeconds } = farewellMessage();
+    notifications?.notify(text, holdSeconds);
+  }
+
   update(delta: number): void {
+    this._elapsed += delta;
+
     // Only the type's own visible figures (see VISIBLE_PEOPLE_BY_TYPE) are
     // reachable — the rest stay hidden scenery (see fate-event-vfx-system.ts's
     // matching revealCount cap), so they never activate/count as visited.
@@ -150,32 +203,58 @@ export class FateEventSystem extends createSystem({
           }
           if (!this._active[i]) {
             this._active[i] = 1;
-            this._lineIndex[i] = 0;
-            this._lineTimer[i] = 0;
+            // Ambient crowd restarts its cycling lines from the top each
+            // fresh approach (by design — see the class comment). The two
+            // featured figures do NOT: they're meant to progress and hold
+            // on their final line (see the update() loop below) — resetting
+            // here too would mean simply stepping back and re-approaching
+            // sends them back to line 1 every time, which in practice made
+            // it look like they never progressed at all, since a player
+            // rarely holds a hand within PROXIMITY_RADIUS continuously for
+            // multiple full LINE_CYCLE_SECONDS windows. Their line/timer
+            // state now only ever resets at play() (a fresh loop).
+            if (i >= NAMED_FIGURE_COUNT) {
+              this._lineIndex[i] = 0;
+              this._lineTimer[i] = 0;
+            }
           }
           this._awayTimer[i] = 0;
         } else if (this._active[i]) {
           this._awayTimer[i] += delta;
           if (this._awayTimer[i] >= LEAVE_GRACE_SECONDS) {
             this._active[i] = 0;
-            this._lineIndex[i] = 0;
-            this._lineTimer[i] = 0;
+            if (i >= NAMED_FIGURE_COUNT) {
+              this._lineIndex[i] = 0;
+              this._lineTimer[i] = 0;
+            }
           }
         }
       }
     }
 
-    if (this._visitedCount >= Math.ceil(visibleCount * VISIT_FRACTION_TO_COMPLETE)) {
+    if (
+      this._elapsed >= MIN_PHASE_SECONDS &&
+      this._visitedCount >= Math.ceil(visibleCount * VISIT_FRACTION_TO_COMPLETE)
+    ) {
       getGlobals(this.world).phaseComplete.value = true;
     }
 
     for (let i = 0; i < visibleCount; i++) {
       if (!this._active[i]) continue;
+      if (i < NAMED_FIGURE_COUNT) this._namedDwell[i] += delta;
       const lineCount = this.getDialogueLinesFor(i).length;
+
       this._lineTimer[i] += delta;
       if (this._lineTimer[i] >= LINE_CYCLE_SECONDS) {
         this._lineTimer[i] = 0;
-        this._lineIndex[i] = (this._lineIndex[i] + 1) % lineCount;
+        if (i < NAMED_FIGURE_COUNT) {
+          // Progress and hold — a 3-beat arc reads as a tiny story, not
+          // ambient chatter that loops forever.
+          const namedLineCount = this._namedArcs[i].lines.length;
+          this._lineIndex[i] = Math.min(this._lineIndex[i] + 1, namedLineCount - 1);
+        } else {
+          this._lineIndex[i] = (this._lineIndex[i] + 1) % lineCount;
+        }
       }
     }
   }
@@ -210,6 +289,9 @@ export class FateEventSystem extends createSystem({
   // fixed single-line override instead, replacing their dialogue entirely.
   // Routed through globals rather than a direct system reference so this
   // file and earth-situations-vfx-system.ts don't need to import each other.
+  // The two featured figures (see NAMED_FIGURE_COUNT) bypass this entirely
+  // — getLineText below checks featured status first, so their own
+  // NAMED_FIGURES_BY_TYPE arc always wins over a ghost pairing.
   getDialogueLinesFor(personIndex: number): readonly string[] {
     const globals = getGlobals(this.world);
     if (personIndex === globals.pairedPersonIndex.peek()) {
@@ -217,6 +299,10 @@ export class FateEventSystem extends createSystem({
       if (line) return [line];
     }
     return this._dialogue.lines;
+  }
+  getLineText(i: number): string {
+    if (i < NAMED_FIGURE_COUNT) return this._namedArcs[i].lines[this._lineIndex[i]] ?? '';
+    return this.getDialogueLinesFor(i)[this._lineIndex[i]] ?? '';
   }
   getPeopleColor(): [number, number, number] {
     return this._color;
