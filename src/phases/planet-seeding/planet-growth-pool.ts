@@ -1,28 +1,32 @@
-import { Group, ShaderMaterial, Vector3, World } from '@iwsdk/core';
+import { Group, Mesh, ShaderMaterial, Vector3, World } from '@iwsdk/core';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
-import { buildPlaceholderPerson } from '../../vfx/geometry/placeholder-person.js';
+import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { N_PLANETS, PLANET_RADIUS } from './planet-seeding-system.js';
 
 const PER_PLANET_CAP = 6;
 const POOL_SIZE = N_PLANETS * PER_PLANET_CAP;
 
-// PERSON_HEIGHT (0.2) was tuned for Fate Events' ~1.4-radius planet; scaled
-// down here so a full-grown figure reads as a small resident on Seeding's
-// much smaller PLANET_RADIUS=0.11 planets (~0.032m tall, ~15% of a
-// planet's diameter) rather than a giant looming over it.
-const GROWTH_TARGET_SCALE = 0.16;
+// buildOrganicGeometry()'s unit-radius rock, scaled down to a small
+// sprouting mound on Seeding's PLANET_RADIUS=0.11 planet (~0.03m diameter) —
+// not person-shaped (see this class's own comment: no people during
+// Seeding, that reveal now happens later — see FateEventVfxSystem's
+// spin-driven civilization forming).
+const GROWTH_TARGET_SCALE = 0.02;
 const GROWTH_EASE_RATE = 2.0; // 1/s exponential ease, same idiom as _easeCoverage
 
-// Green class's seeding flourish: "cause life to grow" — tiny
-// buildPlaceholderPerson() figures pop up and permanently grow at each
-// landing spot, capped per planet (an "established little colony," not
-// unbounded clutter at this tiny scale). Not a System — a plain pooled-
-// effect class driven by explicit trySpawn()/update()/reset() calls from
-// PlanetSeedingVfxSystem, same idiom as HeartBurstPool. Fixed slots
-// (planet*PER_PLANET_CAP + localIndex), no free-list needed: a planet's
-// count only ever grows within a single Seeding attempt, and reset()
-// zeroes every planet's count together on a fresh loop.
+// Green class's seeding flourish: "cause life to grow" — tiny rock/sprout
+// mounds pop up and permanently grow at each landing spot, capped per planet
+// (an "established little colony," not unbounded clutter at this tiny
+// scale). Deliberately NOT person-shaped — Seeding shouldn't show people;
+// the actual Fate Events civilization only starts forming later, during the
+// Seeding->Constellations spin transition (see FateEventVfxSystem). Not a
+// System — a plain pooled-effect class driven by explicit
+// trySpawn()/update()/reset() calls from PlanetSeedingVfxSystem, same idiom
+// as HeartBurstPool. Fixed slots (planet*PER_PLANET_CAP + localIndex), no
+// free-list needed: a planet's count only ever grows within a single
+// Seeding attempt, and reset() zeroes every planet's count together on a
+// fresh loop.
 export class PlanetGrowthPool {
   private _material!: ShaderMaterial;
   private _groups: Group[] = [];
@@ -38,8 +42,9 @@ export class PlanetGrowthPool {
 
     for (let planet = 0; planet < N_PLANETS; planet++) {
       for (let local = 0; local < PER_PLANET_CAP; local++) {
-        const group = buildPlaceholderPerson(this._material);
-        group.name = `growth-person-${planet}-${local}`;
+        const group = new Group();
+        group.add(new Mesh(buildOrganicGeometry(), this._material));
+        group.name = `growth-sprout-${planet}-${local}`;
         group.position.set(planetPositions[planet * 3], planetPositions[planet * 3 + 1], planetPositions[planet * 3 + 2]);
         group.scale.setScalar(0);
         group.visible = false;

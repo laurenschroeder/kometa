@@ -1,5 +1,6 @@
 import { createSystem, Entity, Object3D, Quaternion, Vector3 } from '@iwsdk/core';
 import { CometBody } from './comet-body-component.js';
+import { CometCaught } from './comet-event-tags.js';
 import { HandAnchor, HandSide } from './hand-anchor-component.js';
 
 // How long only one hand may be tracked before the comet drifts over to it —
@@ -64,6 +65,10 @@ export class CometHandoffSystem extends createSystem({
   update(delta: number): void {
     if (!this._entity) return;
     const entity = this._entity;
+    // Clear last frame's edge tag before evaluating this frame's transitions
+    // — same idiom CometPhysicsSystem uses for CometSnapped/CometReleased,
+    // just owned here since this is the only place CometCaught is ever set.
+    if (entity.hasComponent(CometCaught)) entity.removeComponent(CometCaught);
     const currentHand = entity.getValue(HandAnchor, 'hand') as string;
 
     const leftPresent = this.input.xr.gamepads.left !== undefined;
@@ -106,6 +111,7 @@ export class CometHandoffSystem extends createSystem({
 
     if (this._gripPos.distanceToSquared(this._cometPos) <= CATCH_RADIUS * CATCH_RADIUS) {
       this._switchTo(entity, catcher);
+      entity.addComponent(CometCaught);
     }
   }
 

@@ -1,8 +1,9 @@
 import { AssetType, DomeGradient, SessionMode, World } from '@iwsdk/core';
+import { CometAudioSystem } from './comet/comet-audio-system.js';
 import { CometAutopilotSystem } from './comet/comet-autopilot-system.js';
 import { CometBody } from './comet/comet-body-component.js';
 import { CometHandoffSystem } from './comet/comet-handoff-system.js';
-import { CometReleased, CometSnapped } from './comet/comet-event-tags.js';
+import { CometCaught, CometReleased, CometSnapped } from './comet/comet-event-tags.js';
 import { CometPhysicsSystem } from './comet/comet-physics-system.js';
 import { CometTrail } from './comet/comet-trail-component.js';
 import { CometTrailSystem } from './comet/comet-trail-system.js';
@@ -13,9 +14,11 @@ import { GameDirectorSystem } from './core/game-director-system.js';
 import { HudText, NotificationHudSystem } from './core/notification-hud-system.js';
 import { Phase } from './core/phase.js';
 import { PhaseMenuSystem } from './core/phase-menu-system.js';
+import { StarfieldSystem } from './core/starfield-system.js';
 import { StartMenuSystem } from './core/start-menu-system.js';
 import { ConstellationsSystem } from './phases/constellations/constellations-system.js';
 import { ConstellationsVfxSystem } from './phases/constellations/constellations-vfx-system.js';
+import { EarthSituationsVfxSystem } from './phases/fate-events/earth-situations-vfx-system.js';
 import { FateEventSystem } from './phases/fate-events/fate-event-system.js';
 import { FateEventVfxSystem } from './phases/fate-events/fate-event-vfx-system.js';
 import { EndRunMenuSystem } from './phases/finale/end-run-menu-system.js';
@@ -77,7 +80,8 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerComponent(HandAnchor)
     .registerComponent(CometTrail)
     .registerComponent(CometSnapped)
-    .registerComponent(CometReleased);
+    .registerComponent(CometReleased)
+    .registerComponent(CometCaught);
 
   // comet/ (handoff + physics + trail) is the reusable spring-joint
   // mechanic, always on. PebbleCometPresentationSystem is the persistent,
@@ -90,7 +94,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(CometHandoffSystem, { priority: 9 })
     .registerSystem(CometPhysicsSystem, { priority: 10 })
     .registerSystem(CometTrailSystem, { priority: 15 })
-    .registerSystem(PebbleCometPresentationSystem, { priority: 20 });
+    .registerSystem(PebbleCometPresentationSystem, { priority: 20 })
+    // Reacts to CometSnapped/CometReleased (added by CometPhysicsSystem,
+    // priority 10) and CometCaught (added by CometHandoffSystem, priority
+    // 9) — must run after both, same visual-sync band as
+    // PebbleCometPresentationSystem.
+    .registerSystem(CometAudioSystem, { priority: 21 });
 
   // There's exactly one comet, defaulting to the right hand — see
   // CometHandoffSystem for how it switches (passive drift after 2s with
@@ -124,6 +133,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // comments) — order relative to NotificationHudSystem doesn't matter,
   // it looks NotificationHudSystem up lazily via getSystem() on unlock.
   world.registerSystem(AchievementSystem, { priority: 36 });
+
+  // Distant background starfield — always-on, visible from the start menu
+  // through every phase, never GameDirector-managed (see its own comments).
+  // No dependencies on any other system, so registration order doesn't
+  // matter; priority just needs to land in the visual-sync band.
+  world.registerSystem(StarfieldSystem, { priority: 21 });
 
   // StardustVfxSystem is registered but deliberately never passed to
   // definePhase() — its captured-mote pools need to keep rendering through
@@ -165,10 +180,9 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   });
 
   // ConstellationsVfxSystem is registered but, like StardustVfxSystem/
-  // PlanetSeedingVfxSystem, never passed to definePhase() — the winning
-  // constellation's stars persist as permanent sky scenery once a winner is
-  // set, so it self-gates visibility via gamePhase instead of being
-  // director play()/stop()-managed.
+  // PlanetSeedingVfxSystem, never passed to definePhase() — a completed
+  // constellation's stars persist as permanent sky scenery, so it self-gates
+  // visibility via gamePhase instead of being director play()/stop()-managed.
   world
     .registerSystem(ConstellationsSystem, { priority: 30 })
     .registerSystem(ConstellationsVfxSystem, { priority: 32 });
@@ -191,6 +205,15 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     systems: [world.getSystem(FateEventSystem)!],
     timeoutSeconds: 35,
   });
+
+  // Per-constellation "situation on Earth" — ambient decorations, the
+  // ghost-rise-and-attach payoff, and the paired-dialogue mechanic (see its
+  // own comments). Always-on/self-gated like FateEventVfxSystem, never
+  // definePhase()-managed — the ghost attachment persists straight through
+  // Launch/Finale. Registered after PlanetSeedingVfxSystem/
+  // ConstellationsSystem/FateEventSystem, all three of which it looks up
+  // via getSystem() in its own init().
+  world.registerSystem(EarthSituationsVfxSystem, { priority: 33 });
 
   world
     .registerSystem(OrbitalLaunchSystem, { priority: 30 })

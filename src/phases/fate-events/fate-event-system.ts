@@ -116,12 +116,14 @@ export class FateEventSystem extends createSystem({
     this._visited.fill(0);
     this._visitedCount = 0;
 
-    // Safety net: ConstellationsSystem.play() is the normal trigger for the
-    // ring planet's rotate/grow transition (it now runs before this phase —
-    // see phase.ts's PHASE_ORDER), but a dev-menu jump straight to Fate
-    // Events skips that entirely. start() always re-targets from whatever
-    // the planet's current live state is, so calling it again here is a
-    // smooth no-op on the normal path and the only trigger on the skip path.
+    // Primary trigger for Leg B — the final grow/zoom-in from wherever
+    // Constellations' spin transition (Leg A) left the planet, to Fate
+    // Events' true PLANET_CENTER/PLANET_RADIUS (see planet-seeding-vfx-
+    // system.ts's startFateEventsTransition, which syncs Leg B's start state
+    // from Leg A before starting it). Also doubles as a dev-menu-skip safety
+    // net: a jump straight to Fate Events (skipping both Seeding and
+    // Constellations) still works, since Leg A always has a sane default
+    // position/radius even if it never ran.
     this.world.getSystem(PlanetSeedingVfxSystem)?.startFateEventsTransition();
   }
 
@@ -167,9 +169,9 @@ export class FateEventSystem extends createSystem({
       getGlobals(this.world).phaseComplete.value = true;
     }
 
-    const lineCount = this._dialogue.lines.length;
     for (let i = 0; i < visibleCount; i++) {
       if (!this._active[i]) continue;
+      const lineCount = this.getDialogueLinesFor(i).length;
       this._lineTimer[i] += delta;
       if (this._lineTimer[i] >= LINE_CYCLE_SECONDS) {
         this._lineTimer[i] = 0;
@@ -201,7 +203,19 @@ export class FateEventSystem extends createSystem({
   getLineIndex(): Uint8Array {
     return this._lineIndex;
   }
-  getDialogueLines(): readonly string[] {
+  // Per-person dialogue — normally everyone shares this._dialogue.lines, but
+  // the one person index EarthSituationsVfxSystem picked as "paired" with a
+  // risen ghost (Dog/Human only — see globals.pairedPersonIndex/
+  // pairedPersonLine, set on that constellation's completion edge) gets a
+  // fixed single-line override instead, replacing their dialogue entirely.
+  // Routed through globals rather than a direct system reference so this
+  // file and earth-situations-vfx-system.ts don't need to import each other.
+  getDialogueLinesFor(personIndex: number): readonly string[] {
+    const globals = getGlobals(this.world);
+    if (personIndex === globals.pairedPersonIndex.peek()) {
+      const line = globals.pairedPersonLine.peek();
+      if (line) return [line];
+    }
     return this._dialogue.lines;
   }
   getPeopleColor(): [number, number, number] {

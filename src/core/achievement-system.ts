@@ -1,4 +1,5 @@
-import { createSystem } from '@iwsdk/core';
+import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
+import { AchievementSynth } from '../vfx/audio/achievement-synth.js';
 import { ACHIEVEMENTS } from './achievement-list.js';
 import { unlockAchievement } from './achievement-store.js';
 import { getGlobals } from './globals.js';
@@ -23,8 +24,17 @@ const PHASE_COMPLETION_ACHIEVEMENT: Partial<Record<Phase, string>> = {
 // full Finale -> Stardust loop for the "full-circle" achievement.
 export class AchievementSystem extends createSystem({}) {
   private _prevPhase: Phase | null = null;
+  private _audioListener!: AudioListener;
+  private _synth!: AchievementSynth;
+  private _scratchPos!: Vector3;
 
   init(): void {
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._synth = new AchievementSynth();
+    this._synth.build(this._audioListener, this.scene);
+    this._scratchPos = new Vector3();
+
     this.cleanupFuncs.push(
       getGlobals(this.world).gamePhase.subscribe((phase) => this._onPhaseChange(phase)),
     );
@@ -52,5 +62,9 @@ export class AchievementSystem extends createSystem({}) {
     this.world
       .getSystem(NotificationHudSystem)
       ?.notify(`Achievement unlocked: ${def.title}`, 3.5);
+    // Not tied to any world location — just plays roughly where the player
+    // is looking, same as the HUD notification it accompanies.
+    this.camera.getWorldPosition(this._scratchPos);
+    this._synth.playUnlock(this._scratchPos);
   }
 }

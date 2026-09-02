@@ -1,12 +1,15 @@
-import { createSystem, Vector3 } from '@iwsdk/core';
+import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { getGlobals } from '../../core/globals.js';
 import {
+  civilizationReflectionMessage,
   LAUNCH_BUILDUP_SEQUENCE,
   ORBIT_COMMIT_MESSAGE,
   UNKNOWN_COMMIT_MESSAGE,
 } from '../../core/notification-copy.js';
 import { FADE_SECONDS, NotificationHudSystem } from '../../core/notification-hud-system.js';
+import { OrbitalLaunchSynth } from '../../vfx/audio/orbital-launch-synth.js';
 
 // Direction from the player toward the big Fate Events planet — player
 // origin is ~(0,·,0) and PLANET_CENTER is at x=0, so "toward the planet" is
@@ -88,7 +91,15 @@ export class OrbitalLaunchSystem extends createSystem({
   private _camFwd!: Vector3;
   private _toComet!: Vector3;
 
+  private _audioListener!: AudioListener;
+  private _synth!: OrbitalLaunchSynth;
+
   init(): void {
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._synth = new OrbitalLaunchSynth();
+    this._synth.build(this._audioListener, this.scene);
+
     this._orbitZoneCenter = new Vector3(
       ORBIT_DIR[0] * ARROW_DISTANCE,
       ARROW_HEIGHT,
@@ -112,6 +123,15 @@ export class OrbitalLaunchSystem extends createSystem({
     this._state = 'choosing';
     this._choice = null;
     this._committedElapsed = 0;
+
+    // Retrospective "what you leave behind" beat, fired the instant Launch
+    // begins (i.e. right as Fate Events ends, however it ended) — queues
+    // alongside (order relative to NOTIFICATION_COPY[Phase.Launch]'s own
+    // blurb isn't guaranteed, but NotificationHudSystem.notify() queues
+    // rather than interrupts, so both always play back to back either way).
+    const celestialSymbol = getGlobals(this.world).celestialSymbol.peek();
+    const { text, holdSeconds } = civilizationReflectionMessage(celestialSymbol);
+    this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);
   }
 
   // Fallback for "player never chooses" or "never swings fast enough": if
@@ -169,6 +189,9 @@ export class OrbitalLaunchSystem extends createSystem({
     const notifications = this.world.getSystem(NotificationHudSystem);
     const { text, holdSeconds } = choice === 'orbit' ? ORBIT_COMMIT_MESSAGE : UNKNOWN_COMMIT_MESSAGE;
     notifications?.notify(text, holdSeconds);
+    // _scratchPos was just set to the comet's current position by update()'s
+    // own per-entity loop, right before this was called.
+    this._synth.playCommit(choice === 'orbit' ? 'orbit' : 'launch', this._scratchPos);
     let detachAt = notifyDuration(holdSeconds);
     for (const entry of LAUNCH_BUILDUP_SEQUENCE) {
       notifications?.notify(entry.text, entry.holdSeconds);
@@ -186,6 +209,8 @@ export class OrbitalLaunchSystem extends createSystem({
     // _isCometInView.
     this.camera.getWorldDirection(this._camFwd);
     for (const entity of this.queries.bodies.entities) {
+      const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
+      this._scratchPos.fromArray(posView);
       const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
       this._scratchVel.fromArray(velView);
       const speed = Math.max(this._scratchVel.length(), MIN_DETACH_SPEED);
@@ -193,6 +218,7 @@ export class OrbitalLaunchSystem extends createSystem({
       this._scratchVel.toArray(velView);
       entity.removeComponent(HandAnchor);
     }
+    this._synth.playDetach(this._scratchPos);
   }
 
   // Read-only accessors for OrbitalLaunchVfxSystem/CometAutopilotSystem.

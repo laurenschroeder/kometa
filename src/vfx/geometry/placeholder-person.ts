@@ -17,6 +17,15 @@ const ARM_SPACING = 0.044;
 const ARM_TILT = Math.PI / 12; // ~15 degrees, outward
 const HEAD_RADIUS = 0.026;
 
+export interface PlaceholderPerson {
+  group: Group;
+  // The right-arm Mesh, exposed separately so callers can rotate it for
+  // one-off animations (e.g. pointing up at the comet) without disturbing
+  // its resting pose — its own `rotation.z = ARM_TILT` local space is
+  // preserved as the "arm down" rest orientation to return to.
+  rightArm: Mesh;
+}
+
 // Placeholder "person made of basic shapes" — a blocky figure built from
 // primitives, group origin at the feet so it can be dropped straight onto a
 // world surface point (see sphere-scatter.ts). Geometry is built fresh per
@@ -25,7 +34,7 @@ const HEAD_RADIUS = 0.026;
 // buildOrganicGeometry()'s displacement work. `material` is shared across
 // every figure (and retinted live via its uBodyColor uniform — see
 // makeToonRimFlatMaterial), not built per-figure here.
-export function buildPlaceholderPerson(material: ShaderMaterial): Group {
+export function buildPlaceholderPerson(material: ShaderMaterial): PlaceholderPerson {
   const group = new Group();
 
   const legGeo = new CylinderGeometry(LEG_RADIUS, LEG_RADIUS, LEG_HEIGHT, 8);
@@ -42,11 +51,13 @@ export function buildPlaceholderPerson(material: ShaderMaterial): Group {
 
   const armY = LEG_HEIGHT + TORSO_HEIGHT - ARM_HEIGHT / 2;
   const armGeo = new CylinderGeometry(ARM_RADIUS, ARM_RADIUS, ARM_HEIGHT, 6);
+  let rightArm!: Mesh;
   for (const side of [-1, 1]) {
     const arm = new Mesh(armGeo, material);
     arm.position.set(side * ARM_SPACING, armY, 0);
     arm.rotation.z = side * ARM_TILT;
     group.add(arm);
+    if (side === 1) rightArm = arm;
   }
 
   const headY = LEG_HEIGHT + TORSO_HEIGHT + HEAD_RADIUS;
@@ -54,5 +65,5 @@ export function buildPlaceholderPerson(material: ShaderMaterial): Group {
   head.position.set(0, headY, 0);
   group.add(head);
 
-  return group;
+  return { group, rightArm };
 }

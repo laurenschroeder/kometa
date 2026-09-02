@@ -10,7 +10,11 @@ import { ConstellationDef } from '../../phases/constellations/constellation-set.
 // as two distinct bands rather than overlapping. Absolute world-space — the
 // player doesn't move during this phase, same convention weave-path.ts's
 // placePlanets uses for its full-circle ring.
-const ANCHOR_SURFACE_OFFSET = 0.3; // clears most constellations' spreadRadius (max 0.5) from the surface
+// Exported so callers that need to re-derive an anchor's live position as the
+// planet's own radius changes (see ConstellationsVfxSystem's live tracking
+// through the Seeding->Constellations->FateEvents transitions) can reuse the
+// exact same offset rather than duplicating this number.
+export const ANCHOR_SURFACE_OFFSET = 0.3; // clears most constellations' spreadRadius (max 0.58) from the surface
 const ANCHOR_AZIMUTH_SPREAD_DEG = 30; // -30/0/+30 around the planet's vertical axis
 // Tilted up from "straight at the player" ([0,0,1]) rather than level with
 // it — this is what keeps the arc above the people cap instead of sharing it.
@@ -82,11 +86,11 @@ function samplePathAt(u: number, padded: readonly Vector3[], out: Vector3): Vect
   return out;
 }
 
-// N dots evenly spaced by arc length along the path — same "2000-sample
+// N stars evenly spaced by arc length along the path — same "2000-sample
 // table + cumulative length" technique weave-path.ts's placeDots() uses,
 // generalized to an arbitrary padded control-point spline instead of the
 // ring/weave-specific formula.
-function placeDotsAlongPath(count: number, padded: readonly Vector3[]): Float32Array {
+function placeStarsAlongPath(count: number, padded: readonly Vector3[]): Float32Array {
   const SAMPLES = 2000;
   const samplePoints: Vector3[] = new Array(SAMPLES + 1);
   const cumLength = new Float32Array(SAMPLES + 1);
@@ -110,29 +114,21 @@ function placeDotsAlongPath(count: number, padded: readonly Vector3[]): Float32A
 }
 
 export interface ConstellationLayout {
-  starPositions: Float32Array; // decorative, non-interactive
-  dotPositions: Float32Array; // the winding path's touch targets
+  starPositions: Float32Array; // the winding path's stars — both the visual shape AND the touch/trace targets
 }
 
-// Scatters starCount stars and a winding path of dotCount evenly-spaced
-// touch dots within a spreadRadius volume around anchor. No attempt at a
-// recognizable shape yet (dog/human/horn/etc. are just names for now) —
-// purely procedural, so size/complexity variety comes entirely from the
-// ConstellationDef's own numbers (see constellation-set.ts).
+// Places starCount stars evenly along a winding path (def.controlPointCount
+// control points) within a spreadRadius volume around anchor, so the
+// constellation reads as a coherent traceable shape rather than a random
+// scatter. No attempt at a recognizable silhouette yet (dog/human/horn/etc.
+// are just names for now) — purely procedural, so size/complexity variety
+// comes entirely from the ConstellationDef's own numbers (see
+// constellation-set.ts).
 export function generateConstellationLayout(
   def: ConstellationDef,
   anchor: readonly [number, number, number],
 ): ConstellationLayout {
   const [ax, ay, az] = anchor;
-
-  const starPositions = new Float32Array(def.starCount * 3);
-  for (let i = 0; i < def.starCount; i++) {
-    const dir = randomUnitVector3();
-    const r = Math.random() * def.spreadRadius;
-    starPositions[i * 3] = ax + dir.x * r;
-    starPositions[i * 3 + 1] = ay + dir.y * r;
-    starPositions[i * 3 + 2] = az + dir.z * r;
-  }
 
   const controlPoints: Vector3[] = [];
   for (let i = 0; i < def.controlPointCount; i++) {
@@ -142,13 +138,13 @@ export function generateConstellationLayout(
   }
   const padded = [controlPoints[0], ...controlPoints, controlPoints[controlPoints.length - 1]];
 
-  const localDots = placeDotsAlongPath(def.dotCount, padded);
-  const dotPositions = new Float32Array(def.dotCount * 3);
-  for (let i = 0; i < def.dotCount; i++) {
-    dotPositions[i * 3] = ax + localDots[i * 3];
-    dotPositions[i * 3 + 1] = ay + localDots[i * 3 + 1];
-    dotPositions[i * 3 + 2] = az + localDots[i * 3 + 2];
+  const localStars = placeStarsAlongPath(def.starCount, padded);
+  const starPositions = new Float32Array(def.starCount * 3);
+  for (let i = 0; i < def.starCount; i++) {
+    starPositions[i * 3] = ax + localStars[i * 3];
+    starPositions[i * 3 + 1] = ay + localStars[i * 3 + 1];
+    starPositions[i * 3 + 2] = az + localStars[i * 3 + 2];
   }
 
-  return { starPositions, dotPositions };
+  return { starPositions };
 }

@@ -10,7 +10,8 @@ import {
 } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { GameDirectorSystem } from '../../core/game-director-system.js';
-import { END_RUN_MESSAGE } from '../../core/notification-copy.js';
+import { getGlobals } from '../../core/globals.js';
+import { cometNameMessage, END_RUN_MESSAGE } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { Phase } from '../../core/phase.js';
 import { StartMenuSystem } from '../../core/start-menu-system.js';
@@ -106,9 +107,13 @@ export class EndRunMenuSystem extends createSystem({
     if (this._elapsed < END_RUN_DELAY_SECONDS) return;
 
     this._shown = true;
-    this.world
-      .getSystem(NotificationHudSystem)
-      ?.notify(END_RUN_MESSAGE.text, END_RUN_MESSAGE.holdSeconds);
+    const notifications = this.world.getSystem(NotificationHudSystem);
+    // A closing name for the comet, queued right before the practical
+    // "time is done" cue — see cometNameMessage's own comment.
+    const globals = getGlobals(this.world);
+    const nameMsg = cometNameMessage(globals.dominantPebbleType.peek(), globals.celestialSymbol.peek());
+    notifications?.notify(nameMsg.text, nameMsg.holdSeconds);
+    notifications?.notify(END_RUN_MESSAGE.text, END_RUN_MESSAGE.holdSeconds);
     this._panelObject.visible = true;
     this._entity.addComponent(RayInteractable);
   }

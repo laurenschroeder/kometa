@@ -1,4 +1,5 @@
 import {
+  AudioListener,
   CanvasTexture,
   createSystem,
   DoubleSide,
@@ -12,6 +13,7 @@ import {
 } from '@iwsdk/core';
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
+import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
 import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
@@ -47,6 +49,61 @@ const PLANET_ARRIVAL_ELIGIBLE_FROM = new Set<Phase>([
   Phase.Launch,
   Phase.Finale,
 ]);
+
+// Same reasoning/same phase set as PLANET_ARRIVAL_ELIGIBLE_FROM, guarding
+// getSpinProgress() the same way — Leg A (the spin transition) only ever
+// starts once Constellations begins, so reading its progress before that is
+// meaningless (and, worse, this system's own update() runs from world boot,
+// where a naive read could misread "never started" as "already at 0").
+const SPIN_ELIGIBLE_FROM = PLANET_ARRIVAL_ELIGIBLE_FROM;
+
+// Each person's threshold (i/N) across the Leg A spin's 0-1 progress at
+// which it starts scaling in, plus how much of that range its own scale-in
+// takes — a STAGGER_WINDOW < 1/N would leave gaps where nobody is actively
+// growing; this is comfortably wide so the population reads as continuously
+// forming rather than popping in discrete batches.
+const STAGGER_WINDOW = 0.3;
+const PERSON_SURFACE_OFFSET = 0; // people sit exactly on the surface, no clearance needed
+
+// PebbleSynth.playPickup() normally scales its tone off swing speed — there's
+// no equivalent for a person activating, so every activation just gets a
+// fixed mid-range value for a consistent little "voice" blip.
+const VOICE_BLIP_FIXED_SPEED = 1.1;
+
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
+}
+
+function smoothstep(t: number): number {
+  const c = clamp01(t);
+  return c * c * (3 - 2 * c);
+}
+
+// Per-constellation "situation" animations layered on top of the base
+// bob/bubble behavior above — see EarthSituationsVfxSystem for the
+// non-person-attached half of this same feature (ambient decorations,
+// ghost-rise mechanic, dialogue pairing). These stay here because they
+// directly manipulate this system's own person Group/arm meshes.
+const DANCE_SWAY_FREQ = 1.6; // Hz
+const DANCE_SWAY_AMPLITUDE = 0.35; // radians, Horn's continuous ambient sway
+const WAVE_STAGGER = 0.12; // seconds between each person's wave-pulse start
+const WAVE_PULSE_DURATION = 0.5;
+const WAVE_BUMP_AMPLITUDE = 0.05;
+const POINT_UP_DURATION = 4; // seconds organic matter's "point at the comet" pose holds
+const POINT_UP_EASE_RATE = 5;
+// A fixed "arm raised up and forward" pose rather than a true bearing-aimed
+// one — buildPlaceholderPerson's arms rotate around their own center (no
+// shoulder pivot), so aiming precisely at the comet would look like the arm
+// floating/clipping through the torso rather than a believable point.
+const POINT_UP_ROTATION_X = -1.3;
+const WAR_POSE_REST_FRACTION = 0.2; // how much of the resting arm tilt remains once "raised"
+const WAR_POSE_ROTATION_X = -0.4;
+const WAR_AMBIENT_FRACTION = 0.4; // fraction of the crowd posed aggressively before completion
+const WAR_AMBIENT_INTENSITY = 0.35;
+const WAR_COLOR: [number, number, number] = [0.75, 0.08, 0.05];
+const WAR_COLOR_EASE_RATE = 2;
+const LOCUST_FLINCH_FREQUENCY = 11; // Hz — much faster/jerkier than the normal jump bob
+const LOCUST_FLINCH_AMPLITUDE = 0.018;
 
 const N_FIRE_QUADS = 8;
 const FIRE_RING_RADIUS = 0.4;
@@ -107,30 +164,45 @@ function buildFireTexture(): CanvasTexture {
 // actually changes), and — only when the dominant type was volatile gasses
 // — a small ring of ambient flame quads below the planet. Always-on and
 // self-gated via gamePhase (like ConstellationsVfxSystem/
-// PlanetSeedingVfxSystem), NOT director-managed: people now start appearing
-// progressively during Constellations (tied to ConstellationsSystem's
-// getRevealProgress(), see update()) rather than popping in all at once
-// when Fate Events itself starts, so this system's own visibility can't be
-// tied to Fate Events' play()/stop() the way it used to be. FateEventSystem
-// itself stays director-managed — its proximity/dialogue simulation only
-// runs during Phase.FateEvents, same as always.
+// PlanetSeedingVfxSystem), NOT director-managed: the civilization now forms
+// progressively DURING Leg A (the Seeding->Constellations spin transition —
+// see PlanetSeedingVfxSystem.getSpinProgress(), read in update()), fully
+// formed by the time the spin stops and well before Constellations' own
+// gameplay is won — so this system's own visibility can't be tied to Fate
+// Events' play()/stop() the way it used to be. People/bubbles/fire also
+// track the planet's LIVE position/radius every frame (not a fixed baked
+// layout) so they correctly follow through Leg B's later zoom into Fate
+// Events too. FateEventSystem itself stays director-managed — its
+// proximity/dialogue simulation only runs during Phase.FateEvents, same as
+// always.
 export class FateEventVfxSystem extends createSystem({}) {
   private _fateEvents!: FateEventSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
   private _constellations!: ConstellationsSystem;
-  // People/fire stay hidden until PlanetSeedingVfxSystem's rotate/grow
-  // transition (see planet-fate-transition.ts) finishes bringing the
-  // selected ring planet into this phase's fixed PLANET_CENTER/PLANET_RADIUS
-  // slot — revealing them earlier would show people standing on a planet
-  // that hasn't visually arrived yet. Renamed from _revealedAfterTransition
-  // since it now also gates fire, independent of the people-reveal timing.
+  // Fire stays hidden until PlanetSeedingVfxSystem's Leg B (the final
+  // grow/zoom-in — see planet-fate-transition.ts) finishes bringing the
+  // planet to its true Fate Events PLANET_CENTER/PLANET_RADIUS — revealing
+  // it earlier would show fire around a planet that hasn't visually arrived
+  // at its final interaction size/position yet. Renamed from
+  // _revealedAfterTransition since it now also gates fire, independent of
+  // the people-forming timing (see SPIN_ELIGIBLE_FROM/getSpinProgress()
+  // below for that).
   private _planetArrived = false;
 
   private _peopleMaterial!: ReturnType<typeof makeToonRimFlatMaterial>;
   private _personGroups: Group[] = [];
   private _personEntities: Entity[] = [];
+  private _rightArms: Mesh[] = [];
+  private _armRestZ!: Float32Array;
   private _bobPhase!: Float32Array;
   private _bobAmp!: Float32Array;
+
+  // Per-constellation situation state — see the constants block above.
+  private _baseBodyColor: [number, number, number] = [1, 1, 1];
+  private _warIntensity = 0;
+  private _waveStartTime: number | null = null;
+  private _pointUpTimer = 0;
+  private _wasComplete = false;
 
   private _bubbleMeshes: Mesh[] = [];
   private _bubbleEntities: Entity[] = [];
@@ -150,6 +222,15 @@ export class FateEventVfxSystem extends createSystem({}) {
   private _zAxis!: Vector3;
   private _normalVec!: Vector3;
   private _scratchPos!: Vector3;
+  private _scratchLiveCenter!: Vector3;
+
+  // "Voice" blip on activation — reuses PebbleSynth's own red/harsh,
+  // green/earthy, blue/heavenly character split (see pebble-synth.ts)
+  // rather than inventing a new synth, tying Chapter 2's identity through to
+  // Fate Events.
+  private _audioListener!: AudioListener;
+  private _voiceSynth!: PebbleSynth;
+  private _wasActive!: Uint8Array;
 
   init(): void {
     this._fateEvents = this.world.getSystem(FateEventSystem)!;
@@ -164,6 +245,13 @@ export class FateEventVfxSystem extends createSystem({}) {
     this._zAxis = new Vector3(0, 0, 1);
     this._normalVec = new Vector3();
     this._scratchPos = new Vector3();
+    this._scratchLiveCenter = new Vector3();
+
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._voiceSynth = new PebbleSynth();
+    this._voiceSynth.build(this._audioListener, this.scene);
+    this._wasActive = new Uint8Array(this._fateEvents.getPersonCount());
 
     this._buildPeople();
     this._buildBubbles();
@@ -184,12 +272,14 @@ export class FateEventVfxSystem extends createSystem({}) {
       // color for however long people are progressively appearing here.
       const dominant = getGlobals(this.world).dominantPebbleType.peek();
       const color = PEBBLE_TYPES[dominant].color;
+      this._baseBodyColor = color;
       (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
     } else if (phase === Phase.FateEvents) {
       // celestialSymbol is resolved by now — pick up the real (possibly
       // dialogue-overridden) color, and reveal bubbles: people are already
       // visible from Constellations, this just adds the interactive layer.
       const color = this._fateEvents.getPeopleColor();
+      this._baseBodyColor = color;
       (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
       for (const mesh of this._bubbleMeshes) mesh.visible = true;
     } else if (phase === Phase.Stardust) {
@@ -199,12 +289,24 @@ export class FateEventVfxSystem extends createSystem({}) {
 
   private _resetAll(): void {
     this._planetArrived = false;
-    for (const group of this._personGroups) group.visible = false;
+    for (const group of this._personGroups) {
+      group.visible = false;
+      group.scale.setScalar(0);
+      group.rotation.z = 0;
+    }
+    for (let i = 0; i < this._rightArms.length; i++) {
+      this._rightArms[i].rotation.set(0, 0, this._armRestZ[i]);
+    }
     for (const mesh of this._bubbleMeshes) mesh.visible = false;
     for (const mesh of this._fireMeshes) mesh.visible = false;
+    this._wasActive.fill(0);
     this._bubbleOpacity.fill(0);
     this._lastLineIndex.fill(-1);
     this._bobAmp.fill(0);
+    this._warIntensity = 0;
+    this._waveStartTime = null;
+    this._pointUpTimer = 0;
+    this._wasComplete = false;
   }
 
   private _buildPeople(): void {
@@ -218,17 +320,21 @@ export class FateEventVfxSystem extends createSystem({}) {
     // people stay hidden until then regardless.
     const initialDominant = getGlobals(this.world).dominantPebbleType.peek();
     this._peopleMaterial = makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color);
+    this._baseBodyColor = PEBBLE_TYPES[initialDominant].color;
     this._bobPhase = new Float32Array(count);
     this._bobAmp = new Float32Array(count);
+    this._armRestZ = new Float32Array(count);
 
     for (let i = 0; i < count; i++) {
       this._bobPhase[i] = Math.random() * Math.PI * 2;
-      const group = buildPlaceholderPerson(this._peopleMaterial);
+      const { group, rightArm } = buildPlaceholderPerson(this._peopleMaterial);
       group.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
       group.quaternion.setFromUnitVectors(this._upAxis, this._normalVec);
       group.visible = false;
       this._personGroups.push(group);
+      this._rightArms.push(rightArm);
+      this._armRestZ[i] = rightArm.rotation.z;
       this._personEntities.push(this.world.createTransformEntity(group));
     }
   }
@@ -292,6 +398,29 @@ export class FateEventVfxSystem extends createSystem({}) {
 
   update(delta: number, time: number): void {
     const phase = getGlobals(this.world).gamePhase.peek();
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    // Has a sane default (CONSTELLATION_SETS[0][0].name) even before
+    // Constellations ever runs — safe to read unconditionally every frame,
+    // same defensive pattern as the other phase-eligibility guards here.
+    const name = this._constellations.getActiveName();
+
+    if (this._constellations.isComplete() && !this._wasComplete) {
+      this._wasComplete = true;
+      if (name === 'Horn') this._waveStartTime = time;
+      if (dominant === 1) this._pointUpTimer = POINT_UP_DURATION;
+    }
+
+    const positions = this._fateEvents.getSurfacePositions();
+    const normals = this._fateEvents.getNormals();
+    const count = this._fateEvents.getPersonCount();
+    // Re-derive every person's world position from its fixed normal (see
+    // scatterOnSphereCap — radius/center-independent by construction) plus
+    // the planet's LIVE position/radius, so people correctly follow through
+    // both Leg A (spin+recede) and Leg B (final zoom-in) instead of only
+    // matching one fixed final layout. Cheap at N_PEOPLE=10 — always safe to
+    // run, even before either transition has started (harmless, since
+    // nobody's visible yet).
+    this._updateLivePositions(positions, normals, count);
 
     if (
       !this._planetArrived &&
@@ -309,38 +438,46 @@ export class FateEventVfxSystem extends createSystem({}) {
     // same reasoning as FateEventSystem.getVisiblePeopleCount() itself.
     const maxVisible = this._fateEvents.getVisiblePeopleCount();
 
-    if (this._planetArrived) {
-      // Progressive during Constellations (tied to how close the player is
-      // to winning); fully revealed (up to maxVisible) for every phase after
-      // it — the constellation must have been won to leave that phase
-      // normally, and a dev-menu jump straight past it should still show
-      // everyone the type allows.
-      const progress = phase === Phase.Constellations ? this._constellations.getRevealProgress() : 1;
-      const revealCount = Math.min(maxVisible, Math.floor(progress * this._personGroups.length));
-      for (let i = 0; i < this._personGroups.length; i++) {
-        this._personGroups[i].visible = i < revealCount;
+    // Civilization forms DURING Leg A (see SPIN_ELIGIBLE_FROM/
+    // getSpinProgress()) — each person has its own staggered threshold
+    // across the 0-1 spin progress so the population grows in one-by-one
+    // rather than popping in all at once, easing scale via smoothstep
+    // rather than a hard visibility toggle. Monotonic within a loop (see
+    // PlanetSpinTransition.getProgress()), so no separate clamping needed
+    // to prevent regression once fully formed.
+    const spinProgress = SPIN_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    for (let i = 0; i < this._personGroups.length; i++) {
+      const group = this._personGroups[i];
+      if (i >= maxVisible) {
+        group.visible = false;
+        continue;
       }
+      const t = clamp01((spinProgress - i / this._personGroups.length) / STAGGER_WINDOW);
+      const formed = smoothstep(t);
+      group.visible = formed > 0;
+      group.scale.setScalar(formed);
     }
 
     this.camera.getWorldPosition(this._camWorldPos);
 
     const active = this._fateEvents.getActiveMask();
     const lineIndex = this._fateEvents.getLineIndex();
-    const lines = this._fateEvents.getDialogueLines();
-    const positions = this._fateEvents.getSurfacePositions();
-    const normals = this._fateEvents.getNormals();
-    const count = this._fateEvents.getPersonCount();
 
     const bobPull = 1 - Math.exp(-BOB_EASE_RATE * delta);
     const bubblePull = 1 - Math.exp(-BUBBLE_EASE_RATE * delta);
     // Livelier idle bob for organics, sluggish for a gasses "ghost town" —
-    // see fate-event-system.ts's BOB_FREQUENCY_MULT_BY_TYPE.
-    const bobFrequency = JUMP_FREQUENCY * this._fateEvents.getBobFrequencyMultiplier();
+    // see fate-event-system.ts's BOB_FREQUENCY_MULT_BY_TYPE. Locust's own
+    // Fate Events moment ("people flinch as you approach") reuses this same
+    // proximity-driven bob, just faster/smaller — a startled recoil instead
+    // of a jump, no new proximity logic needed.
+    const locustFlinch = name === 'Locust' && phase === Phase.FateEvents;
+    const bobFrequency = locustFlinch ? LOCUST_FLINCH_FREQUENCY : JUMP_FREQUENCY * this._fateEvents.getBobFrequencyMultiplier();
+    const jumpAmplitude = locustFlinch ? LOCUST_FLINCH_AMPLITUDE : JUMP_AMPLITUDE;
 
     for (let i = 0; i < count; i++) {
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
 
-      const targetAmp = active[i] ? JUMP_AMPLITUDE : 0;
+      const targetAmp = active[i] ? jumpAmplitude : 0;
       this._bobAmp[i] += (targetAmp - this._bobAmp[i]) * bobPull;
       const bobOffset =
         this._bobAmp[i] * Math.max(0, Math.sin(time * bobFrequency * Math.PI * 2 + this._bobPhase[i]));
@@ -349,6 +486,15 @@ export class FateEventVfxSystem extends createSystem({}) {
       const group = this._personGroups[i];
       group.position.copy(this._scratchPos).addScaledVector(this._normalVec, bobOffset);
 
+      if (active[i]) {
+        if (!this._wasActive[i]) {
+          this._wasActive[i] = 1;
+          this._voiceSynth.playPickup(dominant, this._scratchPos, VOICE_BLIP_FIXED_SPEED);
+        }
+      } else {
+        this._wasActive[i] = 0;
+      }
+
       const bubbleMesh = this._bubbleMeshes[i];
       const targetOpacity = active[i] ? 1 : 0;
       this._bubbleOpacity[i] += (targetOpacity - this._bubbleOpacity[i]) * bubblePull;
@@ -356,6 +502,7 @@ export class FateEventVfxSystem extends createSystem({}) {
 
       if (active[i] && this._lastLineIndex[i] !== lineIndex[i]) {
         this._lastLineIndex[i] = lineIndex[i];
+        const lines = this._fateEvents.getDialogueLinesFor(i);
         this._drawBubbleText(i, lines[lineIndex[i]] ?? '');
       }
 
@@ -368,7 +515,77 @@ export class FateEventVfxSystem extends createSystem({}) {
       }
     }
 
+    this._updateSituations(count, name, dominant, time, delta);
     this._updateFire(time);
+  }
+
+  // Horn's continuous dance sway + one-shot wave, organic matter's one-shot
+  // "point at the comet," and Bow and Arrow's building war stance/tint — see
+  // the constants block above. Locust's Fate Events flinch is handled
+  // inline above (it only needed the existing bob mechanism, not a new
+  // pose). A separate pass over the crowd is simplest to reason about here;
+  // N_PEOPLE=10 makes the extra loop negligible.
+  private _updateSituations(count: number, name: string, dominant: number, time: number, delta: number): void {
+    const dancing = name === 'Horn';
+    for (let i = 0; i < count; i++) {
+      const group = this._personGroups[i];
+      if (dancing && group.visible) {
+        group.rotation.z = Math.sin(time * DANCE_SWAY_FREQ * Math.PI * 2 + this._bobPhase[i]) * DANCE_SWAY_AMPLITUDE;
+      } else if (group.rotation.z !== 0) {
+        group.rotation.z = 0; // clear a stale sway if the active name changed under a dev-menu jump
+      }
+
+      if (this._waveStartTime !== null && dancing) {
+        const waveT = time - this._waveStartTime - i * WAVE_STAGGER;
+        if (waveT >= 0 && waveT < WAVE_PULSE_DURATION) {
+          group.position.y += Math.sin((waveT / WAVE_PULSE_DURATION) * Math.PI) * WAVE_BUMP_AMPLITUDE;
+        }
+      }
+    }
+
+    if (this._pointUpTimer > 0) this._pointUpTimer = Math.max(0, this._pointUpTimer - delta);
+    const pointUpActive = dominant === 1 && this._pointUpTimer > 0;
+    const warActive = name === 'Bow and Arrow';
+    const warPoseAll = warActive && this._constellations.isComplete();
+
+    const armPull = 1 - Math.exp(-POINT_UP_EASE_RATE * delta);
+    for (let i = 0; i < count; i++) {
+      const arm = this._rightArms[i];
+      const rest = this._armRestZ[i];
+
+      let targetX = 0;
+      let targetZ = rest;
+      if (pointUpActive) {
+        targetX = POINT_UP_ROTATION_X;
+        targetZ = rest * 0.2;
+      } else if (warPoseAll || (warActive && i < Math.ceil(count * WAR_AMBIENT_FRACTION))) {
+        targetX = WAR_POSE_ROTATION_X;
+        targetZ = rest * WAR_POSE_REST_FRACTION;
+      }
+      arm.rotation.x += (targetX - arm.rotation.x) * armPull;
+      arm.rotation.z += (targetZ - arm.rotation.z) * armPull;
+    }
+
+    if (warActive || this._warIntensity > 0.001) {
+      const target = warActive ? (warPoseAll ? 1 : WAR_AMBIENT_INTENSITY) : 0;
+      const pull = 1 - Math.exp(-WAR_COLOR_EASE_RATE * delta);
+      this._warIntensity += (target - this._warIntensity) * pull;
+      const [br, bg, bb] = this._baseBodyColor;
+      const r = br + (WAR_COLOR[0] - br) * this._warIntensity;
+      const g = bg + (WAR_COLOR[1] - bg) * this._warIntensity;
+      const b = bb + (WAR_COLOR[2] - bb) * this._warIntensity;
+      (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(r, g, b);
+    }
+  }
+
+  private _updateLivePositions(positions: Float32Array, normals: Float32Array, count: number): void {
+    this._scratchLiveCenter.copy(this._planetSeeding.getLivePlanetPosition());
+    const liveReach = this._planetSeeding.getLivePlanetRadius() + PERSON_SURFACE_OFFSET;
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = this._scratchLiveCenter.x + normals[i * 3] * liveReach;
+      positions[i * 3 + 1] = this._scratchLiveCenter.y + normals[i * 3 + 1] * liveReach;
+      positions[i * 3 + 2] = this._scratchLiveCenter.z + normals[i * 3 + 2] * liveReach;
+    }
   }
 
   private _updateFire(time: number): void {

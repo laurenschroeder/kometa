@@ -29,6 +29,7 @@ import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-s
 import { kPebbleFieldTintedMat } from '../../vfx/shaders/pebble-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
 import { makeToonRimDecalMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { PEBBLE_TYPES } from './pebble-type.js';
 
 // ── chapter-2-specific tuning (unchanged from the original comet-system.ts) ─
 const N_PEBBLES = 260;
@@ -47,13 +48,6 @@ const FACING_SPEED_EPSILON_SQ = 0.0004;
 // ~1.2 Hz, fast cycles the second pair at ~3 Hz (time * 2.0 in both cases —
 // 0.5s per expression).
 const FACE_CYCLE_SPEED_THRESHOLD = 1.5;
-// Partial, not full (aTinted=1 would flatten the dark rocky
-// bodyColorDark/Light gradient + per-pebble aBright variation into one flat
-// solid color — reads as a plain white/gray blob, not a rock). At this
-// strength the tint colors the existing dark/brightness-varied shading
-// instead of replacing it, so the body keeps its "rocky outline" look while
-// still visibly reading as whatever globals.pebbleTint was captured.
-const BODY_TINT_STRENGTH = 0.45;
 
 // Decal material only uses bodyColorDark + rimColor (no brightness mixing
 // for the head), so bodyColorLight is unused here — duplicated to satisfy
@@ -86,6 +80,20 @@ function makeHeadMat(): ShaderMaterial {
   return makeToonRimDecalMaterial(HEAD_PALETTE);
 }
 
+// Maps a pebble's fixed random roll (see CometVisual.pebbleTypeRoll) to one
+// of the three saturated PEBBLE_TYPES colors, weighted by the current
+// globals.pebbleTypeWeights split — same technique a loot table uses to pick
+// from weighted buckets. Called once per pebble at build time and again for
+// every pebble whenever the weights change (see _applyTypeWeights) — reusing
+// each pebble's own fixed roll means a later weight update reshuffles which
+// pebbles are which color without fully re-randomizing the body every time.
+function colorForTypeRoll(roll: number, weights: [number, number, number]): [number, number, number] {
+  const w0 = weights[0];
+  const w1 = w0 + weights[1];
+  const type = roll < w0 ? 0 : roll < w1 ? 1 : 2;
+  return PEBBLE_TYPES[type].color;
+}
+
 
 interface CometVisual {
   pebbleField: RadialField;
@@ -94,11 +102,16 @@ interface CometVisual {
   pebbleLocalIdx: Uint16Array;
   pebbleRot: Quaternion[];
   pebbleMeshes: InstancedMesh[];
-  // Per-variant aTint attribute — rewritten in bulk (all instances get the
-  // same color) whenever globals.pebbleTint changes, see the subscription
-  // in init(). Not per-pebble varying like PebbleFieldVfxSystem's own use of
-  // the same material: the whole body shares one blended tint.
+  // Per-variant aTint attribute, one vec3 per instance — see
+  // colorForTypeRoll/_applyTypeWeights: each pebble gets its own saturated
+  // PEBBLE_TYPES color (like PebbleFieldVfxSystem's own field pebbles), not
+  // one flat color shared across the whole body.
   pebbleTintAttrs: InstancedBufferAttribute[];
+  // Each pebble's fixed random roll in [0, 1), generated once at build time
+  // — see colorForTypeRoll for how this plus the current weights decides
+  // that pebble's color, and _applyTypeWeights for how a later weight
+  // change re-colors every pebble from these same fixed rolls.
+  pebbleTypeRoll: Float32Array;
 
   pebbleMeshEntities: Entity[];
 
@@ -174,27 +187,29 @@ export class PebbleCometPresentationSystem extends createSystem({
     this.cleanupFuncs.push(() => this._visuals.clear());
 
     // The body is built (and its aTint attributes initialized from
-    // whichever pebbleTint value exists at the time — see _buildVisual) at
-    // boot, long before Chapter 2's win condition ever sets a real value —
-    // this is what applies that value once it lands, and any later change
-    // (e.g. a dev-menu replay of Chapter 2). Body stays hidden throughout
-    // Chapter 2 itself (see HIDDEN_DURING_PHASES), so there's no visible pop.
+    // whichever pebbleTypeWeights value exists at the time — see
+    // _buildVisual) at boot, long before Chapter 2's win condition ever sets
+    // a real value — this is what re-colors every pebble once that value
+    // lands, and any later change (e.g. a dev-menu replay of Chapter 2).
+    // Body stays hidden throughout Chapter 2 itself (see
+    // HIDDEN_DURING_PHASES), so there's no visible pop.
     this.cleanupFuncs.push(
-      getGlobals(this.world).pebbleTint.subscribe((tint) => this._applyTint(tint)),
+      getGlobals(this.world).pebbleTypeWeights.subscribe((weights) => this._applyTypeWeights(weights)),
     );
   }
 
-  private _applyTint(tint: [number, number, number]): void {
+  private _applyTypeWeights(weights: [number, number, number]): void {
     for (const visual of this._visuals.values()) {
-      for (const attr of visual.pebbleTintAttrs) {
-        const arr = attr.array as Float32Array;
-        for (let i = 0; i < arr.length; i += 3) {
-          arr[i] = tint[0];
-          arr[i + 1] = tint[1];
-          arr[i + 2] = tint[2];
-        }
-        attr.needsUpdate = true;
+      const { pebbleVariant, pebbleLocalIdx, pebbleTypeRoll, pebbleTintAttrs } = visual;
+      for (let i = 0; i < N_PEBBLES; i++) {
+        const [r, g, b] = colorForTypeRoll(pebbleTypeRoll[i], weights);
+        const arr = pebbleTintAttrs[pebbleVariant[i]].array as Float32Array;
+        const local = pebbleLocalIdx[i] * 3;
+        arr[local] = r;
+        arr[local + 1] = g;
+        arr[local + 2] = b;
       }
+      for (const attr of pebbleTintAttrs) attr.needsUpdate = true;
     }
   }
 
@@ -242,35 +257,34 @@ export class PebbleCometPresentationSystem extends createSystem({
       pebbleRot[i] = new Quaternion().setFromAxisAngle(rotAxisScratch, Math.random() * Math.PI * 2);
     }
 
+    // Fixed once per pebble, independent of variant/weights — see
+    // colorForTypeRoll.
+    const pebbleTypeRoll = new Float32Array(N_PEBBLES);
+    for (let i = 0; i < N_PEBBLES; i++) pebbleTypeRoll[i] = Math.random();
+
     // One InstancedMesh per rock-shape variant. aBright/aTint/aTinted are
     // written onto the shared module-scope variant geometry here — safe as
     // long as every qualifying comet entity uses the same N_PEBBLE_VARIANTS
     // bucket sizes (true today: all comets share identical distribution
-    // parameters). Every instance starts partially tinted (see
-    // BODY_TINT_STRENGTH) toward whichever globals.pebbleTint value exists
-    // right now — see _applyTint for how a later Chapter 2 completion
-    // updates it in place.
+    // parameters). aTinted is always 1 (full vivid color per pebble, same as
+    // PebbleFieldVfxSystem's field pebbles) — the per-pebble color itself
+    // (aTint), not the tint strength, is what carries whichever
+    // globals.pebbleTypeWeights split exists right now; see
+    // _applyTypeWeights for how a later Chapter 2 completion re-colors it.
     const pebbleMeshes: InstancedMesh[] = [];
     const pebbleTintAttrs: InstancedBufferAttribute[] = [];
     const pebbleMeshEntities: Entity[] = [];
-    const initialTint = getGlobals(this.world).pebbleTint.peek();
+    const tintArrs: Float32Array[] = [];
     for (let v = 0; v < N_PEBBLE_VARIANTS; v++) {
       const geo = kPebbleVariantGeos[v];
       geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(bucketBright[v]), 1));
 
       const count = bucketBright[v].length;
       const tintArr = new Float32Array(count * 3);
-      for (let i = 0; i < count; i++) {
-        tintArr[i * 3] = initialTint[0];
-        tintArr[i * 3 + 1] = initialTint[1];
-        tintArr[i * 3 + 2] = initialTint[2];
-      }
+      tintArrs.push(tintArr);
       const tintAttr = new InstancedBufferAttribute(tintArr, 3);
       geo.setAttribute('aTint', tintAttr);
-      geo.setAttribute(
-        'aTinted',
-        new InstancedBufferAttribute(new Float32Array(count).fill(BODY_TINT_STRENGTH), 1),
-      );
+      geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(count).fill(1), 1));
       pebbleTintAttrs.push(tintAttr);
 
       const mesh = new InstancedMesh(geo, kPebbleFieldTintedMat, count);
@@ -278,6 +292,16 @@ export class PebbleCometPresentationSystem extends createSystem({
       mesh.frustumCulled = false;
       pebbleMeshEntities.push(this.world.createTransformEntity(mesh));
       pebbleMeshes.push(mesh);
+    }
+
+    const initialWeights = getGlobals(this.world).pebbleTypeWeights.peek();
+    for (let i = 0; i < N_PEBBLES; i++) {
+      const [r, g, b] = colorForTypeRoll(pebbleTypeRoll[i], initialWeights);
+      const arr = tintArrs[pebbleVariant[i]];
+      const local = pebbleLocalIdx[i] * 3;
+      arr[local] = r;
+      arr[local + 1] = g;
+      arr[local + 2] = b;
     }
 
     const hazeField = generateRadialField({
@@ -335,6 +359,7 @@ export class PebbleCometPresentationSystem extends createSystem({
       pebbleRot,
       pebbleMeshes,
       pebbleTintAttrs,
+      pebbleTypeRoll,
       pebbleMeshEntities,
       hazeField,
       hazePositions,

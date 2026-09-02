@@ -32,9 +32,9 @@ const OUTLINE_GLSL = `
 
 // Instanced + per-instance-tinted variant — for InstancedMesh (e.g. pebble
 // swarms), plus an aTint/aTinted attribute pair so individual instances can
-// be pulled toward an arbitrary color (e.g. the Pebbles field coloring each
-// pebble by which type it became, or the permanent comet body tinted by
-// globals.pebbleTint). aTinted=0 reproduces the untinted look exactly; a
+// be pulled toward an arbitrary color (e.g. the Pebbles field, or the
+// permanent comet body — see pebble-material.ts — coloring each pebble by
+// which type it became). aTinted=0 reproduces the untinted look exactly; a
 // caller ramps it toward 1 to fade an instance toward aTint. instanceMatrix
 // is auto-declared by three.js for any InstancedMesh (prepended to the
 // vertex shader prefix) but is NOT auto-applied for from-scratch custom

@@ -27,16 +27,27 @@ export interface KometaGlobals {
   // Chapter 2.5 — set once by ConstellationsSystem, nothing downstream reads
   // it yet beyond that phase's own notification.
   celestialSymbol: Signal<string | null>;
-  // Weighted RGB blend of Chapter 2's captured pebble-type proportions (see
-  // PEBBLE_TYPES in pebble-type.ts) — set once by PebbleWeavingSystem's win
-  // condition, alongside dominantPebbleType. Read by
-  // PebbleCometPresentationSystem to tint the permanent comet body from
-  // Seeding onward, so the colors gathered in Chapter 2 persist as part of
-  // the comet's look for the rest of the game instead of disappearing when
-  // Chapter 2 ends. Default is an even three-way blend of all three
-  // PEBBLE_TYPES colors — only relevant if the body becomes visible before
-  // Chapter 2 ever completes (e.g. a dev-menu jump straight to Seeding).
-  pebbleTint: Signal<[number, number, number]>;
+  // Normalized (sum to 1) capture-proportion weights across PEBBLE_TYPES
+  // (soul dust/organic matter/volatile gasses), set once by
+  // PebbleWeavingSystem's win condition alongside dominantPebbleType. Read by
+  // PebbleCometPresentationSystem to weighted-randomly assign each permanent
+  // body pebble one of the three saturated PEBBLE_TYPES colors — a flat RGB
+  // blend of all three (the earlier approach) collapses toward gray/white
+  // whenever capture is roughly even, which read as the body losing its
+  // color; per-pebble assignment keeps it visibly multi-colored like Chapter
+  // 2's own field pebbles. Default is an even three-way split — only
+  // relevant if the body becomes visible before Chapter 2 ever completes
+  // (e.g. a dev-menu jump straight to Seeding).
+  pebbleTypeWeights: Signal<[number, number, number]>;
+  // Set once by EarthSituationsVfxSystem on the Dog/Human constellation's
+  // completion edge (see earth-situations-vfx-system.ts) — which of
+  // FateEventSystem's people index gets a fixed override line instead of
+  // the normal per-type cycling dialogue, and what that line is. Routed
+  // through globals (like dominantPebbleType/celestialSymbol above) rather
+  // than a direct system-to-system reference, so FateEventSystem and
+  // EarthSituationsVfxSystem don't need to import each other.
+  pairedPersonIndex: Signal<number | null>;
+  pairedPersonLine: Signal<string | null>;
 }
 
 export function bootstrapGlobals(world: World): KometaGlobals {
@@ -48,7 +59,9 @@ export function bootstrapGlobals(world: World): KometaGlobals {
   globals.gameStarted = signal(false);
   globals.dominantPebbleType = signal(0);
   globals.celestialSymbol = signal(null);
-  globals.pebbleTint = signal([0.567, 0.573, 0.56]);
+  globals.pebbleTypeWeights = signal([1 / 3, 1 / 3, 1 / 3]);
+  globals.pairedPersonIndex = signal(null);
+  globals.pairedPersonLine = signal(null);
   return globals;
 }
 

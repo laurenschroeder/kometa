@@ -151,21 +151,16 @@ export class PebbleWeavingSystem extends createSystem({
       }
       getGlobals(this.world).dominantPebbleType.value = dominant;
 
-      // Weighted blend of the three types' colors by how much of each was
-      // actually captured — PebbleCometPresentationSystem reads this to
-      // tint the permanent comet body from Seeding onward, so whatever mix
-      // you gathered here persists as part of the comet for the rest of the
-      // game instead of vanishing when this phase ends.
+      // Normalized capture-proportion weights across the three types —
+      // PebbleCometPresentationSystem reads this to weighted-randomly assign
+      // each permanent body pebble one of the three saturated PEBBLE_TYPES
+      // colors, so whatever mix you gathered here persists as part of the
+      // comet (visibly multi-colored, not flattened into one blended
+      // average) for the rest of the game instead of vanishing when this
+      // phase ends.
       const total = counts.reduce((sum, c) => sum + c, 0) || 1;
-      const tint: [number, number, number] = [0, 0, 0];
-      for (let t = 0; t < counts.length; t++) {
-        const weight = counts[t] / total;
-        const [r, g, b] = PEBBLE_TYPES[t].color;
-        tint[0] += r * weight;
-        tint[1] += g * weight;
-        tint[2] += b * weight;
-      }
-      getGlobals(this.world).pebbleTint.value = tint;
+      const weights: [number, number, number] = [counts[0] / total, counts[1] / total, counts[2] / total];
+      getGlobals(this.world).pebbleTypeWeights.value = weights;
 
       const { text, holdSeconds } = pebbleCompletionMessage(PEBBLE_TYPES[dominant].name);
       this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);

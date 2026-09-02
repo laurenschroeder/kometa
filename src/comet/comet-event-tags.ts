@@ -7,3 +7,7 @@ import { createComponent } from '@iwsdk/core';
 // it adds it.
 export const CometSnapped = createComponent('CometSnapped', {}, '');
 export const CometReleased = createComponent('CometReleased', {}, '');
+// Same one-frame idiom, but owned/cleared by CometHandoffSystem instead —
+// fires only on a deliberate hand-to-hand toss/catch, not the passive
+// 2-second drift (see CometHandoffSystem's own comment on that distinction).
+export const CometCaught = createComponent('CometCaught', {}, '');

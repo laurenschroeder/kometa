@@ -67,6 +67,18 @@ export class PlanetFateTransition {
     this._growFromRadius = this._currentRadius;
   }
 
+  // Overwrites _currentPos/_currentRadius directly, without touching
+  // _active/_started/_elapsed — for when a SEPARATE transition (see
+  // PlanetSpinTransition) has been driving the planet up to this point.
+  // Without this, start() would snapshot whatever stale position/radius this
+  // instance last held (its own build()-time default), causing a visible
+  // jump instead of continuing smoothly from wherever the other transition
+  // actually left the planet. Call once, immediately before start().
+  syncCurrentState(position: Vector3, radius: number): void {
+    this._currentPos.copy(position);
+    this._currentRadius = radius;
+  }
+
   update(delta: number): void {
     if (!this._active) return;
     this._elapsed += delta;

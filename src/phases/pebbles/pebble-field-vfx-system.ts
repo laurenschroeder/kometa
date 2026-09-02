@@ -31,9 +31,10 @@ const N_PEBBLE_VARIANTS = 6;
 // BufferGeometry across owners with different counts would mean one of them
 // overwrites the other's instance attributes. The material
 // (kPebbleFieldTintedMat) has no such per-owner state and is safe — and
-// important — to share (PebbleCometPresentationSystem shares it too, tinting
-// the permanent body by globals.pebbleTint), so every pebble in the game
-// renders with the exact same shader/palette.
+// important — to share (PebbleCometPresentationSystem shares it too, giving
+// the permanent body's own pebbles the same per-instance PEBBLE_TYPES
+// coloring), so every pebble in the game renders with the exact same
+// shader/palette.
 const kFieldPebbleGeos: BufferGeometry[] = Array.from({ length: N_PEBBLE_VARIANTS }, () =>
   buildOrganicGeometry(),
 );
