@@ -117,6 +117,7 @@
   <button id="btn-fate-events" class="phase-button">Fate Events</button>
   <button id="btn-launch" class="phase-button">Launch</button>
   <button id="btn-finale" class="phase-button">Finale</button>
+  <button id="btn-art-test" class="phase-button">Art Test</button>
   <div class="class-row">
     <button id="btn-class-blue" class="class-button class-blue">Blue</button>
     <button id="btn-class-green" class="class-button class-green">Green</button>

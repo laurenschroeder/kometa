@@ -15,6 +15,20 @@ const COMMIT_ATTACK = 0.02;
 const COMMIT_DECAY = 0.9;
 const COMMIT_GAIN = 0.12;
 
+// Charge-up rise — a sustained tone while a hand holds a choice zone (see
+// OrbitalLaunchSystem.CHARGE_SECONDS/_updateCharge), rising in pitch/gain
+// toward that choice's own COMMIT root frequency so the charge and the
+// commit chord that follows it read as one continuous gesture rather than
+// two unrelated sounds. Same persistent-oscillator start/update/stop idiom
+// as PlanetSpinSynth's rev-up drone.
+const CHARGE_FADE_IN_SECONDS = 0.12;
+const CHARGE_FADE_OUT_SECONDS = 0.15;
+const CHARGE_BASE_GAIN = 0.02;
+const CHARGE_PEAK_GAIN = 0.16;
+// Starts an octave below that choice's root and rises to it exactly as
+// charge fills — see updateCharge().
+const CHARGE_START_RATIO = 0.5;
+
 // Detach whoosh — bigger/longer than the comet's own release whoosh
 // (comet-interaction-synth.ts) since this is the actual "you're gone" launch
 // moment, plus a soft low swelling "bloom" tail underneath it for a
@@ -64,6 +78,14 @@ export class OrbitalLaunchSynth {
   private _convolver!: ConvolverNode;
   private _noiseBuffer!: AudioBuffer;
 
+  // Charge-rise voice — one at a time (only one zone can be actively
+  // charging, see OrbitalLaunchSystem._updateChargeAudio).
+  private _chargeOsc!: OscillatorNode;
+  private _chargeGain!: GainNode;
+  private _chargeSound!: PositionalAudio;
+  private _chargeRoot = ORBIT_ROOT;
+  private _chargeRunning = false;
+
   build(listener: AudioListener, scene: Scene): void {
     this._listener = listener;
     this._scene = scene;
@@ -73,6 +95,85 @@ export class OrbitalLaunchSynth {
     this._convolver.connect(listener.gain);
     this._noiseBuffer = buildNoiseBuffer(context, DETACH_DURATION);
     context.resume().catch(() => {});
+  }
+
+  // Starts (or restarts, if already running — see stopCharge()) the rising
+  // charge tone for the given choice, rooted at that choice's own
+  // ORBIT_ROOT/UNKNOWN_ROOT an octave down (see CHARGE_START_RATIO).
+  playChargeStart(choice: 'orbit' | 'launch', position: Vector3): void {
+    const context = this._listener.context;
+    if (context.state !== 'running') {
+      context.resume().catch(() => {});
+      return;
+    }
+    this.stopChargeImmediate();
+
+    const now = context.currentTime;
+    this._chargeRoot = choice === 'orbit' ? ORBIT_ROOT : UNKNOWN_ROOT;
+
+    this._chargeOsc = context.createOscillator();
+    this._chargeOsc.type = 'sine';
+    this._chargeOsc.frequency.setValueAtTime(this._chargeRoot * CHARGE_START_RATIO, now);
+
+    this._chargeGain = context.createGain();
+    this._chargeGain.gain.setValueAtTime(0, now);
+    this._chargeGain.gain.linearRampToValueAtTime(CHARGE_BASE_GAIN, now + CHARGE_FADE_IN_SECONDS);
+    this._chargeOsc.connect(this._chargeGain);
+
+    this._chargeSound = new PositionalAudio(this._listener);
+    this._chargeSound.setNodeSource(this._chargeGain as unknown as AudioScheduledSourceNode);
+    this._chargeSound.position.copy(position);
+    this._scene.add(this._chargeSound);
+
+    this._chargeOsc.start(now);
+    this._chargeRunning = true;
+  }
+
+  // Called every frame a zone is being held — charge01 (0-1, see
+  // OrbitalLaunchSystem.getOrbit/UnknownCharge01) drives both pitch (rising
+  // from half the root frequency up to the root itself) and gain, so the
+  // tone audibly builds toward the commit chord as the hold fills.
+  updateCharge(charge01: number, position: Vector3): void {
+    if (!this._chargeRunning) return;
+    const context = this._listener.context;
+    const now = context.currentTime;
+    const t = Math.max(0, Math.min(1, charge01));
+    const freq = this._chargeRoot * (CHARGE_START_RATIO + (1 - CHARGE_START_RATIO) * t);
+    this._chargeOsc.frequency.linearRampToValueAtTime(freq, now + 0.05);
+    this._chargeGain.gain.linearRampToValueAtTime(CHARGE_BASE_GAIN + (CHARGE_PEAK_GAIN - CHARGE_BASE_GAIN) * t, now + 0.05);
+    this._chargeSound.position.copy(position);
+  }
+
+  // Fades out and stops — called when a hand leaves the zone it was
+  // charging, on commit (the charge tone hands off to playCommit's own
+  // chord), or on any hard reset. Safe to call even if never started.
+  stopCharge(): void {
+    if (!this._chargeRunning) return;
+    this._chargeRunning = false;
+    const context = this._listener.context;
+    const now = context.currentTime;
+    const osc = this._chargeOsc;
+    const gain = this._chargeGain;
+    const sound = this._chargeSound;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.linearRampToValueAtTime(0, now + CHARGE_FADE_OUT_SECONDS);
+    osc.stop(now + CHARGE_FADE_OUT_SECONDS + 0.02);
+    setTimeout(() => {
+      this._scene.remove(sound);
+      gain.disconnect();
+    }, (CHARGE_FADE_OUT_SECONDS + 0.05) * 1000);
+  }
+
+  // Hard-cut variant (no fade) for playChargeStart's own restart-guard —
+  // switching zones mid-charge should cut cleanly to the new tone rather
+  // than crossfading two rising pitches.
+  private stopChargeImmediate(): void {
+    if (!this._chargeRunning) return;
+    this._chargeRunning = false;
+    this._chargeOsc.stop();
+    this._scene.remove(this._chargeSound);
+    this._chargeGain.disconnect();
   }
 
   playCommit(choice: 'orbit' | 'launch', position: Vector3): void {

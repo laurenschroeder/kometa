@@ -117,22 +117,45 @@ export interface ConstellationLayout {
   starPositions: Float32Array; // the winding path's stars — both the visual shape AND the touch/trace targets
 }
 
+// Reflects an isotropic random direction into the hemisphere facing awayDir
+// (negates it if it points into the wrong half) — cheap and keeps a roughly
+// uniform spread over that hemisphere, unlike rejection sampling. See
+// generateConstellationLayout's own comment for why every control point
+// needs this constraint.
+function randomHemisphereVector3(awayDir: Vector3): Vector3 {
+  const dir = randomUnitVector3();
+  if (dir.dot(awayDir) < 0) dir.negate();
+  return dir;
+}
+
 // Places starCount stars evenly along a winding path (def.controlPointCount
 // control points) within a spreadRadius volume around anchor, so the
 // constellation reads as a coherent traceable shape rather than a random
 // scatter. No attempt at a recognizable silhouette yet (dog/human/horn/etc.
 // are just names for now) — purely procedural, so size/complexity variety
 // comes entirely from the ConstellationDef's own numbers (see
-// constellation-set.ts).
+// constellation-set.ts). Every control point's offset from anchor is
+// constrained to the hemisphere facing away from the planet (awayDir — the
+// same unit direction placeConstellationAnchorsAroundPlanet placed this
+// anchor along) rather than a fully isotropic scatter: since anchor itself
+// already sits planetRadius+ANCHOR_SURFACE_OFFSET from the planet's center,
+// any offset with a non-negative component along awayDir keeps the
+// resulting star's own distance from that center >= anchor's own distance
+// (simple vector algebra — the cross term can't go negative), so no star
+// can ever land inside or even touch the planet's surface, regardless of
+// spreadRadius or how large the planet's own live radius later grows
+// (Leg B's zoom into Fate Events) — see ConstellationsVfxSystem's live
+// tracking, which reuses this exact same fixed local offset relationship.
 export function generateConstellationLayout(
   def: ConstellationDef,
   anchor: readonly [number, number, number],
+  awayDir: Vector3,
 ): ConstellationLayout {
   const [ax, ay, az] = anchor;
 
   const controlPoints: Vector3[] = [];
   for (let i = 0; i < def.controlPointCount; i++) {
-    const dir = randomUnitVector3();
+    const dir = randomHemisphereVector3(awayDir);
     const r = Math.random() * def.spreadRadius;
     controlPoints.push(new Vector3(dir.x * r, dir.y * r, dir.z * r));
   }

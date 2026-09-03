@@ -37,7 +37,10 @@ import { PlanetSpinTransition } from './planet-spin-transition.js';
 import { N_MOONS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
 
 const DUST_SIZE = 0.03;
-const FLIGHT_DURATION = 0.6;
+// Bumped from 0.6 — pebbles now fall from farther out (see
+// SURFACE_TRIGGER_DISTANCE's own increase), so a slower fall keeps the
+// motion readable as an actual fall rather than a quick snap to the surface.
+const FLIGHT_DURATION = 1.2;
 const MAX_INFLIGHT = 16;
 const COVERAGE_EASE_RATE = 2.5;
 const BASE_COLOR: [number, number, number] = [0.02, 0.03, 0.05];

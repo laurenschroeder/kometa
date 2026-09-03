@@ -22,7 +22,9 @@ import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
 import { StardustSystem } from './stardust-system.js';
 
-const STARDUST_COLOR: [number, number, number] = [1.0, 0.96, 0.82];
+// Exported so ArtTestVfxSystem's "current stardust field" variant renders
+// with the exact same color, not an eyeballed copy.
+export const STARDUST_COLOR: [number, number, number] = [1.0, 0.96, 0.82];
 const AMBIENT_SIZE = 0.05;
 const CAPTURED_SIZE = 0.035;
 

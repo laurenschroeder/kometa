@@ -3,11 +3,21 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { CapturedField, GatherableField, GatherHandInput } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
-import { NotificationHudSystem } from '../../core/notification-hud-system.js';
+import { FADE_SECONDS, NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { STARDUST_WIN_SEQUENCE } from '../../core/notification-copy.js';
 
 const N_STARDUST = 500;
-const WIN_CAPTURE_COUNT = Math.ceil(N_STARDUST * 0.35);
+// Lowered from 0.35 — gathering felt like it dragged on too long before the
+// tutorial's win sequence fired.
+const WIN_CAPTURE_COUNT = Math.ceil(N_STARDUST * 0.25);
+
+// Total on-screen time of one notify() call: fade-in + hold + fade-out, back
+// to back with no gap between queued messages (see NotificationHudSystem._
+// pump()/update()) — same helper OrbitalLaunchSystem defines locally for its
+// own detach-gating.
+function notifyDuration(holdSeconds: number): number {
+  return holdSeconds + FADE_SECONDS * 2;
+}
 
 // Fired via GatherableField's onCapture/onAttractStart callbacks, drained
 // each frame by StardustVfxSystem to trigger the catch/pickup twinkle
@@ -36,6 +46,16 @@ export class StardustSystem extends createSystem({
 }) {
   private _field!: GatherableField;
   private _hasWon = false;
+  // Counts down once _hasWon flips true — phaseComplete isn't set until
+  // this reaches 0, so STARDUST_WIN_SEQUENCE has actually finished its own
+  // on-screen time (fade-in + hold + fade-out for all 3 messages, back to
+  // back) before GameDirector transitions to Pebbles. Without this,
+  // phaseComplete flipped the same frame the win text started fading in —
+  // Pebbles' own phase-entry notification (and its pebble field spawning)
+  // could start well before the win sequence had a chance to actually be
+  // read. Same "hold the phase open a beat past isComplete()" pattern
+  // ConstellationsSystem uses for its own completion payoff.
+  private _winHoldRemaining = 0;
   private _captureEvents: CaptureEvent[] = [];
   private _attractEvents: AttractEvent[] = [];
 
@@ -79,6 +99,7 @@ export class StardustSystem extends createSystem({
     super.play();
     this._field.reset();
     this._hasWon = false;
+    this._winHoldRemaining = 0;
     this._captureEvents.length = 0;
     this._attractEvents.length = 0;
   }
@@ -98,10 +119,18 @@ export class StardustSystem extends createSystem({
 
     if (!this._hasWon && this._field.totalCaptured >= WIN_CAPTURE_COUNT) {
       this._hasWon = true;
-      getGlobals(this.world).phaseComplete.value = true;
       const notifications = this.world.getSystem(NotificationHudSystem);
+      this._winHoldRemaining = 0;
       for (const entry of STARDUST_WIN_SEQUENCE) {
         notifications?.notify(entry.text, entry.holdSeconds);
+        this._winHoldRemaining += notifyDuration(entry.holdSeconds);
+      }
+    }
+
+    if (this._winHoldRemaining > 0) {
+      this._winHoldRemaining -= delta;
+      if (this._winHoldRemaining <= 0) {
+        getGlobals(this.world).phaseComplete.value = true;
       }
     }
   }

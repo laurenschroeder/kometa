@@ -17,7 +17,7 @@ import {
   placeConstellationAnchorsAroundPlanet,
 } from '../../vfx/geometry/constellation-path.js';
 import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
-import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
+import { makeSparkleMaterial, makeSparkleMaterialVertexColor } from '../../vfx/shaders/sparkle-material.js';
 import {
   INTERMEDIATE_PLANET_CENTER,
   INTERMEDIATE_PLANET_RADIUS,
@@ -47,6 +47,14 @@ const TOUCHED_SIZE_MULT = 1.8;
 // a just-traced star from wherever its flash left it up to its bright/solid
 // target — a quick "settling into light" rather than a hard snap.
 const LIGHT_UP_EASE_RATE = 4;
+// Every untouched star is this warm yellow (same hue as EarthSituationsVfx
+// System's CROWN_COLOR), regardless of which pebble type its constellation
+// belongs to — "not yet gathered" reads as one consistent color across the
+// whole sky. Touching a star eases its color (same LIGHT_UP_EASE_RATE pull
+// as its brightness/size) toward that constellation's actual pebble-type
+// color (see _updateStarState) — "gathering" it is what reveals its true
+// color.
+const UNTOUCHED_STAR_COLOR: [number, number, number] = [1.0, 0.85, 0.2];
 
 // Non-interactive "other stars around" — pure background sky filler so the
 // active constellation reads as picked out of a real starfield instead of
@@ -81,8 +89,10 @@ const TWINKLE_FIXED_SPEED = 1.1;
 // positional drone (see star-drone-pool.ts) from the moment it's revealed;
 // touching it stops that one drone and plays a twinkle (TwinkleSynth, reused
 // from Stardust) at its position — once every star's drone has stopped this
-// way, none are left playing. Stars are tinted per pebble type (see pebble-type.ts) so the visual
-// identity carries over from Chapter 2's colors. Not GameDirector-managed —
+// way, none are left playing. Every star starts a uniform untouched yellow
+// (see UNTOUCHED_STAR_COLOR) and eases to its constellation's own pebble
+// type color (see pebble-type.ts) only once traced, so gathering visibly
+// reveals the Chapter 2 color it carries. Not GameDirector-managed —
 // like PlanetSeedingVfxSystem, a completed constellation's stars persist as
 // permanent sky scenery, so this registers always-on and self-gates
 // visibility via gamePhase. Resets when a fresh loop re-enters Stardust.
@@ -98,7 +108,11 @@ const TWINKLE_FIXED_SPEED = 1.1;
 export class ConstellationsVfxSystem extends createSystem({}) {
   private _constellations!: ConstellationsSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
-  private _starMats: ShaderMaterial[] = [];
+  // Single shared material for every interactive star across all 9
+  // constellations — color used to be baked per-type (one material per
+  // type), but now comes from each star's own aColor attribute instead (see
+  // UNTOUCHED_STAR_COLOR/_updateStarState), so one material suffices.
+  private _starMat!: ShaderMaterial;
   // Reset to false each time Constellations begins (see _onPhaseChange),
   // flips true once update() sees Leg A (the spin+recede transition) finish.
   private _revealed = false;
@@ -110,6 +124,10 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   private _brightAttrs: BufferAttribute[][] = [];
   private _sizeArrs: Float32Array[][] = [];
   private _sizeAttrs: BufferAttribute[][] = [];
+  // Untouched until traced, then eases toward that constellation's own
+  // pebble-type color — see UNTOUCHED_STAR_COLOR/_updateStarState.
+  private _colorArrs: Float32Array[][] = [];
+  private _colorAttrs: BufferAttribute[][] = [];
   // Per-star random flash-cycle offset (0-1), rolled once at build time, so
   // a slot's untouched stars don't all blink in lockstep.
   private _flashPhaseArrs: Float32Array[][] = [];
@@ -161,11 +179,9 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     this._liveAnchor = bakedAnchors.map(() => new Vector3());
     this._scratchLiveCenter = new Vector3();
 
-    for (let type = 0; type < N_TYPES; type++) {
-      const starColor = PEBBLE_TYPES[type]?.color ?? [1, 1, 1];
-      const starMat = makeSparkleMaterial({ color: starColor, pointSizeFactor: 260 });
-      this._starMats.push(starMat);
+    this._starMat = makeSparkleMaterialVertexColor({ pointSizeFactor: 260 });
 
+    for (let type = 0; type < N_TYPES; type++) {
       const defs = this._constellations.getDefs(type);
       const pointsRow: Points[] = [];
       const posAttrRow: BufferAttribute[] = [];
@@ -173,19 +189,23 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       const brightAttrRow: BufferAttribute[] = [];
       const sizeArrRow: Float32Array[] = [];
       const sizeAttrRow: BufferAttribute[] = [];
+      const colorArrRow: Float32Array[] = [];
+      const colorAttrRow: BufferAttribute[] = [];
       const flashPhaseRow: Float32Array[] = [];
       const offsetRow: Float32Array[] = [];
       const wasTracedRow: Uint8Array[] = [];
 
       for (let slot = 0; slot < defs.length; slot++) {
         const anchor = bakedAnchors[slot];
-        const built = this._buildStars(type, slot, starMat);
+        const built = this._buildStars(type, slot, this._starMat);
         pointsRow.push(built.points);
         posAttrRow.push(built.posAttr);
         brightArrRow.push(built.brightArr);
         brightAttrRow.push(built.brightAttr);
         sizeArrRow.push(built.sizeArr);
         sizeAttrRow.push(built.sizeAttr);
+        colorArrRow.push(built.colorArr);
+        colorAttrRow.push(built.colorAttr);
         flashPhaseRow.push(built.flashPhaseArr);
         offsetRow.push(this._computeOffsets(built.posAttr.array as Float32Array, anchor));
         wasTracedRow.push(new Uint8Array(defs[slot].starCount));
@@ -196,6 +216,8 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       this._brightAttrs.push(brightAttrRow);
       this._sizeArrs.push(sizeArrRow);
       this._sizeAttrs.push(sizeAttrRow);
+      this._colorArrs.push(colorArrRow);
+      this._colorAttrs.push(colorAttrRow);
       this._flashPhaseArrs.push(flashPhaseRow);
       this._starOffsets.push(offsetRow);
       this._wasTracedArrs.push(wasTracedRow);
@@ -286,6 +308,8 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     brightAttr: BufferAttribute;
     sizeArr: Float32Array;
     sizeAttr: BufferAttribute;
+    colorArr: Float32Array;
+    colorAttr: BufferAttribute;
     flashPhaseArr: Float32Array;
   } {
     const positions = this._constellations.getStarPositions(type, slot);
@@ -305,6 +329,17 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     brightAttr.setUsage(DynamicDrawUsage);
     geo.setAttribute('aBright', brightAttr);
 
+    // Starts yellow (untouched) for every star — see UNTOUCHED_STAR_COLOR.
+    const colorArr = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      colorArr[i * 3] = UNTOUCHED_STAR_COLOR[0];
+      colorArr[i * 3 + 1] = UNTOUCHED_STAR_COLOR[1];
+      colorArr[i * 3 + 2] = UNTOUCHED_STAR_COLOR[2];
+    }
+    const colorAttr = new BufferAttribute(colorArr, 3);
+    colorAttr.setUsage(DynamicDrawUsage);
+    geo.setAttribute('aColor', colorAttr);
+
     const flashPhaseArr = new Float32Array(count);
     for (let i = 0; i < count; i++) flashPhaseArr[i] = Math.random();
     geo.setAttribute('aPhase', new BufferAttribute(flashPhaseArr, 1));
@@ -313,7 +348,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     points.frustumCulled = false;
     points.visible = false;
     this.world.createTransformEntity(points);
-    return { points, posAttr, brightArr, brightAttr, sizeArr, sizeAttr, flashPhaseArr };
+    return { points, posAttr, brightArr, brightAttr, sizeArr, sizeAttr, colorArr, colorAttr, flashPhaseArr };
   }
 
   // dominantPebbleType was already set when Chapter 2 completed, well
@@ -353,6 +388,13 @@ export class ConstellationsVfxSystem extends createSystem({}) {
         this._brightAttrs[type][slot].needsUpdate = true;
         this._sizeArrs[type][slot].fill(STAR_SIZE);
         this._sizeAttrs[type][slot].needsUpdate = true;
+        const colorArr = this._colorArrs[type][slot];
+        for (let i = 0; i < colorArr.length; i += 3) {
+          colorArr[i] = UNTOUCHED_STAR_COLOR[0];
+          colorArr[i + 1] = UNTOUCHED_STAR_COLOR[1];
+          colorArr[i + 2] = UNTOUCHED_STAR_COLOR[2];
+        }
+        this._colorAttrs[type][slot].needsUpdate = true;
         this._wasTracedArrs[type][slot].fill(0);
       }
     }
@@ -360,7 +402,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   }
 
   update(delta: number, time: number): void {
-    for (const mat of this._starMats) mat.uniforms.uTime.value = time;
+    this._starMat.uniforms.uTime.value = time;
     this._fieldStarMat.uniforms.uTime.value = time;
 
     const phase = getGlobals(this.world).gamePhase.peek();
@@ -413,8 +455,12 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     const brightAttr = this._brightAttrs[dominant][activeSlot];
     const sizeArr = this._sizeArrs[dominant][activeSlot];
     const sizeAttr = this._sizeAttrs[dominant][activeSlot];
+    const colorArr = this._colorArrs[dominant][activeSlot];
+    const colorAttr = this._colorAttrs[dominant][activeSlot];
     const flashPhaseArr = this._flashPhaseArrs[dominant][activeSlot];
     const pull = 1 - Math.exp(-LIGHT_UP_EASE_RATE * delta);
+    // The color a touched star eases toward — see UNTOUCHED_STAR_COLOR.
+    const targetColor = PEBBLE_TYPES[dominant]?.color ?? UNTOUCHED_STAR_COLOR;
 
     for (let s = 0; s < def.starCount; s++) {
       if (traced[s]) {
@@ -426,14 +472,21 @@ export class ConstellationsVfxSystem extends createSystem({}) {
         }
         brightArr[s] += (TOUCHED_BRIGHT_TARGET - brightArr[s]) * pull;
         sizeArr[s] += (STAR_SIZE * TOUCHED_SIZE_MULT - sizeArr[s]) * pull;
+        colorArr[s * 3] += (targetColor[0] - colorArr[s * 3]) * pull;
+        colorArr[s * 3 + 1] += (targetColor[1] - colorArr[s * 3 + 1]) * pull;
+        colorArr[s * 3 + 2] += (targetColor[2] - colorArr[s * 3 + 2]) * pull;
       } else {
         const t = 0.5 + 0.5 * Math.sin(time * FLASH_FREQUENCY * Math.PI * 2 + flashPhaseArr[s] * Math.PI * 2);
         brightArr[s] = FLASH_MIN + (FLASH_MAX - FLASH_MIN) * t;
         sizeArr[s] = STAR_SIZE;
+        colorArr[s * 3] = UNTOUCHED_STAR_COLOR[0];
+        colorArr[s * 3 + 1] = UNTOUCHED_STAR_COLOR[1];
+        colorArr[s * 3 + 2] = UNTOUCHED_STAR_COLOR[2];
       }
     }
     brightAttr.needsUpdate = true;
     sizeAttr.needsUpdate = true;
+    colorAttr.needsUpdate = true;
   }
 
   // Recomputes one slot's live anchor from the planet's LIVE position/

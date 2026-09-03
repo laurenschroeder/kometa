@@ -6,6 +6,10 @@ export enum Phase {
   FateEvents = 'fateEvents',
   Launch = 'launch',
   Finale = 'finale',
+  // Dev-only art comparison sandbox — deliberately NOT in PHASE_ORDER below,
+  // so normal play/looping can never reach it; only PhaseMenuSystem's dev
+  // menu jumps here (see ArtTestSystem).
+  ArtTest = 'artTest',
 }
 
 // Canonical cycle order — the single source of truth GameDirectorSystem

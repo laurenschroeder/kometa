@@ -15,10 +15,15 @@ import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
 
-// How long the left-hand select must be held before the menu toggles —
-// was instant-on-press (getSelectStart()), which was too easy to trigger by
-// accident.
-const MENU_HOLD_SECONDS = 1.5;
+// Left-hand select (trigger/pinch) toggles the menu on five quick presses
+// in a row — was a single press held for 1.5s, then a 3-tap gesture, both
+// too easy to trigger by accident during normal play. A tap-count gesture
+// (like quintuple-clicking) reads as much more deliberate: TAP_WINDOW_SECONDS
+// is how long the player has, after each tap, to land the next one before
+// the count resets back to 0 — tightened alongside the bump to 5 taps so
+// the whole gesture still reads as "very quickly," not just "eventually."
+const TAP_WINDOW_SECONDS = 0.45;
+const TAPS_TO_TOGGLE = 5;
 
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],
@@ -28,13 +33,15 @@ const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-fate-events', Phase.FateEvents],
   ['btn-launch', Phase.Launch],
   ['btn-finale', Phase.Finale],
+  ['btn-art-test', Phase.ArtTest],
 ];
 
-// Dev/debug menu: left-hand select (trigger on controllers, pinch on hand
-// tracking — unused by any other mechanic today, see the "universal menu"
-// discussion) toggles a wrist-height panel in front of the player with a
-// button per phase, jumping straight there via GameDirectorSystem.
-// jumpToPhase() rather than waiting on win conditions/timeouts.
+// Dev/debug menu: three quick left-hand selects (trigger on controllers,
+// pinch on hand tracking — unused by any other mechanic today, see the
+// "universal menu" discussion) toggle a wrist-height panel in front of the
+// player with a button per phase, jumping straight there via
+// GameDirectorSystem.jumpToPhase() rather than waiting on win conditions/
+// timeouts.
 export class PhaseMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
 }) {
@@ -46,8 +53,8 @@ export class PhaseMenuSystem extends createSystem({
   private _avgSpeedEl: UIKit.Component<any> | null = null;
   private _speedSum = 0;
   private _speedSamples = 0;
-  private _selectHoldSeconds = 0;
-  private _selectTriggered = false;
+  private _tapCount = 0;
+  private _tapWindowRemaining = 0;
 
   init(): void {
     // GameDirectorSystem must be registered before this system (see
@@ -130,15 +137,17 @@ export class PhaseMenuSystem extends createSystem({
   }
 
   update(delta: number): void {
-    if (this.input.xr.gamepads.left?.getSelecting()) {
-      this._selectHoldSeconds += delta;
-      if (!this._selectTriggered && this._selectHoldSeconds >= MENU_HOLD_SECONDS) {
-        this._selectTriggered = true;
+    if (this._tapCount > 0) {
+      this._tapWindowRemaining -= delta;
+      if (this._tapWindowRemaining <= 0) this._tapCount = 0;
+    }
+    if (this.input.xr.gamepads.left?.getSelectStart()) {
+      this._tapCount++;
+      this._tapWindowRemaining = TAP_WINDOW_SECONDS;
+      if (this._tapCount >= TAPS_TO_TOGGLE) {
+        this._tapCount = 0;
         this._setOpen(!this._open);
       }
-    } else {
-      this._selectHoldSeconds = 0;
-      this._selectTriggered = false;
     }
 
     // Accumulate every frame regardless of panel visibility, so "average for

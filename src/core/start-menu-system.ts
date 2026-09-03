@@ -36,11 +36,13 @@ interface DwellButtonEntry {
   action: () => void;
 }
 
-// Gates the whole game behind starting the experience: Achievements still
-// uses a dwell-select button (hold your hand/controller ray over it, no
-// trigger press, and its fill bar grows over DWELL_SECONDS; reaching full
-// fires the action), but Start is now a two-handed pinch gesture instead of
-// a button (see DOUBLE_PINCH_HOLD_SECONDS) — hands off to
+// Gates the whole game behind starting the experience: the Achievements
+// button normally uses a dwell-select interaction (hold your hand/
+// controller ray over it, no trigger press, and its fill bar grows over
+// DWELL_SECONDS; reaching full fires the action) — currently disabled (see
+// the qualify callback below), still wired for Back/page navigation. Start
+// is now a two-handed pinch gesture instead of a button (see
+// DOUBLE_PINCH_HOLD_SECONDS) — hands off to
 // GameDirectorSystem.start() and flips globals.gameStarted (so
 // NotificationHudSystem's phase blurbs can begin — see its own comments).
 export class StartMenuSystem extends createSystem({
@@ -102,10 +104,13 @@ export class StartMenuSystem extends createSystem({
           entity.removeComponent(RayInteractable);
         };
 
-        this._registerButton(doc, 'btn-achievements', 'fill-achievements', () => {
-          this._refreshAchievementRows(doc);
-          this._setPage(doc, 'page-achievements');
-        });
+        // Disabled for now (not deleted — see class comment): no hover/dwell
+        // listeners registered, so it just sits there inert; dimmed so it
+        // visibly reads as inactive instead of looking clickable and
+        // silently doing nothing. Re-enable by restoring the
+        // _registerButton(doc, 'btn-achievements', ...) call this replaced.
+        doc.getElementById('btn-achievements')?.setProperties({ opacity: 0.35 });
+
         this._registerButton(doc, 'btn-back', 'fill-back', () => {
           this._setPage(doc, 'page-main');
         });

@@ -1,5 +1,6 @@
 import {
   CanvasTexture,
+  Color,
   createSystem,
   DoubleSide,
   Group,
@@ -25,10 +26,13 @@ const COUNTDOWN_PULSE_FREQ = 2.5;
 const COUNTDOWN_PULSE_AMOUNT = 0.12;
 
 // Charge-up cue while a zone is being held (see OrbitalLaunchSystem's
-// CHARGE_SECONDS/getOrbit/UnknownCharge01) — the zone visibly grows and
-// brightens toward these peak values as it fills, so "hold it here" reads
-// clearly rather than the zone just silently committing after a beat.
-const CHARGE_MAX_SCALE = 1.4;
+// CHARGE_SECONDS/getOrbit/UnknownCharge01) — the zone visibly grows,
+// brightens, and shifts color toward white as it fills, so a decision
+// visibly being made over CHARGE_SECONDS reads clearly rather than the zone
+// just silently committing after a beat. Bumped up from 1.4/1.0 alongside
+// CHARGE_SECONDS' own 1s->3s increase — a longer hold needed a more
+// noticeable escalation to still feel like it's building toward something.
+const CHARGE_MAX_SCALE = 1.6;
 const CHARGE_BASE_OPACITY = 0.55;
 const CHARGE_MAX_OPACITY = 1.0;
 // 1/s exponential ease rate smoothing the visual toward the real charge
@@ -86,6 +90,10 @@ interface Choice {
   center: Vector3;
   liveDir: Vector3;
   chargeVisual: number; // eased 0-1, see CHARGE_VISUAL_EASE_RATE
+  // zoneMaterial.color lerps from baseColor toward chargedColor (white) as
+  // chargeVisual rises — see update()'s charging block.
+  baseColor: Color;
+  chargedColor: Color;
 }
 
 // Renders OrbitalLaunchSystem's choice: two arrows (Orbit/The Great
@@ -103,6 +111,10 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
   private _zAxis!: Vector3;
   private _upAxis!: Vector3;
   private _lastState: string | null = null;
+  // Set true the first frame OrbitalLaunchSystem.isReadyToChoose() reports
+  // ready — both zones stay fully hidden (arrow/zone/label) until then, see
+  // play()/update() below.
+  private _revealed = false;
 
   init(): void {
     this._orbitalLaunch = this.world.getSystem(OrbitalLaunchSystem)!;
@@ -146,18 +158,33 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     label.visible = false;
     this.world.createTransformEntity(label);
 
-    return { arrow, zone, zoneMaterial: zoneMat, label, center, liveDir, chargeVisual: 0 };
+    return {
+      arrow,
+      zone,
+      zoneMaterial: zoneMat,
+      label,
+      center,
+      liveDir,
+      chargeVisual: 0,
+      baseColor: zoneMat.color.clone(),
+      chargedColor: zoneMat.color.clone().lerp(new Color(1, 1, 1), 0.85),
+    };
   }
 
   play(): void {
     super.play();
     this._lastState = null;
+    this._revealed = false;
     for (const choice of [this._orbit, this._unknown]) {
-      choice.arrow.visible = true;
-      choice.zone.visible = true;
-      choice.label.visible = true;
+      // Hidden until _revealed flips true in update() below (see
+      // isReadyToChoose()'s own comment) — not shown immediately on phase
+      // entry like every other one-shot VFX reveal here.
+      choice.arrow.visible = false;
+      choice.zone.visible = false;
+      choice.label.visible = false;
       choice.zone.scale.setScalar(1);
       choice.zoneMaterial.opacity = CHARGE_BASE_OPACITY;
+      choice.zoneMaterial.color.copy(choice.baseColor);
       choice.chargeVisual = 0;
     }
   }
@@ -173,6 +200,16 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
 
   update(delta: number, time: number): void {
     const state = this._orbitalLaunch.getState();
+
+    if (!this._revealed && (state !== 'choosing' || this._orbitalLaunch.isReadyToChoose())) {
+      this._revealed = true;
+      for (const choice of [this._orbit, this._unknown]) {
+        choice.arrow.visible = true;
+        choice.zone.visible = true;
+        choice.label.visible = true;
+      }
+    }
+
     if (state !== this._lastState && state === 'committed') {
       const losing = this._orbitalLaunch.getChoice() === 'orbit' ? this._unknown : this._orbit;
       losing.arrow.visible = false;
@@ -214,6 +251,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
         choice.zone.scale.setScalar(1 + choice.chargeVisual * (CHARGE_MAX_SCALE - 1));
         choice.zoneMaterial.opacity =
           CHARGE_BASE_OPACITY + choice.chargeVisual * (CHARGE_MAX_OPACITY - CHARGE_BASE_OPACITY);
+        choice.zoneMaterial.color.copy(choice.baseColor).lerp(choice.chargedColor, choice.chargeVisual);
       }
     } else if (state === 'committed') {
       const winning = this._orbitalLaunch.getChoice() === 'orbit' ? this._orbit : this._unknown;

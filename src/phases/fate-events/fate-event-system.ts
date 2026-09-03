@@ -9,7 +9,16 @@ import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-sys
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { FateDialogueEntry, getFateDialogue, NamedFigureArc, NAMED_FIGURES_BY_TYPE } from './fate-dialogue.js';
 
-export const PLANET_CENTER: [number, number, number] = [0, 1.3, -2.0];
+// Z pulled back from -2.0 — at that distance the near surface sat only
+// ~0.6m from the player's face (PLANET_RADIUS 1.4 leaves centerDistance-
+// PLANET_RADIUS of clearance), which read as the planet growing into your
+// head right as Leg B's grow transition (planet-fate-transition.ts) landed.
+// -2.6 leaves ~1.2m of clearance instead, a comfortable distance for
+// something this large to loom at. PlanetFateTransition derives its whole
+// end state from this constant, so every consumer (crowd placement below,
+// comet-autopilot's live orbit math, constellation-vfx's reveal) moves
+// together with it — nothing else needed to change.
+export const PLANET_CENTER: [number, number, number] = [0, 1.3, -2.6];
 export const PLANET_RADIUS = 1.4;
 export const N_PEOPLE = 10;
 // 28 degrees (was 45) — tighter cluster on the patch of surface most
@@ -40,14 +49,8 @@ const VISIBLE_PEOPLE_BY_TYPE = [9, N_PEOPLE, 6]; // souls, organics, gasses
 const BOB_FREQUENCY_MULT_BY_TYPE = [1, 1.25, 0.6]; // souls, organics, gasses
 // Fraction of the type's visible people that must be visited to complete
 // the phase early — otherwise it falls back to the timeout (see index.ts).
-const VISIT_FRACTION_TO_COMPLETE = 0.5;
-// Floor on how soon the visit-based win condition above can actually fire —
-// without this, a player who happens to visit half the crowd quickly could
-// end the phase in well under 20s, barely getting to fly around/hear from
-// anyone before Launch's shrinking planet shows up. Paired with index.ts's
-// own timeoutSeconds (65) so this phase always lasts roughly a minute either
-// way, whether the player lingers or rushes.
-const MIN_PHASE_SECONDS = 55;
+// 1.0 — talking to everyone is what unlocks moving on, not just half of them.
+const VISIT_FRACTION_TO_COMPLETE = 1.0;
 
 // The first two people (always within range — VISIBLE_PEOPLE_BY_TYPE's
 // smallest value is 6) get individual identity instead of sharing the
@@ -70,11 +73,9 @@ const NAMED_DWELL_THRESHOLD = 0.5;
 // an ambient "big fire" effect (globals.dominantPebbleType). Pure simulation
 // here: no mesh/entity creation happens in this file (see
 // FateEventVfxSystem), only surface layout math and proximity/dialogue
-// state. Visiting at least half of the type's visible people (see
-// VISIT_FRACTION_TO_COMPLETE) completes the phase — but not before
-// MIN_PHASE_SECONDS has passed, so the player always gets roughly a minute
-// to fly around and hear from people regardless of how fast they visit;
-// otherwise it falls back to the timeout (see index.ts).
+// state. Visiting every one of the type's visible people (see
+// VISIT_FRACTION_TO_COMPLETE) completes the phase; otherwise it falls back
+// to the timeout (see index.ts).
 export class FateEventSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
@@ -87,9 +88,13 @@ export class FateEventSystem extends createSystem({
   private _lineTimer!: Float32Array;
   private _visited!: Uint8Array;
   private _visitedCount = 0;
-  // Seconds since play() — gates the visit-based win condition below (see
-  // MIN_PHASE_SECONDS).
-  private _elapsed = 0;
+  // Random per-play rotation into this._dialogue.entries — see
+  // getDialogueLinesFor(). Guarantees every ambient crowd member gets a
+  // distinct entry this playthrough (no two people say the same thing) and,
+  // when a constellation's pool holds more entries than it has ambient
+  // slots (see FATE_DIALOGUE's own comment), surfaces a different subset
+  // each fresh loop instead of always the same first few.
+  private _dialogueOffset = 0;
 
   // Cached per play() from NAMED_FIGURES_BY_TYPE[dominantPebbleType] — see
   // that table's own comment for why this is a fixed placeholder until then.
@@ -150,7 +155,7 @@ export class FateEventSystem extends createSystem({
     this._visited.fill(0);
     this._visitedCount = 0;
     this._namedDwell.fill(0);
-    this._elapsed = 0;
+    this._dialogueOffset = Math.floor(Math.random() * this._dialogue.entries.length);
 
     // Primary trigger for Leg B — the final grow/zoom-in from wherever
     // Constellations' spin transition (Leg A) left the planet, to Fate
@@ -179,8 +184,6 @@ export class FateEventSystem extends createSystem({
   }
 
   update(delta: number): void {
-    this._elapsed += delta;
-
     // Only the type's own visible figures (see VISIBLE_PEOPLE_BY_TYPE) are
     // reachable — the rest stay hidden scenery (see fate-event-vfx-system.ts's
     // matching revealCount cap), so they never activate/count as visited.
@@ -201,44 +204,25 @@ export class FateEventSystem extends createSystem({
             this._visited[i] = 1;
             this._visitedCount++;
           }
-          if (!this._active[i]) {
-            this._active[i] = 1;
-            // Ambient crowd restarts its cycling lines from the top each
-            // fresh approach (by design — see the class comment). The two
-            // featured figures do NOT: they're meant to progress and hold
-            // on their final line (see the update() loop below) — resetting
-            // here too would mean simply stepping back and re-approaching
-            // sends them back to line 1 every time, which in practice made
-            // it look like they never progressed at all, since a player
-            // rarely holds a hand within PROXIMITY_RADIUS continuously for
-            // multiple full LINE_CYCLE_SECONDS windows. Their line/timer
-            // state now only ever resets at play() (a fresh loop).
-            if (i >= NAMED_FIGURE_COUNT) {
-              this._lineIndex[i] = 0;
-              this._lineTimer[i] = 0;
-            }
-          }
+          this._active[i] = 1;
           this._awayTimer[i] = 0;
         } else if (this._active[i]) {
           this._awayTimer[i] += delta;
           if (this._awayTimer[i] >= LEAVE_GRACE_SECONDS) {
             this._active[i] = 0;
-            if (i >= NAMED_FIGURE_COUNT) {
-              this._lineIndex[i] = 0;
-              this._lineTimer[i] = 0;
-            }
           }
         }
       }
     }
 
-    if (
-      this._elapsed >= MIN_PHASE_SECONDS &&
-      this._visitedCount >= Math.ceil(visibleCount * VISIT_FRACTION_TO_COMPLETE)
-    ) {
+    if (this._visitedCount >= Math.ceil(visibleCount * VISIT_FRACTION_TO_COMPLETE)) {
       getGlobals(this.world).phaseComplete.value = true;
     }
 
+    // Every visible person — named or ambient — now progresses and holds on
+    // their own assigned line/sequence's last line rather than wrapping
+    // back to the start (see getDialogueLinesFor's own comment): a "tiny
+    // story" idiom, not chatter that loops forever.
     for (let i = 0; i < visibleCount; i++) {
       if (!this._active[i]) continue;
       if (i < NAMED_FIGURE_COUNT) this._namedDwell[i] += delta;
@@ -247,14 +231,7 @@ export class FateEventSystem extends createSystem({
       this._lineTimer[i] += delta;
       if (this._lineTimer[i] >= LINE_CYCLE_SECONDS) {
         this._lineTimer[i] = 0;
-        if (i < NAMED_FIGURE_COUNT) {
-          // Progress and hold — a 3-beat arc reads as a tiny story, not
-          // ambient chatter that loops forever.
-          const namedLineCount = this._namedArcs[i].lines.length;
-          this._lineIndex[i] = Math.min(this._lineIndex[i] + 1, namedLineCount - 1);
-        } else {
-          this._lineIndex[i] = (this._lineIndex[i] + 1) % lineCount;
-        }
+        this._lineIndex[i] = Math.min(this._lineIndex[i] + 1, lineCount - 1);
       }
     }
   }
@@ -282,26 +259,31 @@ export class FateEventSystem extends createSystem({
   getLineIndex(): Uint8Array {
     return this._lineIndex;
   }
-  // Per-person dialogue — normally everyone shares this._dialogue.lines, but
-  // the one person index EarthSituationsVfxSystem picked as "paired" with a
-  // risen ghost (Dog/Human only — see globals.pairedPersonIndex/
-  // pairedPersonLine, set on that constellation's completion edge) gets a
-  // fixed single-line override instead, replacing their dialogue entirely.
-  // Routed through globals rather than a direct system reference so this
-  // file and earth-situations-vfx-system.ts don't need to import each other.
-  // The two featured figures (see NAMED_FIGURE_COUNT) bypass this entirely
-  // — getLineText below checks featured status first, so their own
-  // NAMED_FIGURES_BY_TYPE arc always wins over a ghost pairing.
+  // Per-person dialogue. The two featured figures (see NAMED_FIGURE_COUNT)
+  // always get their own NAMED_FIGURES_BY_TYPE arc. Every ambient crowd
+  // member gets ONE entry from this._dialogue.entries, unique to them for
+  // this playthrough — see _dialogueOffset's own comment — rather than
+  // everyone sharing/repeating the same shared lines. The one exception:
+  // whichever ambient person index EarthSituationsVfxSystem picked as
+  // "paired" with a risen ghost (Dog/Human only — see globals.
+  // pairedPersonIndex/pairedPersonLine, set on that constellation's
+  // completion edge) gets a fixed single-line override instead, replacing
+  // their assigned entry entirely. Routed through globals rather than a
+  // direct system reference so this file and earth-situations-vfx-system.ts
+  // don't need to import each other. Checked AFTER the named-figure check
+  // (not before) so a named figure's own arc always wins over a ghost
+  // pairing, same precedence as before this refactor.
   getDialogueLinesFor(personIndex: number): readonly string[] {
+    if (personIndex < NAMED_FIGURE_COUNT) return this._namedArcs[personIndex].lines;
     const globals = getGlobals(this.world);
     if (personIndex === globals.pairedPersonIndex.peek()) {
       const line = globals.pairedPersonLine.peek();
       if (line) return [line];
     }
-    return this._dialogue.lines;
+    const entries = this._dialogue.entries;
+    return entries[(this._dialogueOffset + (personIndex - NAMED_FIGURE_COUNT)) % entries.length];
   }
   getLineText(i: number): string {
-    if (i < NAMED_FIGURE_COUNT) return this._namedArcs[i].lines[this._lineIndex[i]] ?? '';
     return this.getDialogueLinesFor(i)[this._lineIndex[i]] ?? '';
   }
   getPeopleColor(): [number, number, number] {

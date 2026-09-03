@@ -131,7 +131,10 @@ interface CometVisual {
 // Stardust (gathering motes) and Pebbles (gathering the ambient pebble
 // field itself, see pebble-field-system.ts) both collect raw material for
 // this body before it's earned; it becomes visible from Seeding onward.
-const HIDDEN_DURING_PHASES = new Set<Phase>([Phase.Stardust, Phase.Pebbles]);
+// Also hidden during Phase.ArtTest — that dev sandbox renders its own
+// stand-in "test comet" built from whichever variant is showing (see
+// ArtTestVfxSystem), so the real body would just visually double up with it.
+const HIDDEN_DURING_PHASES = new Set<Phase>([Phase.Stardust, Phase.Pebbles, Phase.ArtTest]);
 
 // The preserved visual from the original comet-system.ts prototype —
 // toon-shaded instanced pebbles + haze + face-decal head — rewired onto the
@@ -179,6 +182,18 @@ export class PebbleCometPresentationSystem extends createSystem({
       getGlobals(this.world).gamePhase.subscribe((phase) => {
         this._visible = !HIDDEN_DURING_PHASES.has(phase);
         this._applyVisibility();
+
+        if (phase === Phase.Seeding) {
+          // Retint every comet head from HEAD_PALETTE's near-black default
+          // to the player's majority pebble color, right as the body first
+          // becomes visible — same "retint on Seeding entry" pattern
+          // PlanetSeedingVfxSystem uses for the moons.
+          const dominant = getGlobals(this.world).dominantPebbleType.peek();
+          const color = PEBBLE_TYPES[dominant].color;
+          for (const visual of this._visuals.values()) {
+            (visual.headMat.uniforms.uBodyColor.value as Vector3).set(...color);
+          }
+        }
       }),
     );
 

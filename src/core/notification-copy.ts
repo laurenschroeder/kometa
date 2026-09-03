@@ -16,6 +16,14 @@ export interface NotificationCopy {
   // finishes fading out), this actually pauses first. Omit for the default
   // (no gap).
   delaySeconds?: number;
+  // Per-line text color (0-1 RGB), index-matched against text.split('\n') —
+  // e.g. Pebbles' "the blue dust of souls" line tinted to match
+  // PEBBLE_TYPES[0].color. A line with no entry (array too short, or an
+  // explicit null) falls back to the HUD's default white — see
+  // NotificationHudSystem._beginShow, which always sets an explicit color
+  // per line so a previous message's tint can't leak onto the next one's
+  // text elements.
+  lineColors?: (readonly [number, number, number] | null)[];
 }
 
 // Every phase gets a sequence (most are one message) — NotificationHudSystem
@@ -29,13 +37,14 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
     {
       text: 'If you want to control the comet with a different hand, simply pinch it with your other hand and it will move over.',
       holdSeconds: 5,
-      delaySeconds: 5,
+      delaySeconds: 10,
     },
   ],
   [Phase.Pebbles]: [
     {
       text: 'Three paths call to you\nthe blue dust of souls\nthe green pulse of living things\nthe red violence of raw gasses.',
       holdSeconds: 5.5,
+      lineColors: [null, PEBBLE_TYPES[0].color, PEBBLE_TYPES[1].color, PEBBLE_TYPES[2].color],
     },
     {
       text: 'What you gather will not just change yourself, but affect other planets you come into contact with.',
@@ -55,19 +64,19 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   // too fast-paced. See PlanetSpinTransition's own SPIN_DURATION comment for
   // the matching transition-side bump.
   [Phase.Constellations]: [
-    { text: 'Many years later…', holdSeconds: 3.5 },
+    { text: '*Many years later*', holdSeconds: 3.5 },
     {
       text: 'A whole society has developed, thanks to the resources you seeded the planet with.',
       holdSeconds: 5.5,
     },
-    { text: "Let's take a look around.", holdSeconds: 3 },
+    { text: "What a nice looking planet.", holdSeconds: 3 },
     {
-      text: 'Let the stars guide you — the people on the planet seem very interested in them.',
+      text: 'Why not visit those nearby stars? The people on the planet seem very interested in them.',
       holdSeconds: 6.5,
     },
   ],
   [Phase.FateEvents]: [
-    { text: 'The planet you seeded has grown into a world of its own. Go and see what you have made.', holdSeconds: 6.1 },
+    { text: 'This planet now sees you in a new way. Come meet the people.', holdSeconds: 6.1 },
   ],
   [Phase.Launch]: [
     {
@@ -77,10 +86,13 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   ],
   [Phase.Finale]: [
     {
-      text: 'What began as scattered dust has become a comet whole — watch it find its place among the stars.',
+      text: 'You have spent a lifetime gathering and delivering space dust. You now find your place among the stars.',
       holdSeconds: 6.7,
     },
   ],
+  // Dev-only sandbox — no phase-entry blurb; ArtTestSystem shows its own
+  // per-variant label via notify() instead.
+  [Phase.ArtTest]: [],
 };
 
 // Fired by StardustSystem once the tutorial's gather threshold is reached —
@@ -97,7 +109,7 @@ export const STARDUST_WIN_SEQUENCE: NotificationCopy[] = [
 // so it can't be a static table entry like the ones above.
 export function pebbleCompletionMessage(typeName: string): NotificationCopy {
   return {
-    text: `You've collected so much ${typeName}! Let's go out and show off your new colors.`,
+    text: `You've collected so many space pebbles, especially ${typeName}! Let's go out and show off your new form.`,
     holdSeconds: 3.5,
   };
 }
@@ -119,11 +131,11 @@ export function constellationSpottedMessage(name: string): NotificationCopy {
 // they're the ones making the myth, not you. Keyed by the same
 // celestialSymbol strings fate-dialogue.ts uses.
 const CELESTIAL_SYMBOL_LINES: Record<string, string> = {
-  Dog: 'A dog runs loose below — has always run loose. Tonight, they say it is chasing your light.',
+  Dog: 'A dog has left the world below. Tonight, they say it is chasing your light.',
   Human: 'Two people are parting ways down there, as people always do. Tonight, they blame the comet.',
   Horn: 'The horns were already sounding for the festival. Now they say you are the reason to celebrate.',
   Bird: 'The birds were always going to sing tonight. Now they say it is a song for you.',
-  Giraffe: 'The giraffes graze on, same as any other night. Tonight, someone below decided that means something.',
+  Giraffe: 'The giraffes graze, same as any other night. Tonight, someone below decided that means something.',
   Tree: 'The trees have swayed like this for a hundred years. Tonight, they say it is because you have passed by.',
   Locust: 'The locusts were already coming this season. Tonight, they have found something else to blame.',
   'Bow and Arrow': 'The war was already close to breaking out. Tonight, they have found a banner to rally under.',
@@ -131,34 +143,16 @@ const CELESTIAL_SYMBOL_LINES: Record<string, string> = {
 };
 
 export function celestialSymbolMessage(name: string): NotificationCopy {
-  const line = CELESTIAL_SYMBOL_LINES[name] ?? `It's been realized, you are the celestial symbol of ${name}.`;
-  return { text: line, holdSeconds: 6.5 };
-}
-
-// Fired once by OrbitalLaunchSystem.play() — a retrospective beat right as
-// Fate Events ends, summarizing the impact you leave behind. Same "this was
-// always their story, you're just in it now" principle as
-// celestialSymbolMessage above, but past-tense/retrospective (what gets
-// remembered) rather than present-tense (what's happening right now).
-// celestialSymbol can be null on a dev-menu skip that never actually traced
-// a constellation — falls back to a generic line rather than throwing.
-const CIVILIZATION_REFLECTION_LINES: Record<string, string> = {
-  Dog: 'Long after you are gone, they will still tell the story of the comet and the dog that chased it into the sky.',
-  Human: 'They will tell this story for generations — not of a comet, but of someone who became one with the sky the night you passed.',
-  Horn: 'The festival will come again next year, same as always. But in the telling, it will always be the year the comet blessed it.',
-  Bird: 'The birds will keep singing long after you are forgotten by everyone but the ones who first heard you in their song.',
-  Giraffe: 'Nothing below truly changed because of you. But for one turning of the sky, they watched you the way they watch the tallest, oldest things.',
-  Tree: 'The forest will keep growing, root and branch, the way it always has. Somewhere in it now, there is a story about the night the sky bent down.',
-  Locust: 'The locusts would have come regardless. But now there is a comet in every telling of that season — easier to blame than the weather.',
-  'Bow and Arrow': 'The war was always theirs to fight. You just gave it a sign to rally behind, and they will swear by it for years.',
-  Crown: 'The king was always going to fall. But from now on, every version of that story has a comet in the sky above the tower.',
-};
-
-export function civilizationReflectionMessage(celestialSymbol: string | null): NotificationCopy {
-  const line =
-    (celestialSymbol && CIVILIZATION_REFLECTION_LINES[celestialSymbol]) ??
-    'Whatever was already unfolding down there will keep unfolding without you. But for one night, they looked up and saw you in it.';
-  return { text: line, holdSeconds: 7 };
+  const reveal = `It's been realized, you are the celestial symbol of ${name}.`;
+  const flavor = CELESTIAL_SYMBOL_LINES[name];
+  // flavor (the "myth" beat) is always followed by the explicit reveal line
+  // now, not replaced by it as a missing-flavor fallback — '\n' splits into
+  // its own staggered line (see NotificationHudSystem's LINE_STAGGER_
+  // SECONDS), same multi-line convention the Pebbles intro uses. holdSeconds
+  // bumped from 6.5 to give the second line room to actually be read once
+  // it fades in behind the first, when flavor exists.
+  const text = flavor ? `${flavor}\n${reveal}` : reveal;
+  return { text, holdSeconds: flavor ? 9 : 6.5 };
 }
 
 // Fired once by EndRunMenuSystem, right before the "time is done" message —
@@ -185,13 +179,6 @@ export function farewellMessage(): NotificationCopy {
     holdSeconds: 5.7,
   };
 }
-
-// Fired once by EndRunMenuSystem after Finale's payoff has had time to read,
-// right before its Main-Menu/New-Comet choice panel appears.
-export const END_RUN_MESSAGE: NotificationCopy = {
-  text: 'Your time with the comet is done.',
-  holdSeconds: 5.7,
-};
 
 // Fired by OrbitalLaunchSystem the moment the player commits to one of the
 // two choice zones — static (no interpolated argument needed), unlike the

@@ -1,4 +1,6 @@
 import { AssetType, DomeGradient, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
+import { ArtTestSystem } from './phases/art-test/art-test-system.js';
+import { ArtTestVfxSystem } from './phases/art-test/art-test-vfx-system.js';
 import { CometAudioSystem } from './comet/comet-audio-system.js';
 import { CometAutopilotSystem } from './comet/comet-autopilot-system.js';
 import { CometBody } from './comet/comet-body-component.js';
@@ -9,6 +11,7 @@ import { CometTrail } from './comet/comet-trail-component.js';
 import { CometTrailSystem } from './comet/comet-trail-system.js';
 import { HandAnchor, HandSide } from './comet/hand-anchor-component.js';
 import { AchievementSystem } from './core/achievement-system.js';
+import { BackgroundMusicSystem } from './core/background-music-system.js';
 import { bootstrapGlobals } from './core/globals.js';
 import { GameDirectorSystem } from './core/game-director-system.js';
 import { HudText, NotificationHudSystem } from './core/notification-hud-system.js';
@@ -42,7 +45,17 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     beepchat4: { url: '/textures/beepchat4.png', type: AssetType.Texture },
     smile1: { url: '/textures/Sprite-0001.png', type: AssetType.Texture },
     smile2: { url: '/textures/Sprite-0002.png', type: AssetType.Texture },
+    // Art Test only (see ArtTestVfxSystem) — billboarded pebble/star sprite
+    // treatments.
+    // PNGs (transparent) — swapped from the original opaque JPEGs so the
+    // billboard shader's alpha channel actually has something to read.
+    fabricGhost1: { url: '/textures/fabricghosts1.png', type: AssetType.Texture },
+    fabricGhost2: { url: '/textures/fabricghosts2.png', type: AssetType.Texture },
+    fabricGhost3: { url: '/textures/fabricghosts3.png', type: AssetType.Texture },
+    fabricGhost4: { url: '/textures/fabricghosts4.png', type: AssetType.Texture },
+    starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture },
     dustLand: { url: '/audio/dust-land.wav', type: AssetType.Audio },
+    backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
   },
   xr: {
     sessionMode: SessionMode.ImmersiveVR,
@@ -160,6 +173,11 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // it looks NotificationHudSystem up lazily via getSystem() on unlock.
   world.registerSystem(AchievementSystem, { priority: 36 });
 
+  // Ambient background music for the whole run — always-on, never
+  // GameDirector-managed (see its own comments); starts itself once
+  // globals.gameStarted flips true.
+  world.registerSystem(BackgroundMusicSystem, { priority: 36 });
+
   // Distant background starfield — always-on, visible from the start menu
   // through every phase, never GameDirector-managed (see its own comments).
   // No dependencies on any other system, so registration order doesn't
@@ -237,9 +255,9 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(FateEventVfxSystem, { priority: 32 });
   director.definePhase(Phase.FateEvents, {
     systems: [world.getSystem(FateEventSystem)!],
-    // Paired with FateEventSystem's own MIN_PHASE_SECONDS (55) — together
-    // they keep this phase at roughly a minute either way, whether the
-    // player lingers with the crowd or rushes through it.
+    // Safety net for a player who doesn't visit everyone (see
+    // FateEventSystem's VISIT_FRACTION_TO_COMPLETE) — no minimum-duration
+    // floor anymore, so visiting everyone quickly moves on immediately.
     timeoutSeconds: 65,
   });
 
@@ -266,7 +284,16 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   world.registerSystem(CometAutopilotSystem, { priority: 12 });
   director.definePhase(Phase.Launch, {
     systems: [world.getSystem(OrbitalLaunchSystem)!, world.getSystem(OrbitalLaunchVfxSystem)!],
-    timeoutSeconds: 30,
+    // Bumped from 30 — too tight against OrbitalLaunchSystem's own notify-
+    // gated flow: the choice zones don't even reveal until ~8s in (the
+    // phase-entry blurb finishing), then CHARGE_SECONDS to commit, then a
+    // fixed ~18s more for the commit message + LAUNCH_BUILDUP_SEQUENCE to
+    // play out before a real detach fires — a floor of ~29s even for a
+    // player who commits instantly. At 30 the phase's own GameDirector
+    // timeout (this value) could fire first and force an immediate detach
+    // via OrbitalLaunchSystem.stop()'s fallback, cutting the buildup
+    // sequence off mid-playback. 55 leaves real room to notice/aim/hold.
+    timeoutSeconds: 55,
   });
 
   world
@@ -281,6 +308,18 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // — the player picks "Make a New Comet" (jumpToPhase) or "Main Menu"
     // (returnToMenu) rather than the loop cutting back to Stardust on its
     // own.
+  });
+
+  // Dev-only art-comparison sandbox (see Phase.ArtTest's own comment) —
+  // reachable only via PhaseMenuSystem's dev menu (btn-art-test), never
+  // through normal play/looping since Phase.ArtTest isn't in PHASE_ORDER.
+  world
+    .registerSystem(ArtTestSystem, { priority: 30 })
+    .registerSystem(ArtTestVfxSystem, { priority: 32 });
+  director.definePhase(Phase.ArtTest, {
+    systems: [world.getSystem(ArtTestSystem)!, world.getSystem(ArtTestVfxSystem)!],
+    // No timeoutSeconds — a dev tool should never auto-advance out from
+    // under whoever's using it; leaving is always a manual dev-menu jump.
   });
 
   // director.start() is deliberately NOT called here — StartMenuSystem

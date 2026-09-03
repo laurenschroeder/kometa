@@ -1,4 +1,4 @@
-import { Blending, NormalBlending, ShaderMaterial } from '@iwsdk/core';
+import { Blending, NormalBlending, ShaderMaterial, Texture } from '@iwsdk/core';
 
 export interface SparkleParams {
   color: [number, number, number];
@@ -154,6 +154,58 @@ export function makeSparkleMaterialVertexColor(params: SparkleVertexColorParams)
 
   return new ShaderMaterial({
     uniforms: { uTime: { value: 0 } },
+    vertexShader,
+    fragmentShader,
+    blending: params.blending ?? NormalBlending,
+    depthWrite: params.depthWrite ?? false,
+    transparent: params.transparent ?? true,
+  });
+}
+
+export interface SparkleTexturedParams {
+  texture: Texture;
+  blending?: Blending;
+  depthWrite?: boolean;
+  transparent?: boolean;
+}
+
+// A real illustrated texture (an actual star image, not the procedural
+// core+glint shape the other two variants above draw) with the same
+// "generative sparkle" twinkle modulation layered on top via alpha —
+// requires the material's uTime uniform to be updated every frame (same
+// contract as the other sparkle materials) and a per-geometry `aPhase`
+// attribute so instances sharing this one material don't all pulse in
+// lockstep. Meant for individual billboarded Mesh+PlaneGeometry instances
+// (see ArtTestVfxSystem), not a Points cloud — gl_PointCoord-based sprites
+// can't host an arbitrary UV-mapped illustration cleanly, and a real Mesh
+// also lets a caller actually orient/billboard it explicitly frame to
+// frame instead of relying on point-sprite screen-facing.
+export function makeSparkleTexturedMaterial(params: SparkleTexturedParams): ShaderMaterial {
+  const vertexShader = `
+    attribute float aPhase;
+    varying vec2 vUv;
+    varying float vPhase;
+    void main() {
+      vUv = uv;
+      vPhase = aPhase;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `;
+
+  const fragmentShader = `
+    uniform sampler2D uMap;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vPhase;
+    void main() {
+      vec4 tex = texture2D(uMap, vUv);
+      float twinkle = 0.55 + 0.45 * sin(uTime * 3.0 + vPhase * 6.2831);
+      gl_FragColor = vec4(tex.rgb, tex.a * twinkle);
+    }
+  `;
+
+  return new ShaderMaterial({
+    uniforms: { uMap: { value: params.texture }, uTime: { value: 0 } },
     vertexShader,
     fragmentShader,
     blending: params.blending ?? NormalBlending,

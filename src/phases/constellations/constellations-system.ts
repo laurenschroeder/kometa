@@ -94,6 +94,14 @@ export class ConstellationsSystem extends createSystem({
     this._scratchHandPos = new Vector3();
 
     const anchors = placeConstellationAnchorsAroundPlanet(3, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
+    // Away-from-planet unit direction per anchor — passed to
+    // generateConstellationLayout so it can constrain every control point's
+    // scatter to the outward hemisphere (see that function's own comment for
+    // why this guarantees no star can ever end up inside the planet, even as
+    // its live radius grows through Leg B). Same derivation
+    // ConstellationsVfxSystem uses for its own _anchorDir.
+    const center = new Vector3(...INTERMEDIATE_PLANET_CENTER);
+    const awayDirs = anchors.map((a) => new Vector3(...a).sub(center).normalize());
     this._starPositions = [];
     this._starTraced = [];
     this._tracedCount = [];
@@ -105,7 +113,7 @@ export class ConstellationsSystem extends createSystem({
       const counts: number[] = [];
       const notified: boolean[] = [];
       for (let slot = 0; slot < defs.length; slot++) {
-        const layout = generateConstellationLayout(defs[slot], anchors[slot]);
+        const layout = generateConstellationLayout(defs[slot], anchors[slot], awayDirs[slot]);
         stars.push(layout.starPositions);
         traced.push(new Uint8Array(defs[slot].starCount));
         counts.push(0);

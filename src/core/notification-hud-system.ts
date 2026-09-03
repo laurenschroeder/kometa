@@ -1,5 +1,5 @@
 import { montserrat } from '@pmndrs/msdfonts';
-import { createSystem, Follower, FollowBehavior, Object3D, PanelDocument, PanelUI, UIKit } from '@iwsdk/core';
+import { createSystem, Follower, FollowBehavior, PanelDocument, PanelUI, UIKit } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { getGlobals } from './globals.js';
 import { NOTIFICATION_COPY } from './notification-copy.js';
@@ -69,6 +69,19 @@ export const FADE_SECONDS = 0.5;
 // single-line message (the common case) is unaffected — line 0 always
 // starts at t=0, same as before this existed.
 const LINE_STAGGER_SECONDS = 1.8;
+// Matches ui/notification-hud.uikitml's .hud-text default — explicitly
+// re-applied to every line on every message (see _beginShow) so a previous
+// message's per-line tint (see NotificationCopy.lineColors) can't leak onto
+// a later untinted one, since these HudText elements are reused slots, not
+// rebuilt per message.
+const DEFAULT_TEXT_COLOR: readonly [number, number, number] = [1, 1, 1];
+
+type QueueEntry = {
+  text: string;
+  holdSeconds: number;
+  delaySeconds: number;
+  lineColors?: (readonly [number, number, number] | null)[];
+};
 
 enum FadeState {
   Idle,
@@ -100,10 +113,10 @@ export class NotificationHudSystem extends createSystem({
   private _state = FadeState.Idle;
   private _elapsed = 0;
   private _holdSeconds = 0;
-  private _queue: { text: string; holdSeconds: number; delaySeconds: number }[] = [];
+  private _queue: QueueEntry[] = [];
   // Held during FadeState.Delay — the message waiting out its silent gap
   // before _beginShow() actually puts it on screen.
-  private _pending: { text: string; holdSeconds: number; delaySeconds: number } | null = null;
+  private _pending: QueueEntry | null = null;
   private _bootTriggered = false;
 
   init(): void {
@@ -121,7 +134,11 @@ export class NotificationHudSystem extends createSystem({
     // world object that gently catches up to you.
     entity.addComponent(Follower, {
       target: this.player.head,
-      offsetPosition: [0, -0.22, -0.6],
+      // Pulled in from -0.6 — at that distance the comet (or other nearby
+      // world geometry, e.g. Fate Events' planet) could pass between the
+      // player and the panel and occlude it. Closer reduces how often
+      // anything else fits in that gap.
+      offsetPosition: [0, -0.22, -0.4],
       behavior: FollowBehavior.FaceTarget,
       tolerance: 0.02,
       speed: 6,
@@ -178,7 +195,9 @@ export class NotificationHudSystem extends createSystem({
   private _triggerPhase(phase: Phase): void {
     const sequence = NOTIFICATION_COPY[phase];
     if (!sequence) return;
-    for (const entry of sequence) this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0);
+    for (const entry of sequence) {
+      this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0, entry.lineColors);
+    }
   }
 
   // Public entry point for anything that wants a message on this HUD —
@@ -188,8 +207,15 @@ export class NotificationHudSystem extends createSystem({
   // is a silent gap before THIS message starts fading in — see
   // NotificationCopy's own comment; 0 (the default) behaves exactly as
   // before, fading in the instant the previous message finishes fading out.
-  notify(text: string, holdSeconds: number, delaySeconds = 0): void {
-    this._queue.push({ text, holdSeconds, delaySeconds });
+  // lineColors — see NotificationCopy's own comment — is index-matched
+  // against text.split('\n'); omit for the default all-white text.
+  notify(
+    text: string,
+    holdSeconds: number,
+    delaySeconds = 0,
+    lineColors?: (readonly [number, number, number] | null)[],
+  ): void {
+    this._queue.push({ text, holdSeconds, delaySeconds, lineColors });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -201,8 +227,13 @@ export class NotificationHudSystem extends createSystem({
   // priority copy (phase-entry blurbs, achievement popups) happened to
   // already be queued first. Still can't interrupt a message ALREADY on
   // screen — only reorders what's waiting.
-  notifyNext(text: string, holdSeconds: number, delaySeconds = 0): void {
-    this._queue.unshift({ text, holdSeconds, delaySeconds });
+  notifyNext(
+    text: string,
+    holdSeconds: number,
+    delaySeconds = 0,
+    lineColors?: (readonly [number, number, number] | null)[],
+  ): void {
+    this._queue.unshift({ text, holdSeconds, delaySeconds, lineColors });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -223,7 +254,7 @@ export class NotificationHudSystem extends createSystem({
 
   // Actually puts a message on screen — either immediately from _pump() (no
   // delay) or once FadeState.Delay's wait finishes (see update()).
-  private _beginShow(next: { text: string; holdSeconds: number }): void {
+  private _beginShow(next: QueueEntry): void {
     const lines = next.text.split('\n');
     this._lineCount = Math.min(lines.length, MAX_LINES);
     for (let i = 0; i < MAX_LINES; i++) {
@@ -231,7 +262,11 @@ export class NotificationHudSystem extends createSystem({
       if (!el) continue;
       if (i < this._lineCount) {
         el.setText(lines[i]);
-        el.setProperties({ display: 'flex', opacity: 0 });
+        // Always set explicitly (never left to fall through from a
+        // previous message) — see lineColors' own comment on why these
+        // reused slots would otherwise leak a stale tint.
+        const color = next.lineColors?.[i] ?? DEFAULT_TEXT_COLOR;
+        el.setProperties({ display: 'flex', opacity: 0, color: [...color] });
       } else {
         el.setProperties({ display: 'none' });
       }

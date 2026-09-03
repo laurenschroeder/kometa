@@ -44,6 +44,13 @@ export const CONSTELLATION_SETS: Record<number, ConstellationDef[]> = {
     // volatile gasses
     { name: 'Locust', spreadRadius: 1.1, controlPointCount: 4, starCount: 8 },
     { name: 'Crown', spreadRadius: 0.9, controlPointCount: 3, starCount: 6 },
-    { name: 'Bow and Arrow', spreadRadius: 1.3, controlPointCount: 5, starCount: 10 },
+    // spreadRadius pulled down from 1.3 (still the widest of the volatile-
+    // gasses trio, just less than Locust/Crown's own large-tier siblings
+    // elsewhere) — reported as sitting too high above the planet in play;
+    // the anchor's own elevation is already tilted upward (see
+    // ANCHOR_ELEVATION in constellation-path.ts) and the hemisphere-
+    // constrained scatter can add real extra height on top of that, so the
+    // widest spread was the one most likely to read as floating too far up.
+    { name: 'Bow and Arrow', spreadRadius: 1.0, controlPointCount: 5, starCount: 10 },
   ],
 };

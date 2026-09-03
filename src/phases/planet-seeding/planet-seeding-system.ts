@@ -24,19 +24,33 @@ const PLANET_INITIAL_POSITION: readonly [number, number, number] = [0, 1.5, -0.6
 // sitting at a fixed world point — eased toward a target recomputed every
 // frame from the live camera transform, so turning to look elsewhere slowly
 // drags the planet back in front of you instead of leaving it behind.
-const PLANET_FOLLOW_DISTANCE = 0.6; // ~2 feet
+// Bumped from 0.6 — that put the planet close enough to feel cramped right
+// in front of the face, especially with orbiting moons around it needing
+// room of their own; ~3 feet gives a fuller view of the whole scene.
+const PLANET_FOLLOW_DISTANCE = 0.9; // ~3 feet
 // Deliberately slow (1/s time-constant ~1s) — "very gentle," a loose float
 // rather than a locked-to-view HUD element (contrast NotificationHudSystem's
 // much tighter Follower settings).
 const PLANET_FOLLOW_EASE_RATE = 1.0;
 
 // How close a hand must get to the planet's own SURFACE (not center) to
-// drop a pebble — three inches, simple proximity rather than any gesture
-// requirement, so "get near it" is the whole mechanic.
-const SURFACE_TRIGGER_DISTANCE = 0.0762; // 3 inches
+// drop a pebble — simple proximity rather than any gesture requirement, so
+// "get near it" is the whole mechanic. Bumped up from 3 inches (0.0762) —
+// at that range the trigger point was basically touching the surface
+// already, so the pebble's fall (sampled from the comet trail near the
+// hand, see PlanetSeedingVfxSystem._launchQueued) barely had any distance
+// to travel and read as just appearing on the planet rather than falling
+// onto it.
+const SURFACE_TRIGGER_DISTANCE = 0.2; // ~8 inches
 // Pacing between drops while a hand lingers within range — without this a
-// stationary hand would dump the whole queue in one frame.
-const FALL_COOLDOWN_SECONDS = 0.2;
+// stationary hand would dump the whole queue in one frame. Scaled by the
+// hand's own speed (see _fallCooldownFor) rather than fixed, so orbiting the
+// planet quickly seeds faster than just holding a hand still near it — a
+// near-stationary hand drops at FALL_COOLDOWN_SLOW, ramping down to
+// FALL_COOLDOWN_FAST once speed reaches FALL_SPEED_FOR_FAST_COOLDOWN.
+const FALL_COOLDOWN_SLOW = 0.5;
+const FALL_COOLDOWN_FAST = 0.05;
+const FALL_SPEED_FOR_FAST_COOLDOWN = 2.0; // m/s — a brisk swing/orbit, not a full sprint
 // Half the planet's coverage cells (see CELL_DIRS) must be colored to
 // complete the phase — see getCoverageFraction()/COVERAGE_WIN_FRACTION.
 const COVERAGE_WIN_FRACTION = 0.5;
@@ -97,11 +111,14 @@ export interface LaunchEvent {
 // riding the hand trails — see StardustVfxSystem's gamePhase-driven
 // visibility) gets "spent" here onto a single planet that floats loosely in
 // front of the player's head (see PLANET_FOLLOW_DISTANCE/EASE_RATE).
-// Getting a hand within three inches of the planet's own surface drops a
-// pebble off the comet, which falls under gravity and lands as a colored
-// patch (see SURFACE_TRIGGER_DISTANCE/FALL_COOLDOWN_SECONDS and
-// PlanetSeedingVfxSystem for the actual fall animation/stain rendering) —
-// moons still orbit and flash when bumped, but are decoration only. The
+// Getting a hand within range (see SURFACE_TRIGGER_DISTANCE) of the
+// planet's own surface drops a pebble off the comet, which falls under
+// gravity and lands as a colored patch (see SURFACE_TRIGGER_DISTANCE/
+// _fallCooldownFor and PlanetSeedingVfxSystem for the actual fall animation/
+// stain rendering) — the faster the hand is moving when it triggers a drop,
+// the sooner the next one is allowed, so orbiting the planet quickly seeds
+// it faster than just holding a hand still near the surface. Moons still
+// orbit and flash when bumped, but are decoration only. The
 // phase completes once half the planet's fixed coverage cells have been
 // colored (see CELL_DIRS/COVERAGE_WIN_FRACTION/getCoverageFraction) — not
 // simply once the stardust queue empties, so a player can run out of
@@ -260,7 +277,10 @@ export class PlanetSeedingSystem extends createSystem({
           if (distToCenter - PLANET_RADIUS <= SURFACE_TRIGGER_DISTANCE) {
             const inv = distToCenter > 1e-5 ? 1 / distToCenter : 0;
             this._dropPebble(this._stardustQueue.pop()!, pdx * inv, pdy * inv, pdz * inv);
-            this._fallCooldown = FALL_COOLDOWN_SECONDS;
+            const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
+            this._fallCooldown = this._fallCooldownFor(
+              Math.sqrt(velView[0] * velView[0] + velView[1] * velView[1] + velView[2] * velView[2]),
+            );
             if (this._pendingCount === 0) break;
           }
         }
@@ -277,6 +297,15 @@ export class PlanetSeedingSystem extends createSystem({
     this._planetPositionArray[0] += (this._followTarget.x - this._planetPositionArray[0]) * pull;
     this._planetPositionArray[1] += (this._followTarget.y - this._planetPositionArray[1]) * pull;
     this._planetPositionArray[2] += (this._followTarget.z - this._planetPositionArray[2]) * pull;
+  }
+
+  // Linearly ramps from FALL_COOLDOWN_SLOW down to FALL_COOLDOWN_FAST as the
+  // triggering hand's speed goes from 0 to FALL_SPEED_FOR_FAST_COOLDOWN —
+  // clamped at both ends, so drifting past top speed doesn't drop pebbles
+  // faster than FALL_COOLDOWN_FAST allows.
+  private _fallCooldownFor(speed: number): number {
+    const t = Math.min(1, Math.max(0, speed / FALL_SPEED_FOR_FAST_COOLDOWN));
+    return FALL_COOLDOWN_SLOW + (FALL_COOLDOWN_FAST - FALL_COOLDOWN_SLOW) * t;
   }
 
   private _updateMoons(delta: number): void {

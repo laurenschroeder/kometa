@@ -11,7 +11,7 @@ import {
 import type { UIKitDocument } from '@iwsdk/core';
 import { GameDirectorSystem } from '../../core/game-director-system.js';
 import { getGlobals } from '../../core/globals.js';
-import { cometNameMessage, END_RUN_MESSAGE } from '../../core/notification-copy.js';
+import { cometNameMessage } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { Phase } from '../../core/phase.js';
 import { StartMenuSystem } from '../../core/start-menu-system.js';
@@ -108,12 +108,13 @@ export class EndRunMenuSystem extends createSystem({
 
     this._shown = true;
     const notifications = this.world.getSystem(NotificationHudSystem);
-    // A closing name for the comet, queued right before the practical
-    // "time is done" cue — see cometNameMessage's own comment.
+    // A closing name for the comet — see cometNameMessage's own comment.
+    // No separate "your time is done" notification anymore — the end-run
+    // panel appearing (right below) is itself that cue now, rather than
+    // saying it twice.
     const globals = getGlobals(this.world);
     const nameMsg = cometNameMessage(globals.dominantPebbleType.peek(), globals.celestialSymbol.peek());
     notifications?.notify(nameMsg.text, nameMsg.holdSeconds);
-    notifications?.notify(END_RUN_MESSAGE.text, END_RUN_MESSAGE.holdSeconds);
     this._panelObject.visible = true;
     this._entity.addComponent(RayInteractable);
   }

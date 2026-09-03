@@ -45,10 +45,12 @@ const KING_COLOR: [number, number, number] = [0.75, 0.62, 0.85];
 const CROWN_COLOR = new Color(1.0, 0.85, 0.2);
 const TOWER_COLOR = new Color(0.45, 0.43, 0.4);
 
-const TOWER_HEIGHT = 0.35;
-const TOWER_RADIUS_TOP = 0.018;
-const TOWER_RADIUS_BOTTOM = 0.032;
-const KING_SCALE = 1.5;
+// Halved from 0.35/0.018/0.032/1.5 — the king+tower was reading too large
+// against the rest of the crowd/decorations once it actually showed up.
+const TOWER_HEIGHT = 0.175;
+const TOWER_RADIUS_TOP = 0.009;
+const TOWER_RADIUS_BOTTOM = 0.016;
+const KING_SCALE = 0.75;
 
 const GHOST_COLOR_DOG: [number, number, number] = [0.75, 0.87, 1.0];
 const GHOST_COLOR_HUMAN: [number, number, number] = [1.0, 1.0, 1.0];
