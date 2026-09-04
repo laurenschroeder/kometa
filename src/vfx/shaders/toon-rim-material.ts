@@ -186,6 +186,100 @@ export function makeToonRimInstancedGrainyMaterial(palette: ToonRimPalette): Sha
   });
 }
 
+// Same instanced black-rim look as makeToonRimInstancedTintedMaterial
+// (identical fragment shader), but with a per-vertex wiggle displacement
+// added in the vertex stage before the instance transform — art-test-only,
+// for "make the 8 islands wiggly." Displaces each vertex radially in/out
+// from the geometry's own local origin (relies on .center()-ed geometry,
+// same guarantee obj-island-extractor.ts's own extractMeshIslands already
+// provides) by a sine wave driven off the vertex's own UNIT direction
+// (normalize(position), not raw position) so the wiggle's frequency/pattern
+// looks consistent regardless of a given island's raw local coordinate
+// scale — the 8 extracted OBJ islands are each their own arbitrary raw
+// size before their instance transform normalizes them down to a shared
+// target radius (see loadObjLargestIslands), and a frequency tied to raw
+// position instead would turn into meaningless high-frequency noise on a
+// large-scale island. A per-instance aWigglePhase attribute desyncs the
+// wiggle across instances so a whole field of these doesn't pulse in
+// lockstep. Normals are NOT recomputed for the displaced surface (same
+// simplification ghost-wiggle-material.ts's billboard wiggle already makes)
+// — visually fine for a cheap dev-only art-test displacement, and avoids
+// the cost of a real analytic/central-difference normal recalculation.
+export function makeToonRimInstancedWigglyMaterial(
+  palette: ToonRimPalette,
+  params: { amplitude?: number; speed?: number } = {},
+): ShaderMaterial {
+  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
+  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+  const amplitude = params.amplitude ?? 0.15;
+  const speed = params.speed ?? 1.4;
+
+  const vertexShader = `
+    uniform float uTime;
+    attribute float aBright;
+    attribute vec3  aTint;
+    attribute float aTinted;
+    attribute float aWigglePhase;
+    varying   float vBright;
+    varying   vec3  vTint;
+    varying   float vTinted;
+    varying   vec3  vViewNormal;
+    varying   vec3  vViewDir;
+    varying   vec3  vLocalPos;
+
+    void main() {
+      vBright = aBright;
+      vTint = aTint;
+      vTinted = aTinted;
+
+      vec3 dir = length(position) > 0.0001 ? normalize(position) : vec3(0.0, 1.0, 0.0);
+      float wiggle = sin(dir.x * 6.0 + dir.y * 4.5 - dir.z * 5.0 + uTime * ${speed.toFixed(4)} + aWigglePhase * 6.2831) * 0.5
+                   + sin(dir.y * 7.0 - dir.x * 3.0 + uTime * ${(speed * 0.8).toFixed(4)} + aWigglePhase * 3.1) * 0.3;
+      vec3 wiggled = position * (1.0 + wiggle * ${amplitude.toFixed(4)});
+
+      vLocalPos = wiggled;
+      vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(wiggled, 1.0);
+
+      mat3 instanceNormalMatrix = mat3(instanceMatrix);
+      vViewNormal = normalize(normalMatrix * instanceNormalMatrix * normal);
+      vViewDir    = normalize(-mvPosition.xyz);
+
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    varying float vBright;
+    varying vec3  vTint;
+    varying float vTinted;
+    varying vec3  vViewNormal;
+    varying vec3  vViewDir;
+    varying vec3  vLocalPos;
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
+
+      vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
+      bodyCol      = mix(bodyCol, vTint, vTinted);
+      vec3 col     = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  return new ShaderMaterial({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader,
+    fragmentShader,
+    depthWrite: true,
+    transparent: false,
+  });
+}
+
 // Flat, non-instanced variant — for a single real Mesh (or several sharing
 // one material instance) with one solid body color and no per-vertex
 // brightness (e.g. a placeholder figure's limbs). Body/rim color are

@@ -9,8 +9,13 @@ export const ART_TEST_VARIANT_LABELS: readonly string[] = [
   'Pebbles — soul billboards (fabric ghosts)',
   'Stardust — star illustration (billboarded, sparkle)',
   'Pebbles — OBJ islands (biggest 8, random)',
+  'Pebbles — OBJ islands, wiggly',
   'Pebbles — black + fabric ghost decal',
   'Magic stardust — swept trails',
+  'Stardust — organic specks + star shapes',
+  'Stardust — blue/green/yellow nebula tones',
+  'Pixel CRT glow (moon + galaxy)',
+  'Everything — mixture of every other test',
 ];
 export const ART_TEST_VARIANT_COUNT = ART_TEST_VARIANT_LABELS.length;
 

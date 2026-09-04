@@ -25,6 +25,13 @@ import { NotificationHudSystem } from './notification-hud-system.js';
 const TAP_WINDOW_SECONDS = 0.45;
 const TAPS_TO_TOGGLE = 5;
 
+// Kill switch for the whole open-on-tap gesture — flip to true to bring it
+// back. Off for now: the 5-tap trigger was still catching real playtesters
+// by surprise, so the menu shouldn't be reachable during normal play until
+// that's revisited. The panel/systems below are still fully built either
+// way, just never opened.
+const DEV_MENU_ENABLED = false;
+
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],
   ['btn-pebbles', Phase.Pebbles],
@@ -137,16 +144,18 @@ export class PhaseMenuSystem extends createSystem({
   }
 
   update(delta: number): void {
-    if (this._tapCount > 0) {
-      this._tapWindowRemaining -= delta;
-      if (this._tapWindowRemaining <= 0) this._tapCount = 0;
-    }
-    if (this.input.xr.gamepads.left?.getSelectStart()) {
-      this._tapCount++;
-      this._tapWindowRemaining = TAP_WINDOW_SECONDS;
-      if (this._tapCount >= TAPS_TO_TOGGLE) {
-        this._tapCount = 0;
-        this._setOpen(!this._open);
+    if (DEV_MENU_ENABLED) {
+      if (this._tapCount > 0) {
+        this._tapWindowRemaining -= delta;
+        if (this._tapWindowRemaining <= 0) this._tapCount = 0;
+      }
+      if (this.input.xr.gamepads.left?.getSelectStart()) {
+        this._tapCount++;
+        this._tapWindowRemaining = TAP_WINDOW_SECONDS;
+        if (this._tapCount >= TAPS_TO_TOGGLE) {
+          this._tapCount = 0;
+          this._setOpen(!this._open);
+        }
       }
     }
 
