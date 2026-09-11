@@ -16,12 +16,6 @@ import { PEBBLE_TYPES } from './pebble-type.js';
 const N_PEBBLES_FIELD = 210;
 const WIN_CAPTURE_COUNT = Math.ceil(N_PEBBLES_FIELD * 0.35);
 
-// Drives the field's attraction-pull feel (slower comet movement = stronger
-// pull) — no longer tied to pebble type, which is now assigned per-particle
-// at spawn (see pebble-layout.ts's assignPebbleSpawnPoint).
-const SLOW_SPEED = 0.5;
-const FAST_SPEED = 1.5;
-
 // Fired via GatherableField's onCapture/onAttractStart callbacks, drained
 // each frame by PebbleFieldVfxSystem to trigger the catch/pickup pebble
 // synth sounds — same produce/drain shape StardustSystem's own CaptureEvent/
@@ -103,8 +97,6 @@ export class PebbleWeavingSystem extends createSystem({
       spawnRadiusMax: 1.8,
       attractRadius: 0.4,
       captureDistance: 0.05,
-      slowSpeed: SLOW_SPEED,
-      fastSpeed: FAST_SPEED,
       attractRate: 3.0,
       capturedAgeDecay: CAPTURED_AGE_DECAY,
       capturedSpreadBase: CAPTURED_SPREAD_BASE,

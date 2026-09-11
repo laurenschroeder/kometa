@@ -3,8 +3,10 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
 import {
+  celestialSymbolFlavorMessage,
   celestialSymbolMessage,
   constellationSpottedMessage,
+  kingRisingMessage,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import {
@@ -21,29 +23,22 @@ import { CONSTELLATION_SETS, ConstellationDef } from './constellation-set.js';
 export const N_TYPES = 3;
 const TOUCH_RADIUS = 0.1;
 
-// How long this phase stays open after the trace completes, before flipping
-// globals.phaseComplete — sized to let each name's own completion payoff
-// actually play out (see EarthSituationsVfxSystem._onCompletion/GhostRise)
-// instead of the very next frame yanking the player into Fate Events
-// mid-animation. Dog/Human/Crown trigger the ghost-rise mechanic (a King-
-// fall/Dog-collapse prelude for Crown/Dog, then ~4.4s of rise+travel);
-// Locust reveals its swarm almost instantly; the remaining names (Bird/
-// Giraffe/Horn/Tree/Bow and Arrow) have no completion payoff at all, so
-// DEFAULT is just long enough to read celestialSymbolMessage's own banner
-// (see notification-copy.ts) before moving on. All bumped up from their
-// original values — the whole Constellations-onward stretch was reading as
-// too fast-paced, so each hold now carries a couple extra seconds of buffer
-// on top of its own animation length, not just the bare minimum. Deliberately
-// not imported from earth-situations-vfx-system.ts/ghost-rise.ts — this file
-// only needs a hold duration, not the mechanic itself, so the two stay
-// decoupled (same reasoning as globals.pairedPersonIndex/pairedPersonLine).
-const COMPLETION_HOLD_SECONDS: Record<string, number> = {
-  Crown: 6.8,
-  Dog: 6.4,
-  Human: 5.8,
-  Locust: 4.5,
-};
-const DEFAULT_COMPLETION_HOLD_SECONDS = 6.0;
+// This phase stays open after the trace completes until globals.crownLanded
+// flips true — set by EarthSituationsVfxSystem's universal crown-rise
+// cinematic (see crown-rise.ts) the instant it attaches to the comet's
+// head, ~30s after completion. celestialSymbolFlavorMessage's "this means
+// something to them" myth-beat fires immediately at trace-completion
+// instead (the same instant the crown starts rising), so the ~30s cinematic
+// isn't silent — only celestialSymbolMessage's explicit "you are crowned"
+// reveal and phaseComplete wait for crownLanded (via that notification's
+// own onComplete — same idiom stardust-system.ts's win sequence uses), so
+// that specific reveal always lands right as the crown does, not buried
+// mid-cinematic. Deliberately not imported from earth-situations-
+// vfx-system.ts/ghost-rise.ts/crown-rise.ts — this file only polls a
+// globals signal, not the mechanic itself, so the two stay decoupled (same
+// reasoning as globals.pairedPersonIndex/pairedPersonLine). index.ts's own
+// Phase.Constellations timeoutSeconds (120) remains the safety net if the
+// crown mechanic ever stalls.
 
 // Gameplay for Chapter 2.5, staged around the planet at its INTERMEDIATE
 // Constellations waypoint (Seeding runs first — see phase.ts's PHASE_ORDER —
@@ -51,22 +46,24 @@ const DEFAULT_COMPLETION_HOLD_SECONDS = 6.0;
 // that lands the planet there; see
 // PlanetSeedingVfxSystem.startSpinTransition). The much bigger/farther zoom
 // into the true Fate Events planet is Leg B, deferred until this phase ends
-// (see FateEventSystem.play()). Which trio of constellations is available is
+// (see FateEventSystem.play()). Which single constellation is available is
 // picked from whichever pebble type was dominant in Chapter 2 (globals.
-// dominantPebbleType); within that trio, play() picks ONE slot at random —
-// only that single constellation is ever simulated or shown this
-// playthrough, no more racing all 3. ALL 9 possible constellations' layouts
-// (3 types x 3 slots) are still generated once here in init(), not just the
-// active type's 3, because ConstellationsVfxSystem is always-on (like
-// PlanetSeedingVfxSystem) and needs fixed geometry to build its Points
-// meshes against at ITS OWN init() time, well before this phase's play()
-// ever runs (dominantPebbleType/the random slot pick aren't known until
-// Chapter 2 completes / this phase begins). Each constellation's stars start
-// flashing and must ALL be traced (any order) to complete it — tracing the
-// last one sets globals.celestialSymbol, fires the "celestial symbol"
-// notification, and completes the phase. Pure simulation here: no mesh/
-// entity creation happens in this file (see ConstellationsVfxSystem), only
-// layout math and touch-detection.
+// dominantPebbleType) — each type maps to exactly one named constellation
+// now (Dog/Tree/Crown, see constellation-set.ts), so play()'s random slot
+// pick always lands on index 0. All 3 types' layouts are still generated
+// once here in init(), not just the active type's, because
+// ConstellationsVfxSystem is always-on (like PlanetSeedingVfxSystem) and
+// needs fixed geometry to build its Points meshes against at ITS OWN init()
+// time, well before this phase's play() ever runs (dominantPebbleType isn't
+// known until Chapter 2 completes / this phase begins). The constellation's
+// stars start flashing and must ALL be traced (any order) to complete it —
+// tracing the last one flips _completed (see isComplete()), which is what
+// drives EarthSituationsVfxSystem's crown-rise cinematic; only once that
+// crown lands does this file set globals.celestialSymbol, fire the
+// "celestial symbol" notification, and complete the phase (see this file's
+// own top comment). Pure simulation here: no mesh/entity creation happens
+// in this file (see ConstellationsVfxSystem), only layout math and
+// touch-detection.
 export class ConstellationsSystem extends createSystem({
   hands: { required: [CometBody, HandAnchor] },
 }) {
@@ -79,11 +76,12 @@ export class ConstellationsSystem extends createSystem({
   private _activeType = 0;
   private _activeSlot = 0;
   private _completed = false;
-  // Counts down once _completed flips true (see COMPLETION_HOLD_SECONDS) —
-  // globals.phaseComplete isn't set until this reaches 0, so isComplete()
-  // (which flips immediately) can still drive the completion payoff/hero
-  // star reveal while the phase itself stays open a little longer.
-  private _completionHoldRemaining = 0;
+  // Guards celestialSymbolMessage/phaseComplete from firing more than once
+  // per play() — set true the first update() tick that sees
+  // globals.crownLanded true after _completed. isComplete() (which flips
+  // immediately on the last star) still drives the completion payoff/hero
+  // star reveal while the phase itself stays open until this fires.
+  private _notifiedCompletion = false;
   private _scratchHandPos!: Vector3;
   private _planetSeeding!: PlanetSeedingVfxSystem;
 
@@ -137,7 +135,7 @@ export class ConstellationsSystem extends createSystem({
     this._tracedCount[this._activeType][this._activeSlot] = 0;
     this._startedNotified[this._activeType][this._activeSlot] = false;
     this._completed = false;
-    this._completionHoldRemaining = 0;
+    this._notifiedCompletion = false;
 
     // Kicks off Leg A — the spin + recede into the intermediate waypoint
     // this phase's own anchors are staged around (see init()). Leg B (the
@@ -148,13 +146,21 @@ export class ConstellationsSystem extends createSystem({
 
   update(delta: number): void {
     if (this._completed) {
-      // Trace already finished — just count down the hold before actually
-      // flipping the phase-complete flag (see COMPLETION_HOLD_SECONDS).
-      if (this._completionHoldRemaining > 0) {
-        this._completionHoldRemaining -= delta;
-        if (this._completionHoldRemaining <= 0) {
-          getGlobals(this.world).phaseComplete.value = true;
-        }
+      // Trace already finished — wait for the crown cinematic to actually
+      // land before revealing/advancing (see this file's own top comment).
+      if (!this._notifiedCompletion && getGlobals(this.world).crownLanded.peek()) {
+        this._notifiedCompletion = true;
+        const def = CONSTELLATION_SETS[this._activeType][this._activeSlot];
+        getGlobals(this.world).celestialSymbol.value = def.name;
+        const { text, holdSeconds } = celestialSymbolMessage(def.name);
+        // Same onComplete-gates-phaseComplete idiom stardust-system.ts's
+        // win sequence uses — phaseComplete only flips once this exact
+        // message has actually finished its own on-screen fade-out.
+        this.world
+          .getSystem(NotificationHudSystem)
+          ?.notifyNext(text, holdSeconds, 0, undefined, () => {
+            getGlobals(this.world).phaseComplete.value = true;
+          });
       }
       return;
     }
@@ -189,14 +195,27 @@ export class ConstellationsSystem extends createSystem({
           notifications?.notifyNext(text, holdSeconds);
         }
 
+        // Crown only — a mid-trace foreshadowing beat the instant the 3rd
+        // star lands, well before the constellation (and the king's actual
+        // death vignette in Fate Events) completes. See kingRisingMessage's
+        // own comment.
+        if (def.name === 'Crown' && this._tracedCount[this._activeType][this._activeSlot] === 3) {
+          const { text, holdSeconds } = kingRisingMessage();
+          notifications?.notify(text, holdSeconds);
+        }
+
         if (this._tracedCount[this._activeType][this._activeSlot] >= def.starCount) {
+          // celestialSymbolMessage (the "you are crowned" reveal) and
+          // globals.celestialSymbol are still deferred to the crown
+          // cinematic's landing — see the _completed branch above. The
+          // flavor beat fires right here instead, though — the same
+          // instant EarthSituationsVfxSystem's crown-rise cinematic begins
+          // (see its own isComplete() edge) — so there's an immediate
+          // acknowledgment as the crown starts forming, not just silence
+          // for the ~30s until it lands.
+          const flavor = celestialSymbolFlavorMessage(def.name);
+          if (flavor) notifications?.notifyNext(flavor.text, flavor.holdSeconds);
           this._completed = true;
-          this._completionHoldRemaining = COMPLETION_HOLD_SECONDS[def.name] ?? DEFAULT_COMPLETION_HOLD_SECONDS;
-          // Same reasoning as constellationSpottedMessage above — the
-          // culminating narrative beat, shouldn't get buried in a backlog.
-          const { text, holdSeconds } = celestialSymbolMessage(def.name);
-          notifications?.notifyNext(text, holdSeconds);
-          getGlobals(this.world).celestialSymbol.value = def.name;
           break;
         }
       }
@@ -223,6 +242,14 @@ export class ConstellationsSystem extends createSystem({
   // gate ambient scene-setting during the spin, well before completion.
   getActiveName(): string {
     return CONSTELLATION_SETS[this._activeType][this._activeSlot].name;
+  }
+  // 0-1 live trace progress for the active constellation — read by
+  // EarthSituationsVfxSystem to grow the King's tower one star at a time
+  // (see its own _updateTowerHeight). Safe to call before play() ever runs
+  // (defaults to type/slot 0, starCount is always > 0).
+  getTracedFraction(): number {
+    const starCount = CONSTELLATION_SETS[this._activeType][this._activeSlot].starCount;
+    return this._tracedCount[this._activeType][this._activeSlot] / starCount;
   }
   isComplete(): boolean {
     return this._completed;

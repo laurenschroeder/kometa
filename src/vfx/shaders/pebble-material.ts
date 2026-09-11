@@ -1,20 +1,68 @@
-import { makeToonRimInstancedTintedMaterial, ToonRimPalette } from './toon-rim-material.js';
+import { AdditiveBlending } from '@iwsdk/core';
+import {
+  makeToonRimInstancedGrainyMaterial,
+  makeToonRimInstancedWigglyMaterial,
+  ToonRimPalette,
+} from './toon-rim-material.js';
+import { makePointSpriteMaterial } from './point-sprite-material.js';
 
-export const PEBBLE_PALETTE: ToonRimPalette = {
-  bodyColorDark: [0.01, 0.02, 0.05],
-  bodyColorLight: [0.05, 0.08, 0.14],
-  rimColor: [1.0, 1.0, 1.0],
+// The three pebble types (see pebble-type.ts) are drawn as three genuinely
+// different art styles, not just three tint colors on one shared rock mesh —
+// see pebble-field-vfx-system.ts/pebble-comet-presentation-system.ts for how
+// each material below is actually bucketed/assigned. Every material here is
+// a shared module-scope singleton (no per-owner instance-count state),
+// exactly like the single shared material this replaced — safe to reuse
+// across many InstancedMesh/Points objects, and across both the ambient
+// field and the permanent comet body.
+
+// ── Soul (type 0) — translucent wiggly OBJ islands ─────────────────────────
+export const SOUL_ISLAND_PALETTE: ToonRimPalette = {
+  bodyColorDark: [0.75, 0.88, 1.0],
+  bodyColorLight: [0.9, 0.97, 1.0],
+  rimColor: [1, 1, 1],
 };
+// amplitude 0.19 vs. the art-test wiggly-islands reference's bare default
+// (0.15) — "slightly stronger than the art level." opacity 0.55 for
+// "translucent very light blue" instead of that reference's opaque black.
+export const kSoulIslandMat = makeToonRimInstancedWigglyMaterial(SOUL_ISLAND_PALETTE, {
+  amplitude: 0.19,
+  opacity: 0.55,
+});
+// Souls read too small/insubstantial next to organic/gas at their shared
+// base pebble size — doubled to stand out.
+export const SOUL_SIZE_MULTIPLIER = 2;
 
-// Single shared material instance — safe to reuse across many InstancedMesh
-// objects (unlike geometry, a ShaderMaterial carries no per-owner instance
-// count/attribute state), so every "toon pebble" in the game — the ambient
-// field gathered in Chapter 2, the permanent body riding the trail from
-// Chapter 2 onward — renders with the exact same look from one shader
-// program. Both owners write their own per-instance aTint/aTinted values —
-// each individual pebble is assigned one of PEBBLE_TYPES' saturated colors,
-// weighted by globals.pebbleTypeWeights for the permanent body — onto their
-// own separate geometry instances (see PebbleFieldVfxSystem's kFieldPebbleGeos
-// vs. PebbleCometPresentationSystem's kPebbleVariantGeos) — only the
-// material/shader itself is shared here, never the per-instance attributes.
-export const kPebbleFieldTintedMat = makeToonRimInstancedTintedMaterial(PEBBLE_PALETTE);
+// Same source OBJ (and its extracted island shapes) the art-test "8 islands"
+// variants and Fate Events' placeholder crowd already use — shared constants
+// so every caller hits the same loadObjLargestIslands cache key.
+export const PEBBLE_ISLAND_OBJ_URL = '/medium/virtualpebble_2026-09-03_13-09-21.obj';
+export const PEBBLE_ISLAND_OBJ_GROUPS = ['Layer_1', 'Layer_2'];
+export const PEBBLE_ISLAND_OBJ_MAX_COUNT = 8;
+
+// ── Organic (type 1) — glitter blue/green spectrum body, white rim ─────────
+// Dark body (glitter/sparkle carries the color, same read as the art-test
+// "colored pebbles" reference) but rim AND sparkle are white, not that
+// reference's neon yellow — the reference ties rim/sparkle to the same
+// fixed color, so "make the rim white" carries sparkle along with it.
+export const ORGANIC_GLITTER_PALETTE: ToonRimPalette = {
+  bodyColorDark: [0.018, 0.018, 0.022],
+  bodyColorLight: [0.045, 0.045, 0.055],
+  rimColor: [1, 1, 1],
+  sparkleColor: [1, 1, 1],
+};
+export const kOrganicGlitterMat = makeToonRimInstancedGrainyMaterial(ORGANIC_GLITTER_PALETTE);
+
+// ── Gas (type 2) — little additive gas-cloud puffs ──────────────────────────
+// Warm red/orange, NOT the nebula reference's teal — PEBBLE_TYPES[2].color
+// (red) still drives the notification-copy "red violence of raw gasses"
+// line, Fate Events fire/people, planet moons, constellations, and the sky
+// backdrop whenever gas is dominant, so staying red/orange keeps this type's
+// identity color consistent across the rest of the game. Real emission
+// nebulae read naturally as red/orange anyway.
+export const GAS_CLOUD_COLOR: [number, number, number] = [0.95, 0.4, 0.22];
+export const kGasCloudMat = makePointSpriteMaterial({
+  color: GAS_CLOUD_COLOR,
+  blending: AdditiveBlending,
+  depthWrite: false,
+  transparent: true,
+});

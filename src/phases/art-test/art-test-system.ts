@@ -15,18 +15,23 @@ export const ART_TEST_VARIANT_LABELS: readonly string[] = [
   'Stardust — organic specks + star shapes',
   'Stardust — blue/green/yellow nebula tones',
   'Pixel CRT glow (moon + galaxy)',
+  'Rock photos (rocks.png)',
+  'Rock photos — black & white (rockBW.png)',
+  'Glitter billboards (glitter1 + glitter2)',
   'Everything — mixture of every other test',
 ];
 export const ART_TEST_VARIANT_COUNT = ART_TEST_VARIANT_LABELS.length;
 
 // Dev-only art-comparison sandbox (see Phase.ArtTest, reachable only from
 // PhaseMenuSystem's dev menu) — cycles through ART_TEST_VARIANT_COUNT visual
-// treatments of the stardust/pebble fields, one right-hand pinch/select at a
-// time (edge-detected via getSelectStart(), same technique PhaseMenuSystem's
-// own triple-tap trigger uses), wrapping back to the first after the last.
-// Pure index-tracking here — ArtTestVfxSystem owns building and showing/
-// hiding each variant's actual geometry, and reads getVariant() to know
-// which one to show.
+// treatments of the stardust/pebble fields, right-hand pinch/select to step
+// forward and left-hand to step backward (both edge-detected via
+// getSelectStart(), same technique PhaseMenuSystem's own tap-count trigger
+// uses — a single left pinch here doesn't fight with that gesture, which
+// needs 5 in a row within a short window), wrapping at both ends. Pure
+// index-tracking here — ArtTestVfxSystem owns building and showing/hiding
+// each variant's actual geometry, and reads getVariant() to know which one
+// to show.
 export class ArtTestSystem extends createSystem({}) {
   private _variant = 0;
 
@@ -38,6 +43,9 @@ export class ArtTestSystem extends createSystem({}) {
   update(): void {
     if (this.input.xr.gamepads.right?.getSelectStart()) {
       this._variant = (this._variant + 1) % ART_TEST_VARIANT_COUNT;
+    }
+    if (this.input.xr.gamepads.left?.getSelectStart()) {
+      this._variant = (this._variant - 1 + ART_TEST_VARIANT_COUNT) % ART_TEST_VARIANT_COUNT;
     }
   }
 

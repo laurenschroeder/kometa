@@ -68,8 +68,8 @@ function buildNoiseBuffer(context: AudioContext, duration: number): AudioBuffer 
 }
 
 // Orbital Launch's two audio beats: committing to Orbit or The Great
-// Unknown (see OrbitalLaunchSystem._commit, already fires ORBIT_COMMIT_
-// MESSAGE/UNKNOWN_COMMIT_MESSAGE), and the detach itself (_detach — the
+// Unknown (see OrbitalLaunchSystem._commit, already fires orbitCommitMessage/
+// unknownCommitMessage), and the detach itself (_detach — the
 // comet actually being released to autopilot). Same raw-Web-Audio-via-
 // PositionalAudio.setNodeSource technique as every other synth here.
 export class OrbitalLaunchSynth {

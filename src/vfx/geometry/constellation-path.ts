@@ -1,5 +1,5 @@
 import { Vector3 } from '@iwsdk/core';
-import { randomUnitVector3 } from './mesh-utils.js';
+import { CONSTELLATION_SHAPES } from '../../phases/constellations/constellation-shapes.js';
 import { ConstellationDef } from '../../phases/constellations/constellation-set.js';
 
 // N anchors arced around the big Fate Events planet, offset outward from
@@ -65,108 +65,85 @@ function catmullRom1D(p0: number, p1: number, p2: number, p3: number, t: number)
   );
 }
 
-// padded must have length >= 4 (controlPoints with its first/last points
-// duplicated as phantom endpoints, so the open path's tangents at the very
-// start/end are well-defined). u wraps across the N-1 segments between the
-// real control points.
-function samplePathAt(u: number, padded: readonly Vector3[], out: Vector3): Vector3 {
+// Smoothly interpolates through `points` (its first/last points duplicated
+// as phantom endpoints, so the open curve's tangents at the very start/end
+// are well-defined), densely resampled into `segments` evenly-u-spaced
+// points — used by ConstellationsVfxSystem to trace a smooth curve through a
+// constellation's own (now fixed, shape-authored) star positions for the
+// ambient "shape traced out" ribbon animation. Not arc-length-corrected
+// (unlike the old placeStarsAlongPath this replaced) — that mattered when
+// stars needed to land EVENLY along the path; here the star positions are
+// already fixed by CONSTELLATION_SHAPES, this is purely for a smooth
+// decorative line between them, so plain u-parametrization is enough.
+export function sampleSmoothPath(points: readonly Vector3[], segments: number): Vector3[] {
+  const padded = [points[0], ...points, points[points.length - 1]];
   const segCount = padded.length - 3;
-  const scaled = Math.min(segCount - 1e-6, Math.max(0, u * segCount));
-  const seg = Math.floor(scaled);
-  const t = scaled - seg;
-  const p0 = padded[seg];
-  const p1 = padded[seg + 1];
-  const p2 = padded[seg + 2];
-  const p3 = padded[seg + 3];
-  out.set(
-    catmullRom1D(p0.x, p1.x, p2.x, p3.x, t),
-    catmullRom1D(p0.y, p1.y, p2.y, p3.y, t),
-    catmullRom1D(p0.z, p1.z, p2.z, p3.z, t),
-  );
-  return out;
-}
-
-// N stars evenly spaced by arc length along the path — same "2000-sample
-// table + cumulative length" technique weave-path.ts's placeDots() uses,
-// generalized to an arbitrary padded control-point spline instead of the
-// ring/weave-specific formula.
-function placeStarsAlongPath(count: number, padded: readonly Vector3[]): Float32Array {
-  const SAMPLES = 2000;
-  const samplePoints: Vector3[] = new Array(SAMPLES + 1);
-  const cumLength = new Float32Array(SAMPLES + 1);
-  for (let i = 0; i <= SAMPLES; i++) {
-    samplePoints[i] = samplePathAt(i / SAMPLES, padded, new Vector3());
-    cumLength[i] = i === 0 ? 0 : cumLength[i - 1] + samplePoints[i].distanceTo(samplePoints[i - 1]);
-  }
-  const totalLength = cumLength[SAMPLES];
-
-  const out = new Float32Array(count * 3);
-  let sampleIdx = 0;
-  for (let d = 0; d < count; d++) {
-    const targetLength = (d / count) * totalLength;
-    while (sampleIdx < SAMPLES && cumLength[sampleIdx] < targetLength) sampleIdx++;
-    const p = samplePoints[sampleIdx];
-    out[d * 3] = p.x;
-    out[d * 3 + 1] = p.y;
-    out[d * 3 + 2] = p.z;
+  const out: Vector3[] = new Array(segments + 1);
+  for (let i = 0; i <= segments; i++) {
+    const u = i / segments;
+    const scaled = Math.min(segCount - 1e-6, Math.max(0, u * segCount));
+    const seg = Math.floor(scaled);
+    const t = scaled - seg;
+    const p0 = padded[seg];
+    const p1 = padded[seg + 1];
+    const p2 = padded[seg + 2];
+    const p3 = padded[seg + 3];
+    out[i] = new Vector3(
+      catmullRom1D(p0.x, p1.x, p2.x, p3.x, t),
+      catmullRom1D(p0.y, p1.y, p2.y, p3.y, t),
+      catmullRom1D(p0.z, p1.z, p2.z, p3.z, t),
+    );
   }
   return out;
 }
 
 export interface ConstellationLayout {
-  starPositions: Float32Array; // the winding path's stars — both the visual shape AND the touch/trace targets
+  starPositions: Float32Array; // the shape's own stars — both the visual silhouette AND the touch/trace targets
 }
 
-// Reflects an isotropic random direction into the hemisphere facing awayDir
-// (negates it if it points into the wrong half) — cheap and keeps a roughly
-// uniform spread over that hemisphere, unlike rejection sampling. See
-// generateConstellationLayout's own comment for why every control point
-// needs this constraint.
-function randomHemisphereVector3(awayDir: Vector3): Vector3 {
-  const dir = randomUnitVector3();
-  if (dir.dot(awayDir) < 0) dir.negate();
-  return dir;
-}
-
-// Places starCount stars evenly along a winding path (def.controlPointCount
-// control points) within a spreadRadius volume around anchor, so the
-// constellation reads as a coherent traceable shape rather than a random
-// scatter. No attempt at a recognizable silhouette yet (dog/human/horn/etc.
-// are just names for now) — purely procedural, so size/complexity variety
-// comes entirely from the ConstellationDef's own numbers (see
-// constellation-set.ts). Every control point's offset from anchor is
-// constrained to the hemisphere facing away from the planet (awayDir — the
-// same unit direction placeConstellationAnchorsAroundPlanet placed this
-// anchor along) rather than a fully isotropic scatter: since anchor itself
-// already sits planetRadius+ANCHOR_SURFACE_OFFSET from the planet's center,
-// any offset with a non-negative component along awayDir keeps the
-// resulting star's own distance from that center >= anchor's own distance
-// (simple vector algebra — the cross term can't go negative), so no star
-// can ever land inside or even touch the planet's surface, regardless of
-// spreadRadius or how large the planet's own live radius later grows
-// (Leg B's zoom into Fate Events) — see ConstellationsVfxSystem's live
-// tracking, which reuses this exact same fixed local offset relationship.
+// Embeds def's own named shape (see constellation-shapes.ts —
+// CONSTELLATION_SHAPES[def.name], a hand-authored 2D point set, one per
+// star) into a flat plane anchored at `anchor`, spanning spreadRadius, and
+// oriented perpendicular to awayDir — the same unit direction
+// placeConstellationAnchorsAroundPlanet placed this anchor along. `right`/
+// `up` are BY CONSTRUCTION perpendicular to awayDir (a cross product), so
+// offsetting purely within that plane never changes a star's own distance
+// from the planet's center along awayDir — it stays exactly at anchor's own
+// distance (planetRadius + ANCHOR_SURFACE_OFFSET), same guarantee the old
+// random-hemisphere-scatter version had (no star can ever land inside or
+// touch the planet's surface, regardless of spreadRadius or how large the
+// planet's own live radius later grows through Leg B), just exact rather
+// than probabilistic now that the shape is a flat authored pattern instead
+// of a 3D random scatter.
 export function generateConstellationLayout(
   def: ConstellationDef,
   anchor: readonly [number, number, number],
   awayDir: Vector3,
 ): ConstellationLayout {
-  const [ax, ay, az] = anchor;
-
-  const controlPoints: Vector3[] = [];
-  for (let i = 0; i < def.controlPointCount; i++) {
-    const dir = randomHemisphereVector3(awayDir);
-    const r = Math.random() * def.spreadRadius;
-    controlPoints.push(new Vector3(dir.x * r, dir.y * r, dir.z * r));
+  const shape = CONSTELLATION_SHAPES[def.name];
+  if (!shape) {
+    console.warn(`[constellation-path] no CONSTELLATION_SHAPES entry for '${def.name}' — falling back to a single point.`);
+    return { starPositions: new Float32Array([anchor[0], anchor[1], anchor[2]]) };
   }
-  const padded = [controlPoints[0], ...controlPoints, controlPoints[controlPoints.length - 1]];
+  if (shape.length !== def.starCount) {
+    console.warn(
+      `[constellation-path] CONSTELLATION_SHAPES['${def.name}'] has ${shape.length} points but starCount is ${def.starCount} — these must match (each point is also a touch/trace target).`,
+    );
+  }
 
-  const localStars = placeStarsAlongPath(def.starCount, padded);
-  const starPositions = new Float32Array(def.starCount * 3);
-  for (let i = 0; i < def.starCount; i++) {
-    starPositions[i * 3] = ax + localStars[i * 3];
-    starPositions[i * 3 + 1] = ay + localStars[i * 3 + 1];
-    starPositions[i * 3 + 2] = az + localStars[i * 3 + 2];
+  const worldUp = new Vector3(0, 1, 0);
+  let right = new Vector3().crossVectors(worldUp, awayDir);
+  if (right.lengthSq() < 1e-6) right = new Vector3().crossVectors(new Vector3(1, 0, 0), awayDir);
+  right.normalize();
+  const up = new Vector3().crossVectors(awayDir, right).normalize();
+
+  const [ax, ay, az] = anchor;
+  const starPositions = new Float32Array(shape.length * 3);
+  for (let i = 0; i < shape.length; i++) {
+    const [x, y] = shape[i];
+    starPositions[i * 3] = ax + (right.x * x + up.x * y) * def.spreadRadius;
+    starPositions[i * 3 + 1] = ay + (right.y * x + up.y * y) * def.spreadRadius;
+    starPositions[i * 3 + 2] = az + (right.z * x + up.z * y) * def.spreadRadius;
   }
 
   return { starPositions };

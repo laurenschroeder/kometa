@@ -19,7 +19,12 @@ export interface GhostWiggleParams {
 // local space before the view-facing billboard rotation is applied
 // (ArtTestVfxSystem/_updateBillboards sets the mesh's quaternion each
 // frame), so the wiggle always reads as "within the sprite" regardless of
-// which way the sprite is currently facing.
+// which way the sprite is currently facing. Requires a per-geometry
+// aOpacity attribute (a single value repeated across all 4 vertices) —
+// multiplies straight into the sampled alpha, for callers that want a
+// range of ghostliness across many instances sharing one material
+// (identical texture/wiggle params) rather than one fixed opacity for all
+// of them.
 export function makeGhostWiggleMaterial(params: GhostWiggleParams): ShaderMaterial {
   const amplitude = params.amplitude ?? 0.02;
   const frequency = params.frequency ?? 6.0;
@@ -27,9 +32,12 @@ export function makeGhostWiggleMaterial(params: GhostWiggleParams): ShaderMateri
 
   const vertexShader = `
     uniform float uTime;
+    attribute float aOpacity;
     varying vec2 vUv;
+    varying float vOpacity;
     void main() {
       vUv = uv;
+      vOpacity = aOpacity;
       float taper = 1.0 - uv.y;
       vec3 pos = position;
       pos.x += sin(uv.y * ${frequency.toFixed(4)} + uTime * ${speed.toFixed(4)}) * ${amplitude.toFixed(4)} * taper;
@@ -40,9 +48,10 @@ export function makeGhostWiggleMaterial(params: GhostWiggleParams): ShaderMateri
   const fragmentShader = `
     uniform sampler2D uMap;
     varying vec2 vUv;
+    varying float vOpacity;
     void main() {
       vec4 tex = texture2D(uMap, vUv);
-      gl_FragColor = tex;
+      gl_FragColor = vec4(tex.rgb, tex.a * vOpacity);
     }
   `;
 

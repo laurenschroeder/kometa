@@ -13,6 +13,10 @@ export interface ToonRimPalette {
   rimColor: [number, number, number];
   outlineLow?: number;
   outlineHigh?: number;
+  // makeToonRimInstancedGrainyMaterial's sparkle flecks only — a fixed
+  // color instead of the per-instance vTint (each pebble's own body tint).
+  // Omit to keep the default (flecks glint in the pebble's own tint color).
+  sparkleColor?: [number, number, number];
 }
 
 const DEFAULT_OUTLINE_LOW = 0.6;
@@ -104,8 +108,9 @@ export function makeToonRimInstancedTintedMaterial(palette: ToonRimPalette): Sha
 // strength, not the production version's full saturated wash) replaces the
 // bold rim outline with scattered bright flecks instead — a cheap
 // hash-noise field thresholded down to a sparse set of "grains," each
-// glinting in the instance's own tint color and gently twinkling via
-// uTime, reading like flecks of mineral embedded in dark rock rather than
+// glinting in the instance's own tint color (or palette.sparkleColor, if
+// given — a fixed color for every instance instead) and gently twinkling
+// via uTime, reading like flecks of mineral embedded in dark rock rather than
 // a smooth toon-shaded surface.
 export function makeToonRimInstancedGrainyMaterial(palette: ToonRimPalette): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
@@ -170,7 +175,7 @@ export function makeToonRimInstancedGrainyMaterial(palette: ToonRimPalette): Sha
 
       float grain   = hash13(floor(vLocalPos * 140.0));
       float sparkle = step(0.986, grain) * (0.5 + 0.5 * sin(uTime * 4.0 + grain * 40.0));
-      bodyCol += vTint * sparkle * 1.4;
+      bodyCol += ${palette.sparkleColor ? vec3Glsl(palette.sparkleColor) : 'vTint'} * sparkle * 1.4;
 
       vec3 col = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline * 0.5);
       gl_FragColor = vec4(col, 1.0);
@@ -207,12 +212,15 @@ export function makeToonRimInstancedGrainyMaterial(palette: ToonRimPalette): Sha
 // the cost of a real analytic/central-difference normal recalculation.
 export function makeToonRimInstancedWigglyMaterial(
   palette: ToonRimPalette,
-  params: { amplitude?: number; speed?: number } = {},
+  params: { amplitude?: number; speed?: number; opacity?: number } = {},
 ): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
   const amplitude = params.amplitude ?? 0.15;
   const speed = params.speed ?? 1.4;
+  // Fully opaque by default (existing behavior, unchanged) — < 1 renders
+  // translucent (e.g. a "soul" body you can faintly see through).
+  const opacity = params.opacity ?? 1;
 
   const vertexShader = `
     uniform float uTime;
@@ -256,6 +264,19 @@ export function makeToonRimInstancedWigglyMaterial(
     varying vec3  vViewDir;
     varying vec3  vLocalPos;
 
+    // Same cheap 3D hash makeToonRimInstancedGrainyMaterial's own sparkle
+    // flecks use — here it's not thresholded down to sparse flecks, it's
+    // blended across the WHOLE body as a multiplicative brightness
+    // modulation, so the non-rim surface itself reads as mottled/textured
+    // rather than a single flat dark->light gradient. Two frequencies
+    // layered together (coarse + fine) so it doesn't look like a uniform
+    // regular grid at any one viewing distance.
+    float hash13(vec3 p) {
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
     void main() {
       vec3  n     = normalize(vViewNormal);
       vec3  v     = normalize(vViewDir);
@@ -266,8 +287,14 @@ export function makeToonRimInstancedWigglyMaterial(
 
       vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
       bodyCol      = mix(bodyCol, vTint, vTinted);
+
+      float coarse  = hash13(floor(vLocalPos * 45.0));
+      float fine    = hash13(floor(vLocalPos * 120.0 + 7.0));
+      float texture = coarse * 0.6 + fine * 0.4;
+      bodyCol *= 0.55 + texture * 0.9;
+
       vec3 col     = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline);
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(col, ${opacity.toFixed(4)});
     }
   `;
 
@@ -275,8 +302,8 @@ export function makeToonRimInstancedWigglyMaterial(
     uniforms: { uTime: { value: 0 } },
     vertexShader,
     fragmentShader,
-    depthWrite: true,
-    transparent: false,
+    depthWrite: opacity >= 1,
+    transparent: opacity < 1,
   });
 }
 
@@ -416,20 +443,57 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette): ShaderMateria
 // alpha-mode flag to that one, so the comet head's real production
 // rendering is never at risk of a regression from a change made for this
 // art-test use case.
-export function makeToonRimAlphaDecalMaterial(palette: ToonRimPalette): ShaderMaterial {
+// Only ever used by ArtTestVfxSystem's ghost-decal pebbles (checked — no
+// other caller), so unlike the shared-with-production shaders elsewhere in
+// this file, the look asked for is baked in here directly rather than split
+// into yet another sibling function. Wiggle uses the same radial-
+// displacement-off-unit-direction technique makeToonRimInstancedWigglyMaterial
+// documents (see its own comment for why raw position would be the wrong
+// basis), just non-instanced (each ghost-decal pebble is its own real Mesh,
+// not an InstancedMesh) — default amplitude matches the islands' own
+// (was bumped up to a "big wiggle" briefly, reduced back down since).
+// aWigglePhase here is a per-VERTEX (not per-instance) attribute set once
+// per pebble's own geometry, since each pebble already has its own
+// BufferGeometry — that's what desyncs the wiggle across the ~90 pebbles
+// sharing just 4 materials (one per fabric-ghost texture) despite there
+// being far fewer materials than pebbles. vDecalUV is computed from the
+// ORIGINAL (pre-wiggle) position, not the displaced one — the decal image
+// stays glued to each vertex's own fixed identity as it wiggles, like a
+// sticker on a wobbling balloon, rather than swimming around independently
+// of the surface it's projected onto. The decal blends in at 90% opacity
+// (mixed with a contrast-boosted version of its own color) rather than
+// fully replacing the body color.
+export function makeToonRimAlphaDecalMaterial(
+  palette: ToonRimPalette,
+  params: { amplitude?: number; speed?: number; grainStrength?: number } = {},
+): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+  const amplitude = params.amplitude ?? 0.15; // matches the islands' own wiggly amplitude — was 0.4 ("big wiggle"), reduced back down
+  const speed = params.speed ?? 1.4;
+  // How strongly the (desaturated) decal shape shows up as grain-brightness
+  // variation — see the fragment shader's own comment for why this replaced
+  // displaying the decal's actual colors.
+  const grainStrength = params.grainStrength ?? 0.35;
 
   const vertexShader = `
+    uniform float uTime;
+    attribute float aWigglePhase;
     varying vec3 vViewNormal;
     varying vec3 vViewDir;
     varying vec3 vLocalPos;
     varying vec2 vDecalUV;
 
     void main() {
-      vLocalPos = position;
       vDecalUV = vec2(0.5 + position.z * 0.5, 0.5 - position.y * 0.5);
-      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+      vec3 dir = length(position) > 0.0001 ? normalize(position) : vec3(0.0, 1.0, 0.0);
+      float wiggle = sin(dir.x * 6.0 + dir.y * 4.5 - dir.z * 5.0 + uTime * ${speed.toFixed(4)} + aWigglePhase * 6.2831) * 0.5
+                   + sin(dir.y * 7.0 - dir.x * 3.0 + uTime * ${(speed * 0.8).toFixed(4)} + aWigglePhase * 3.1) * 0.3;
+      vec3 wiggled = position * (1.0 + wiggle * ${amplitude.toFixed(4)});
+
+      vLocalPos = wiggled;
+      vec4 mvPosition = modelViewMatrix * vec4(wiggled, 1.0);
       vViewNormal = normalize(normalMatrix * normal);
       vViewDir    = normalize(-mvPosition.xyz);
       gl_Position = projectionMatrix * mvPosition;
@@ -444,6 +508,16 @@ export function makeToonRimAlphaDecalMaterial(palette: ToonRimPalette): ShaderMa
     varying vec3 vLocalPos;
     varying vec2 vDecalUV;
 
+    // Same cheap 3D hash makeToonRimInstancedWigglyMaterial's own body
+    // texture noise uses (coarse + fine, multiplied into body brightness) —
+    // reused here so the ghost shape folds into the rock's existing grain
+    // instead of introducing a different visual language.
+    float hash13(vec3 p) {
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
     void main() {
       vec3  n     = normalize(vViewNormal);
       vec3  v     = normalize(vViewDir);
@@ -453,7 +527,17 @@ export function makeToonRimAlphaDecalMaterial(palette: ToonRimPalette): ShaderMa
       float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
 
       vec4  decal = texture2D(uDecalTex, vDecalUV);
-      vec3  col   = mix(uBodyColor, decal.rgb, decal.a);
+      float lum   = dot(decal.rgb, vec3(0.299, 0.587, 0.114));
+
+      float coarse = hash13(floor(vLocalPos * 45.0));
+      float fine   = hash13(floor(vLocalPos * 120.0 + 7.0));
+      float grain  = coarse * 0.6 + fine * 0.4;
+
+      // Desaturated ghost shape folded into the rock's own grain noise as a
+      // brightness modulation (never the decal's actual colors) — a carved
+      // relief reads as texture variation, not a picture stamped on top.
+      float ghostGrain = mix(grain, lum, decal.a * ${grainStrength.toFixed(4)});
+      vec3  col        = uBodyColor * (0.55 + ghostGrain * 0.9);
 
       col = mix(col, ${vec3Glsl(palette.rimColor)}, outline);
       gl_FragColor = vec4(col, 1.0);
@@ -462,6 +546,7 @@ export function makeToonRimAlphaDecalMaterial(palette: ToonRimPalette): ShaderMa
 
   return new ShaderMaterial({
     uniforms: {
+      uTime: { value: 0 },
       uDecalTex: { value: null },
       uBodyColor: { value: new Vector3(...palette.bodyColorDark) },
     },

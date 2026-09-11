@@ -10,11 +10,16 @@ import {
   SphereGeometry,
   Vector3,
 } from '@iwsdk/core';
+import { buildNebulaCloud } from '../../vfx/geometry/nebula-cloud.js';
 import { buildOrbitalArrow } from '../../vfx/geometry/orbital-arrow.js';
 import { OrbitalLaunchSystem, ZONE_RADIUS } from './orbital-launch-system.js';
 
 const ORBIT_COLOR = 0x4a9aff;
 const UNKNOWN_COLOR = 0x7a3aff;
+const UNKNOWN_COLOR_RGB: [number, number, number] = new Color(UNKNOWN_COLOR).toArray() as [number, number, number];
+// Slow self-rotation so the nebula reads as a drifting cloud rather than a
+// static prop — applied only to the Unknown choice's marker (see update()).
+const NEBULA_SPIN_SPEED = 0.15; // rad/s
 
 const LABEL_WIDTH = 0.28;
 const LABEL_HEIGHT = 0.1;
@@ -79,7 +84,11 @@ function drawLabel(text: string): CanvasTexture {
 const LABEL_OFFSET_Y = ZONE_RADIUS + LABEL_GAP;
 
 interface Choice {
-  arrow: Group;
+  marker: Group;
+  // Slow continuous self-rotation while visible — only the Unknown choice's
+  // nebula wants this (see NEBULA_SPIN_SPEED); Orbit's arrow must keep
+  // pointing exactly along liveDir every frame instead.
+  spin: boolean;
   zone: Mesh;
   zoneMaterial: MeshBasicMaterial;
   label: Mesh;
@@ -96,8 +105,11 @@ interface Choice {
   chargedColor: Color;
 }
 
-// Renders OrbitalLaunchSystem's choice: two arrows (Orbit/The Great
-// Unknown) with a visible touch zone and text label each. Director-managed
+// Renders OrbitalLaunchSystem's choice: Orbit's directional arrow and The
+// Great Unknown's drifting purple nebula (see nebula-cloud.ts — a
+// directionless destination reads better as a nebula than an arrow, which
+// implies a specific heading), each with a visible touch zone and text
+// label. Director-managed
 // (both systems live in definePhase(Phase.Launch, ...)) since none of this
 // should persist past the phase — unlike the big planet itself (see
 // fate-event-vfx-system.ts's own persistence change), which stays visible
@@ -128,22 +140,32 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       'Orbit',
       this._orbitalLaunch.getOrbitZoneCenter(),
       this._orbitalLaunch.getOrbitDirLive(),
+      () => buildOrbitalArrow(new MeshBasicMaterial({ color: ORBIT_COLOR })),
+      false,
     );
     this._unknown = this._buildChoice(
       UNKNOWN_COLOR,
       'The Great Unknown',
       this._orbitalLaunch.getUnknownZoneCenter(),
       this._orbitalLaunch.getUnknownDirLive(),
+      () => buildNebulaCloud(UNKNOWN_COLOR_RGB),
+      true,
     );
   }
 
-  private _buildChoice(color: number, text: string, center: Vector3, liveDir: Vector3): Choice {
-    const material = new MeshBasicMaterial({ color });
-    const arrow = buildOrbitalArrow(material);
-    arrow.position.copy(center);
-    arrow.quaternion.setFromUnitVectors(this._upAxis, liveDir);
-    arrow.visible = false;
-    this.world.createTransformEntity(arrow);
+  private _buildChoice(
+    color: number,
+    text: string,
+    center: Vector3,
+    liveDir: Vector3,
+    buildMarker: () => Group,
+    spin: boolean,
+  ): Choice {
+    const marker = buildMarker();
+    marker.position.copy(center);
+    marker.quaternion.setFromUnitVectors(this._upAxis, liveDir);
+    marker.visible = false;
+    this.world.createTransformEntity(marker);
 
     const zoneMat = new MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: CHARGE_BASE_OPACITY });
     const zone = new Mesh(new SphereGeometry(ZONE_RADIUS, 16, 12), zoneMat);
@@ -159,7 +181,8 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     this.world.createTransformEntity(label);
 
     return {
-      arrow,
+      marker,
+      spin,
       zone,
       zoneMaterial: zoneMat,
       label,
@@ -179,7 +202,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       // Hidden until _revealed flips true in update() below (see
       // isReadyToChoose()'s own comment) — not shown immediately on phase
       // entry like every other one-shot VFX reveal here.
-      choice.arrow.visible = false;
+      choice.marker.visible = false;
       choice.zone.visible = false;
       choice.label.visible = false;
       choice.zone.scale.setScalar(1);
@@ -192,7 +215,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
   stop(): void {
     super.stop();
     for (const choice of [this._orbit, this._unknown]) {
-      choice.arrow.visible = false;
+      choice.marker.visible = false;
       choice.zone.visible = false;
       choice.label.visible = false;
     }
@@ -204,7 +227,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     if (!this._revealed && (state !== 'choosing' || this._orbitalLaunch.isReadyToChoose())) {
       this._revealed = true;
       for (const choice of [this._orbit, this._unknown]) {
-        choice.arrow.visible = true;
+        choice.marker.visible = true;
         choice.zone.visible = true;
         choice.label.visible = true;
       }
@@ -212,7 +235,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
 
     if (state !== this._lastState && state === 'committed') {
       const losing = this._orbitalLaunch.getChoice() === 'orbit' ? this._unknown : this._orbit;
-      losing.arrow.visible = false;
+      losing.marker.visible = false;
       losing.zone.visible = false;
       losing.label.visible = false;
     }
@@ -225,8 +248,14 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     // _buildChoice call ran with only the pre-play() placeholder values),
     // and is otherwise a harmless no-op once they've settled.
     for (const choice of [this._orbit, this._unknown]) {
-      choice.arrow.position.copy(choice.center);
-      choice.arrow.quaternion.setFromUnitVectors(this._upAxis, choice.liveDir);
+      choice.marker.position.copy(choice.center);
+      if (choice.spin) {
+        // Directionless — a slow continuous drift instead of tracking
+        // liveDir every frame like Orbit's arrow does below.
+        choice.marker.rotateY(NEBULA_SPIN_SPEED * delta);
+      } else {
+        choice.marker.quaternion.setFromUnitVectors(this._upAxis, choice.liveDir);
+      }
       choice.zone.position.copy(choice.center);
       choice.label.position.set(choice.center.x, choice.center.y + LABEL_OFFSET_Y, choice.center.z);
     }

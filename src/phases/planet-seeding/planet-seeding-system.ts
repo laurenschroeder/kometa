@@ -26,8 +26,10 @@ const PLANET_INITIAL_POSITION: readonly [number, number, number] = [0, 1.5, -0.6
 // drags the planet back in front of you instead of leaving it behind.
 // Bumped from 0.6 — that put the planet close enough to feel cramped right
 // in front of the face, especially with orbiting moons around it needing
-// room of their own; ~3 feet gives a fuller view of the whole scene.
-const PLANET_FOLLOW_DISTANCE = 0.9; // ~3 feet
+// room of their own; ~3 feet gives a fuller view of the whole scene. Pulled
+// in ~2 inches (to 0.85), then another ~3 inches (to 0.77) to sit closer to
+// the head.
+const PLANET_FOLLOW_DISTANCE = 0.77; // ~3 feet minus ~5 inches
 // Deliberately slow (1/s time-constant ~1s) — "very gentle," a loose float
 // rather than a locked-to-view HUD element (contrast NotificationHudSystem's
 // much tighter Follower settings).
@@ -35,25 +37,50 @@ const PLANET_FOLLOW_EASE_RATE = 1.0;
 
 // How close a hand must get to the planet's own SURFACE (not center) to
 // drop a pebble — simple proximity rather than any gesture requirement, so
-// "get near it" is the whole mechanic. Bumped up from 3 inches (0.0762) —
-// at that range the trigger point was basically touching the surface
-// already, so the pebble's fall (sampled from the comet trail near the
-// hand, see PlanetSeedingVfxSystem._launchQueued) barely had any distance
-// to travel and read as just appearing on the planet rather than falling
-// onto it.
-const SURFACE_TRIGGER_DISTANCE = 0.2; // ~8 inches
+// "get near it" is the whole mechanic. Bumped up from 8 inches (0.2) — the
+// fall origin is sampled from the comet trail near the hand (see
+// PlanetSeedingVfxSystem._launchQueued), so a tight trigger radius meant the
+// hand (and thus the comet) was already right on top of the planet the
+// moment a pebble launched, leaving barely any distance to actually fall.
+// First tried 1.0 (~3.3ft), but that let a nearly-stationary hand keep
+// triggering drops without ever needing to move around the surface — with a
+// direction that barely changes, repeat drops kept re-coloring the SAME
+// already-colored coverage cell (see _dropPebble) instead of spreading to
+// new ones, so the finite stardust queue could run out (see _pendingCount)
+// well before reaching COVERAGE_WIN_FRACTION, softlocking the phase until
+// its timeoutSeconds safety net (index.ts) finally kicked in. 16 inches
+// keeps a noticeably longer fall than the original 8 without losing the
+// "orbit the surface to spread coverage" requirement that makes the queue
+// budget actually sufficient to win.
+const SURFACE_TRIGGER_DISTANCE = 0.4; // ~16 inches
 // Pacing between drops while a hand lingers within range — without this a
 // stationary hand would dump the whole queue in one frame. Scaled by the
 // hand's own speed (see _fallCooldownFor) rather than fixed, so orbiting the
 // planet quickly seeds faster than just holding a hand still near it — a
 // near-stationary hand drops at FALL_COOLDOWN_SLOW, ramping down to
 // FALL_COOLDOWN_FAST once speed reaches FALL_SPEED_FOR_FAST_COOLDOWN.
-const FALL_COOLDOWN_SLOW = 0.5;
-const FALL_COOLDOWN_FAST = 0.05;
+// FAST bumped from 0.05 — that let a brisk swing drop pebbles up to 20/sec,
+// which (combined with the old COVERAGE_WIN_FRACTION) let the phase finish
+// almost instantly and read as chaotic rather than a gradual "watch the
+// planet fill in" reveal. SLOW nudged up slightly to match.
+const FALL_COOLDOWN_SLOW = 0.6;
+const FALL_COOLDOWN_FAST = 0.18;
 const FALL_SPEED_FOR_FAST_COOLDOWN = 2.0; // m/s — a brisk swing/orbit, not a full sprint
-// Half the planet's coverage cells (see CELL_DIRS) must be colored to
-// complete the phase — see getCoverageFraction()/COVERAGE_WIN_FRACTION.
-const COVERAGE_WIN_FRACTION = 0.5;
+// Bumped from 0.5 — the phase was completing too quickly to read as
+// "slowly filling up different parts of the planet." Together with the
+// slower fall cooldowns above, this asks for meaningfully more orbiting
+// around the surface before the phase completes.
+const COVERAGE_WIN_FRACTION = 0.7;
+// A repeat landing whose globally-nearest cell is already colored instead
+// prefers the nearest still-UNCOLORED cell, as long as one exists within
+// this angular range (~60°, generous — cells are only ~22.6° apart in the
+// Fibonacci layout below) — see _dropPebble's own comment for why: without
+// this, a hand orbiting in a narrow band keeps re-landing on the SAME
+// already-colored nearest cell forever (its direction barely changes),
+// draining the whole stardust queue while _coloredCount stays flat well
+// short of COVERAGE_WIN_FRACTION — the phase then just sits there until the
+// timeout safety net kicks in, reading as "stuck."
+const UNCOLORED_BIAS_MIN_DOT = 0.5;
 
 // Moons are grouped into 3 tilted rings of 2, radii/tilts staggered so the
 // whole thing reads as a small solar system rather than one flat disc.
@@ -93,6 +120,12 @@ const CELL_DIRS = buildFibonacciSphere(MAX_SPLATS);
 
 interface QueueItem {
   particleIndex: number;
+  // True only for entries padded in by play()'s dev-menu safety net below —
+  // no real captured stardust backs this landing, so _dropPebble must skip
+  // releaseCaptured() for it (particleIndex is just 0, a harmless valid read
+  // index for PlanetSeedingVfxSystem's fall-origin trail sample — see
+  // LaunchEvent/_launchQueued — not a real field-slot index to release).
+  synthetic?: boolean;
 }
 
 export interface LaunchEvent {
@@ -228,6 +261,19 @@ export class PlanetSeedingSystem extends createSystem({
     for (let i = 0; i < captured.length; i++) {
       this._stardustQueue.push({ particleIndex: captured[i] });
     }
+    // Dev-menu safety net: jumping straight to Seeding (skipping Stardust
+    // entirely — see phase-menu-system.ts) leaves getCapturedIndices() at or
+    // near empty, since nothing was ever actually gathered. Without this,
+    // the phase silently stalls after whatever tiny handful of real
+    // stardust exists runs out — well short of COVERAGE_WIN_FRACTION — and
+    // just sits there until the timeout safety net eventually fires,
+    // reading as "stuck" rather than an expected consequence of skipping
+    // Stardust. Pad up to a normal-playthrough-sized queue with synthetic
+    // entries so the phase stays winnable even when jumped to directly.
+    const minQueue = Math.ceil(MAX_SPLATS * COVERAGE_WIN_FRACTION) + 15;
+    while (this._stardustQueue.length < minQueue) {
+      this._stardustQueue.push({ particleIndex: 0, synthetic: true });
+    }
     this._pendingCount = this._stardustQueue.length;
   }
 
@@ -337,28 +383,39 @@ export class PlanetSeedingSystem extends createSystem({
   // landing point from — any direction is fine there since the phase is
   // already ending.
   private _dropPebble(item: QueueItem, dirX = 0, dirY = -1, dirZ = 0): void {
-    this._stardust.releaseCaptured(item.particleIndex);
+    if (!item.synthetic) this._stardust.releaseCaptured(item.particleIndex);
     this._pendingCount--;
 
     let best = 0;
     let bestDot = -Infinity;
+    let bestUncolored = -1;
+    let bestUncoloredDot = -Infinity;
     for (let c = 0; c < MAX_SPLATS; c++) {
       const dot = dirX * CELL_DIRS[c * 3] + dirY * CELL_DIRS[c * 3 + 1] + dirZ * CELL_DIRS[c * 3 + 2];
       if (dot > bestDot) {
         bestDot = dot;
         best = c;
       }
+      if (!this._cellColored[c] && dot > bestUncoloredDot) {
+        bestUncoloredDot = dot;
+        bestUncolored = c;
+      }
     }
+    // Prefer a nearby still-uncolored cell over the globally-nearest one
+    // once that nearest cell is already colored — see UNCOLORED_BIAS_MIN_DOT's
+    // own comment. The splat itself still visually lands at the real dirX/Y/Z
+    // (below), just recorded under a different permanent slot.
+    const target = bestUncolored >= 0 && bestUncoloredDot >= UNCOLORED_BIAS_MIN_DOT ? bestUncolored : best;
 
-    if (!this._cellColored[best]) {
-      this._cellColored[best] = 1;
+    if (!this._cellColored[target]) {
+      this._cellColored[target] = 1;
       this._coloredCount++;
       if (this._coloredCount >= Math.ceil(MAX_SPLATS * COVERAGE_WIN_FRACTION)) {
         getGlobals(this.world).phaseComplete.value = true;
       }
     }
 
-    this._launchBatch.push({ particleIndex: item.particleIndex, cellIndex: best, dirX, dirY, dirZ });
+    this._launchBatch.push({ particleIndex: item.particleIndex, cellIndex: target, dirX, dirY, dirZ });
   }
 
   // Read-only accessors for PlanetSeedingVfxSystem — callers must not mutate.

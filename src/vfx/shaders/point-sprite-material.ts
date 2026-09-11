@@ -1,4 +1,4 @@
-import { Blending, NormalBlending, ShaderMaterial } from '@iwsdk/core';
+import { Blending, NormalBlending, ShaderMaterial, Vector3 } from '@iwsdk/core';
 
 export interface PointSpriteParams {
   color: [number, number, number];
@@ -29,18 +29,24 @@ export function makePointSpriteMaterial(params: PointSpriteParams): ShaderMateri
     }
   `;
 
+  // Color lives in a uniform (not baked into the shader source, unlike this
+  // factory's other params) so a caller can retint an already-built material
+  // live — see pebble-comet-presentation-system.ts's dominantPebbleType-
+  // driven haze retint, the one caller that actually needs this.
   const fragmentShader = `
+    uniform vec3 uColor;
     varying float vBright;
     void main() {
       vec2  uv = gl_PointCoord - 0.5;
-      float r  = length(uv);
-      if (r > 0.5) discard;
-      float a  = smoothstep(0.5, 0.0, r) * vBright;
-      gl_FragColor = vec4(${r.toFixed(4)}, ${g.toFixed(4)}, ${b.toFixed(4)}, a);
+      float dist = length(uv);
+      if (dist > 0.5) discard;
+      float a = smoothstep(0.5, 0.0, dist) * vBright;
+      gl_FragColor = vec4(uColor, a);
     }
   `;
 
   return new ShaderMaterial({
+    uniforms: { uColor: { value: new Vector3(r, g, b) } },
     vertexShader,
     fragmentShader,
     blending: params.blending ?? NormalBlending,

@@ -54,8 +54,16 @@ function widthFactorAt(t: number): number {
 // swooshes rather than flat lines that need to face the camera. uv.x runs
 // along the curve's length (0-1, for end-fade/shimmer in the ribbon
 // shader), uv.y runs across its width (0-1, for the cross-width glow
-// falloff).
-export function buildStreakRibbonGeometry(points: Vector3[], maxWidth: number): BufferGeometry {
+// falloff). widthFactor(t) (0-1 along the curve) scales maxWidth at each
+// point — defaults to widthFactorAt's own "thin start, quick growth, long
+// taper" shooting-star profile; pass a different function for a shape that
+// should read as one consistent line weight throughout instead (e.g. a
+// traced constellation outline).
+export function buildStreakRibbonGeometry(
+  points: Vector3[],
+  maxWidth: number,
+  widthFactor: (t: number) => number = widthFactorAt,
+): BufferGeometry {
   const n = points.length;
   const positions = new Float32Array(n * 2 * 3);
   const uvs = new Float32Array(n * 2 * 2);
@@ -75,7 +83,7 @@ export function buildStreakRibbonGeometry(points: Vector3[], maxWidth: number): 
     side.normalize();
 
     const t = i / (n - 1);
-    const halfWidth = (maxWidth * widthFactorAt(t)) / 2;
+    const halfWidth = (maxWidth * widthFactor(t)) / 2;
     const p = points[i];
     const li = i * 2;
     const ri = i * 2 + 1;

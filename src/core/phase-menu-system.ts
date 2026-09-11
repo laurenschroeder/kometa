@@ -25,12 +25,10 @@ import { NotificationHudSystem } from './notification-hud-system.js';
 const TAP_WINDOW_SECONDS = 0.45;
 const TAPS_TO_TOGGLE = 5;
 
-// Kill switch for the whole open-on-tap gesture — flip to true to bring it
-// back. Off for now: the 5-tap trigger was still catching real playtesters
-// by surprise, so the menu shouldn't be reachable during normal play until
-// that's revisited. The panel/systems below are still fully built either
-// way, just never opened.
-const DEV_MENU_ENABLED = false;
+// Kill switch for the whole open-on-tap gesture — flip to false to disable
+// it again without ripping the feature out. The panel/systems below are
+// still fully built either way, just never opened while this is false.
+const DEV_MENU_ENABLED = true;
 
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],

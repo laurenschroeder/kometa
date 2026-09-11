@@ -23,9 +23,15 @@ import {
 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { buildBlueGreenPalette } from '../../vfx/color/blue-green-palette.js';
 import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
 import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
+import {
+  extractSpriteRects,
+  sampleOpaquePixelPositions,
+  SpriteRect,
+} from '../../vfx/geometry/sprite-sheet-extractor.js';
 import {
   buildStreakRibbonGeometry,
   sampleSwooshCurve,
@@ -33,7 +39,7 @@ import {
 } from '../../vfx/geometry/streak-path.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
 import { makeGhostWiggleMaterial } from '../../vfx/shaders/ghost-wiggle-material.js';
-import { makePixelCrtMaterial } from '../../vfx/shaders/pixel-crt-material.js';
+import { makePixelCrtMaterial, makePixelCrtVertexColorMaterial } from '../../vfx/shaders/pixel-crt-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
 import {
   makeSparkleMaterial,
@@ -68,6 +74,10 @@ const PEBBLES_PER_TYPE = 30; // x3 types = 90, shared layout across the pebble v
 // doubles directly as the mesh's world-space scale.
 const PEBBLE_RADIUS = PEBBLE_MESH_SCALE * pebbleSizeFromSample(0.4, 0.8);
 const HAZE_RADIUS = PEBBLE_RADIUS * 4;
+// "More size variety" for the black + magical haze pebbles specifically —
+// much wider than the other pebble variants' usual 0.85-1.15 (±15%).
+const BLACK_HAZE_SIZE_MIN = 0.35;
+const BLACK_HAZE_SIZE_MAX = 2.0;
 // Plain black body, crisp white rim outline, no tint — shared by the black
 // + magical haze pebbles and the OBJ islands pebbles (see their own
 // builders) so "the same shader" is literally true, not just visually
@@ -81,11 +91,25 @@ const BLACK_RIM_PALETTE = {
 // makeToonRimInstancedGrainyMaterial's own comment for the shader side of
 // this. Dark enough that vTint's 0.35-strength wash and the sparkle flecks
 // (not this base color) are what actually carries each pebble's RGB hue.
+// Rim outline AND sparkle flecks are both a fixed neon yellow (sparkleColor
+// overrides the default "glint in the pebble's own tint" behavior) rather
+// than tracking each pebble's own pastel color.
+const RGB_PEBBLE_NEON_YELLOW: [number, number, number] = [0.95, 1.0, 0.1];
 const RGB_PEBBLE_PALETTE = {
   bodyColorDark: [0.018, 0.018, 0.022] as [number, number, number],
   bodyColorLight: [0.045, 0.045, 0.055] as [number, number, number],
-  rimColor: [1, 1, 1] as [number, number, number],
+  rimColor: RGB_PEBBLE_NEON_YELLOW,
+  sparkleColor: RGB_PEBBLE_NEON_YELLOW,
 };
+
+// "A huge range of shades of blue and green, neon, pastel, etc" — a
+// dedicated procedural palette for variant 4, no longer tied to PEBBLE_TYPES'
+// 3 real-game hues (which was only ever blue/green/red pastel, 1 shade
+// each). Picked per-pebble at random rather than one fixed color per
+// PEBBLE_TYPES type. See buildBlueGreenPalette's own comment for the
+// hue-sweep/treatment details — shared with production pebble rendering's
+// organic-type glitter body (pebble-material.ts).
+const PEBBLE_COLORED_PALETTE: [number, number, number][] = buildBlueGreenPalette();
 
 // The OBJ this project has actually been given — see obj-island-extractor.ts
 // / loadObjLargestIslands. Its 'Layer_1'/'Layer_2' groups have no
@@ -126,6 +150,10 @@ const GHOST_BOB_FREQ = 1.1; // Hz — gentle, not a bounce
 const GHOST_WIGGLE_AMPLITUDE = 0.004;
 const GHOST_WIGGLE_FREQUENCY = 6.0;
 const GHOST_WIGGLE_SPEED = 2.2;
+// Never fully invisible, but a range of opacities skewed toward the
+// transparent end (see _buildGhostBillboardGeometry's own comment on the
+// skew) rather than every ghost sharing one fixed opacity.
+const GHOST_OPACITY_MIN = 0.12;
 
 // Real organic-rock pebbles with a fabric-ghost texture decal-projected onto
 // their front face — same technique/shader family as the comet head's own
@@ -158,12 +186,17 @@ const STREAK_SEGMENTS = 140;
 const STREAK_MAX_WIDTH = 0.05;
 const STREAK_HALO_COUNT = 450; // per curve — the fine-grain dust cloud around each streak
 const STREAK_HALO_JITTER = 0.1;
-const STREAK_HALO_SIZE = 0.01; // fine grain, much smaller than the stardust variants' own motes
+const STREAK_HALO_SIZE = 0.022; // "glitter grains" — bumped up from an original 0.01
 const STREAK_DRIP_COLUMNS = 9; // per curve, spaced along the tail half where it's swept out and descending
 const STREAK_DRIP_LENGTH = 7; // motes per column
 const STREAK_DRIP_SPACING = 0.05;
 const STREAK_DRIP_JITTER = 0.012;
-const STREAK_DRIP_SIZE = 0.009;
+const STREAK_DRIP_SIZE = 0.02; // bumped up from an original 0.009, alongside the halo
+// One full grow-in/fade-out cycle for the ribbon itself (see
+// makeStreakRibbonMaterial's own comment) — the two curves' own materials
+// stagger their phase by a fraction of this so they don't both animate in
+// lockstep.
+const STREAK_LOOP_DURATION = 3.5;
 
 // Variant 12 — "organic specks + star shapes": a reference-image scatter of
 // fine, irregularly-sized dust specks (makeSparkleMaterial's own soft core,
@@ -260,6 +293,74 @@ const PIXEL_GALAXY_SCATTER_COUNT = 150; // sparse flecks around the galaxy, past
 const PIXEL_GALAXY_SCATTER_RADIUS = 0.65;
 const PIXEL_GALAXY_SCATTER_SIZE = 0.016;
 
+// Ghost-shaped silhouettes made OUT OF the pixel-CRT points themselves —
+// reuses the real fabric-ghost PNGs (FABRIC_GHOST_KEYS) purely as a shape
+// mask (see sampleOpaquePixelPositions) rather than displaying their actual
+// texture, so each ghost's silhouette is populated with makePixelCrtMaterial
+// squares instead of the usual textured/wiggly billboard. Two ghosts (two
+// of the four textures, for variety), each with the same per-pixel size and
+// depth jitter as the galaxy-arm swirl behind them (PIXEL_GALAXY_ARM_SIZE /
+// PIXEL_GALAXY_DEPTH_JITTER) so the ghosts read as made of the same kind of
+// pixel-cloud material as the backdrop rather than a flatter, differently
+// scaled sprite.
+const PIXEL_GHOST_KEYS = [FABRIC_GHOST_KEYS[0], FABRIC_GHOST_KEYS[2]];
+const PIXEL_GHOST_SAMPLE_COUNT = 220;
+const PIXEL_GHOST_SIZE = 0.5; // world-space height the shape's own -0.5..0.5 local Y range maps onto
+const PIXEL_GHOST_PIXEL_SIZE = PIXEL_GALAXY_ARM_SIZE;
+const PIXEL_GHOST_DEPTH_JITTER = PIXEL_GALAXY_DEPTH_JITTER;
+const PIXEL_GHOST_COLOR: [number, number, number] = [0.75, 0.92, 0.95];
+// The FIRST ghost (PIXEL_GHOST_KEYS[0]) gets a higher-resolution,
+// color-matched treatment instead of the flat-neon/lower-res look every
+// other ghost shape uses — many more, smaller pixels, each colored from
+// the real fabricGhost1.png pixel it was sampled from (see
+// sampleOpaquePixelPositions' own r/g/b fields) rather than one shared
+// flat color.
+const PIXEL_GHOST_HIRES_SAMPLE_COUNT = 1400;
+const PIXEL_GHOST_HIRES_PIXEL_SIZE = PIXEL_GALAXY_ARM_SIZE;
+const PIXEL_GHOST_OFFSETS: [number, number, number][] = [
+  [-0.15, -0.35, 0.2],
+  [0.15, -0.4, 0.05],
+];
+
+// Variant 16/17 — "rock photos": real photographed rocks (rocks.png) and
+// its black/white sibling (rockBW.png) — see sprite-sheet-extractor.ts for
+// how individual rocks are found in each spritesheet. Bigger than a pebble
+// (these are meant to read as actual rock photos, not tiny dust) and each
+// billboard gets a random in-plane roll baked into its own geometry (see
+// _buildRockPlaneGeometry) so a whole field of the same handful of source
+// photos doesn't look identically oriented.
+const ROCK_PHOTO_COUNT = 90;
+const ROCK_PHOTO_SIZE = 0.05; // plane height in world units; width follows each rock's own aspect ratio
+const ROCK_PHOTO_BOB_FREQ = 0.7;
+const ROCK_PHOTO_TEST_COMET_SIZE = 0.035;
+// rockBW.png specifically reads as distant moons instead of the ring split
+// rocks.png uses — see _buildRockPhotosBW's own comment.
+const ROCK_PHOTO_MOON_SIZE_SCALE = 15;
+const ROCK_PHOTO_MOON_DISTANCE_MIN = FIELD_MAX_RADIUS * 1.5;
+const ROCK_PHOTO_MOON_DISTANCE_MAX = FIELD_MAX_RADIUS * 2.8;
+// rocks.png itself: keeps its own inner/outer ring size split
+// (ringSizeAndPosition) but blown up 10x overall and pushed well past the
+// shared field volume, so the whole ring reads as huge and far rather than
+// nearby floating photos.
+const ROCK_PHOTO_FAR_SIZE_SCALE = 10;
+const ROCK_PHOTO_FAR_DISTANCE_MIN = FIELD_MAX_RADIUS * 1.5;
+const ROCK_PHOTO_FAR_DISTANCE_MAX = FIELD_MAX_RADIUS * 3.5;
+
+// Variant 18 — glitter1 (glitter.png) + glitter2 (glitter2.png) billboards,
+// round-robin between the two textures, each instance its own random size
+// and in-plane roll (see _applyRandomPlaneRoll) so the field doesn't read
+// as one repeated flake. Reuses makeSparkleTexturedMaterial (the same
+// "real texture + twinkle" shader the star-illustration variant already
+// uses) rather than a plain unlit material — these are meant to sparkle,
+// not just sit there.
+const GLITTER_KEYS = ['glitter1', 'glitter2'];
+const GLITTER_COUNT = 500;
+const GLITTER_MIN_SIZE = 0.008;
+const GLITTER_MAX_SIZE = 0.035;
+const GLITTER_BOB_AMPLITUDE = 0.006;
+const GLITTER_BOB_FREQ = 1.3;
+const GLITTER_TEST_COMET_COUNT = 40;
+
 const LABEL_WIDTH = 0.5;
 const LABEL_HEIGHT = 0.12;
 const LABEL_CANVAS_W = 640;
@@ -295,14 +396,48 @@ function isEffectivelyVisible(obj: Object3D): boolean {
   return true;
 }
 
-function scatterPoint(): [number, number, number] {
+// Generic version of scatterPoint() below, parametrized on the radius band
+// instead of always using FIELD_MIN_RADIUS/FIELD_MAX_RADIUS — used by
+// anything that needs two (or more) visually distinct concentric rings
+// within the shared field volume instead of one uniform shell (see the
+// rock-photos and glitter variants' own inner/outer ring split).
+function scatterPointInRing(minRadius: number, maxRadius: number): [number, number, number] {
   const dir = randomUnitVector3();
-  const r = FIELD_MIN_RADIUS + Math.random() * (FIELD_MAX_RADIUS - FIELD_MIN_RADIUS);
+  const r = minRadius + Math.random() * (maxRadius - minRadius);
   return [
     FIELD_CENTER[0] + dir.x * r,
     FIELD_CENTER[1] + dir.y * r,
     FIELD_CENTER[2] + dir.z * r,
   ];
+}
+
+function scatterPoint(): [number, number, number] {
+  return scatterPointInRing(FIELD_MIN_RADIUS, FIELD_MAX_RADIUS);
+}
+
+// "Half the rocks 1/4 size in an inner ring, outer ring 4x size" — shared
+// by both the rock-photos and glitter variants (the glitter one asked for
+// the same treatment rocks got). The first half of instances (by index)
+// land in a tighter inner ring at RING_INNER_SIZE_SCALE, the rest in a
+// wider outer ring at RING_OUTER_SIZE_SCALE, with a radius gap between the
+// two bands (0.4-0.6 of the field's own min-max range) so they read as two
+// visually distinct rings rather than one blended shell.
+const RING_INNER_SIZE_SCALE = 0.25;
+const RING_OUTER_SIZE_SCALE = 4;
+const RING_INNER_RADIUS_MIN = FIELD_MIN_RADIUS;
+const RING_INNER_RADIUS_MAX = FIELD_MIN_RADIUS + (FIELD_MAX_RADIUS - FIELD_MIN_RADIUS) * 0.4;
+const RING_OUTER_RADIUS_MIN = FIELD_MIN_RADIUS + (FIELD_MAX_RADIUS - FIELD_MIN_RADIUS) * 0.6;
+const RING_OUTER_RADIUS_MAX = FIELD_MAX_RADIUS;
+
+function ringSizeAndPosition(
+  i: number,
+  count: number,
+  baseSize: number,
+): { size: number; position: [number, number, number] } {
+  const inner = i < count / 2;
+  return inner
+    ? { size: baseSize * RING_INNER_SIZE_SCALE, position: scatterPointInRing(RING_INNER_RADIUS_MIN, RING_INNER_RADIUS_MAX) }
+    : { size: baseSize * RING_OUTER_SIZE_SCALE, position: scatterPointInRing(RING_OUTER_RADIUS_MIN, RING_OUTER_RADIUS_MAX) };
 }
 
 // Same volume as scatterPoint(), but the radius sample is skewed toward
@@ -482,6 +617,9 @@ export class ArtTestVfxSystem extends createSystem({
       this._buildStardustOrganicStars(),
       this._buildStardustNebulaTones(),
       this._buildPixelCrtGlow(),
+      this._buildRockPhotos(),
+      this._buildRockPhotosBW(),
+      this._buildGlitterBillboards(),
       this._buildEverythingMixture(),
     ];
     for (const group of this._variantGroups) {
@@ -503,6 +641,9 @@ export class ArtTestVfxSystem extends createSystem({
       this._buildTestCometOrganicStars(),
       this._buildTestCometNebulaTones(),
       this._buildTestCometPixelCrtGlow(),
+      this._buildTestCometRockPhotos(),
+      this._buildTestCometRockPhotosBW(),
+      this._buildTestCometGlitterBillboards(),
       this._buildTestCometEverythingMixture(),
     ];
     this._testComets = testComets.map((tc) => tc.group);
@@ -759,12 +900,12 @@ export class ArtTestVfxSystem extends createSystem({
     return layout;
   }
 
-  // Variant 4 — the game's RGB pebble palette (blue/green/red), rendered
-  // "more organic, minimal, dark, grainy/sparkly" (see
-  // RGB_PEBBLE_PALETTE/makeToonRimInstancedGrainyMaterial) rather than the
-  // real field's own bright saturated toon-rim look — a dedicated art-test
-  // material, not kPebbleFieldTintedMat, so the production pebble field's
-  // actual appearance is untouched.
+  // Variant 4 — "more organic, minimal, dark, grainy/sparkly" (see
+  // RGB_PEBBLE_PALETTE/makeToonRimInstancedGrainyMaterial), tinted from the
+  // huge blue/green PEBBLE_COLORED_PALETTE sweep rather than any single
+  // pebble type's own color — a dedicated art-test material, not any of
+  // pebble-material.ts's production materials, so the real pebble field's
+  // actual appearance is untouched by experimenting here.
   private _buildPebblesCurrent(): Group {
     const layout = this._pebbleLayout();
     const n = layout.length;
@@ -791,7 +932,10 @@ export class ArtTestVfxSystem extends createSystem({
       scale.setScalar(PEBBLE_RADIUS * (0.85 + Math.random() * 0.3));
       mat4.compose(pos, quat, scale);
       mesh.setMatrixAt(i, mat4);
-      const [r, g, b] = PEBBLE_TYPES[t.type].color;
+      // Random pick across the full blue/green pastel+neon+mid-tone sweep —
+      // "a huge range of shades of blue and green, neon, pastel, etc" — not
+      // tied to this pebble's PEBBLE_TYPES layout type any more.
+      const [r, g, b] = PEBBLE_COLORED_PALETTE[Math.floor(Math.random() * PEBBLE_COLORED_PALETTE.length)];
       tintAttr.setXYZ(i, r, g, b);
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -803,10 +947,10 @@ export class ArtTestVfxSystem extends createSystem({
   }
 
   // Variant 5 — the same rock shape/silhouette as variant 4, but the body
-  // itself is near-black (a SEPARATE material instance from
-  // kPebbleFieldTintedMat, with aTinted left at 0 so the tint blend never
-  // kicks in — every instance is just its own flat dark body/light-mix,
-  // no per-type recoloring). Color is communicated entirely by a second,
+  // itself is near-black (a SEPARATE material instance, aTinted left at 0
+  // so the tint blend never kicks in — every instance is just its own flat
+  // dark body/light-mix, no per-type recoloring). Color is communicated
+  // entirely by a second,
   // larger additive point-sprite "haze" layered at each pebble's position
   // in that pebble's own PEBBLE_TYPES color instead — one Points cloud per
   // color (point-sprite materials bake one fixed color per material, see
@@ -832,7 +976,9 @@ export class ArtTestVfxSystem extends createSystem({
       pos.set(t.position[0], t.position[1], t.position[2]);
       axis.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
       quat.setFromAxisAngle(axis, Math.random() * Math.PI * 2);
-      scale.setScalar(PEBBLE_RADIUS * (0.85 + Math.random() * 0.3));
+      // Much wider spread than the other pebble variants' usual ±15% —
+      // "more size variety" for this one specifically.
+      scale.setScalar(PEBBLE_RADIUS * (BLACK_HAZE_SIZE_MIN + Math.random() * (BLACK_HAZE_SIZE_MAX - BLACK_HAZE_SIZE_MIN)));
       mat4.compose(pos, quat, scale);
       bodyMesh.setMatrixAt(i, mat4);
     }
@@ -880,8 +1026,21 @@ export class ArtTestVfxSystem extends createSystem({
   // top stays anchored and its bottom billows, reading as ghost-sheet
   // motion. One shared material per texture (4 total, matching
   // FABRIC_GHOST_KEYS) — its uTime uniform is what _timeUniformMats drives.
-  private _buildSoulGhostBillboards(): Group {
+  // Own PlaneGeometry per ghost billboard (not one shared instance) — each
+  // needs its own aOpacity value baked in via a vertex attribute, since
+  // there's no per-instance rendering here (just a handful of shared
+  // materials round-robinned across many individual Meshes) for a uniform
+  // to vary by instance instead.
+  private _buildGhostBillboardGeometry(): PlaneGeometry {
     const geo = new PlaneGeometry(GHOST_BILLBOARD_SIZE, GHOST_BILLBOARD_SIZE);
+    // Squaring a uniform random skews the distribution toward 0 — "a range
+    // of opacities favoring more transparent" rather than an even spread.
+    const opacity = GHOST_OPACITY_MIN + Math.pow(Math.random(), 2) * (1 - GHOST_OPACITY_MIN);
+    geo.setAttribute('aOpacity', new BufferAttribute(new Float32Array(4).fill(opacity), 1));
+    return geo;
+  }
+
+  private _buildSoulGhostBillboards(): Group {
     const materials = FABRIC_GHOST_KEYS.map((key) => {
       const mat = makeGhostWiggleMaterial({
         texture: AssetManager.getTexture(key)!,
@@ -898,7 +1057,7 @@ export class ArtTestVfxSystem extends createSystem({
     const basePos: Vector3[] = [];
     const phase = new Float32Array(GHOST_BILLBOARD_COUNT);
     for (let i = 0; i < GHOST_BILLBOARD_COUNT; i++) {
-      const mesh = new Mesh(geo, materials[i % materials.length]);
+      const mesh = new Mesh(this._buildGhostBillboardGeometry(), materials[i % materials.length]);
       const p = scatterPoint();
       mesh.position.set(p[0], p[1], p[2]);
       group.add(mesh);
@@ -1110,6 +1269,7 @@ export class ArtTestVfxSystem extends createSystem({
         rimColor: [1, 1, 1],
       });
       mat.uniforms.uDecalTex.value = AssetManager.getTexture(key)!;
+      this._timeUniformMats.push(mat);
       return mat;
     });
 
@@ -1117,7 +1277,9 @@ export class ArtTestVfxSystem extends createSystem({
     const quat = new Quaternion();
     const axis = new Vector3();
     for (let i = 0; i < layout.length; i++) {
-      const mesh = new Mesh(buildOrganicGeometry(), materials[i % materials.length]);
+      const geo = buildOrganicGeometry();
+      geo.setAttribute('aWigglePhase', new BufferAttribute(new Float32Array(geo.getAttribute('position').count).fill(Math.random()), 1));
+      const mesh = new Mesh(geo, materials[i % materials.length]);
       const p = layout[i].position;
       mesh.position.set(p[0], p[1], p[2]);
       axis.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
@@ -1161,14 +1323,20 @@ export class ArtTestVfxSystem extends createSystem({
       },
     ];
 
-    const ribbonMat = makeStreakRibbonMaterial({ color: STREAK_COLOR });
-    this._timeUniformMats.push(ribbonMat);
-
     const haloPositions: number[] = [];
     const dripPositions: number[] = [];
     const dripBright: number[] = [];
 
-    for (const def of curveDefs) {
+    curveDefs.forEach((def, curveIndex) => {
+      // Own material per curve (not one shared instance) — each needs its
+      // own baked-in phaseOffsetSeconds so the two "shooting stars" grow in
+      // and fade out on staggered cycles instead of perfect lockstep.
+      const ribbonMat = makeStreakRibbonMaterial({
+        color: STREAK_COLOR,
+        phaseOffsetSeconds: curveIndex * (STREAK_LOOP_DURATION / curveDefs.length),
+      });
+      this._timeUniformMats.push(ribbonMat);
+
       const curvePoints = sampleSwooshCurve(def, STREAK_SEGMENTS);
       const ribbonMesh = new Mesh(buildStreakRibbonGeometry(curvePoints, STREAK_MAX_WIDTH), ribbonMat);
       group.add(ribbonMesh);
@@ -1196,7 +1364,7 @@ export class ArtTestVfxSystem extends createSystem({
           dripBright.push(Math.max(0.05, 1 - k / STREAK_DRIP_LENGTH));
         }
       }
-    }
+    });
 
     const haloN = haloPositions.length / 3;
     const haloBright = new Float32Array(haloN);
@@ -1455,6 +1623,48 @@ export class ArtTestVfxSystem extends createSystem({
     return points;
   }
 
+  // Same as _buildPixelPoints, but for makePixelCrtVertexColorMaterial —
+  // each point's own color comes from the pre-sampled OpaquePixelSample's
+  // own r/g/b (see sampleOpaquePixelPositions) instead of one shared
+  // material color, and positions are derived directly from the samples
+  // (center + sample.xy * worldScale) rather than an arbitrary
+  // positionFn callback.
+  private _buildPixelPointsColored(
+    samples: readonly { x: number; y: number; r: number; g: number; b: number }[],
+    size: number,
+    center: [number, number, number],
+    worldScale: number,
+    material: ShaderMaterial,
+    depthJitter = 0,
+  ): Points {
+    const count = samples.length;
+    const pos = new Float32Array(count * 3);
+    const sizes = new Float32Array(count).fill(size);
+    const bright = new Float32Array(count);
+    const phase = new Float32Array(count);
+    const color = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const s = samples[i];
+      pos[i * 3] = center[0] + s.x * worldScale;
+      pos[i * 3 + 1] = center[1] + s.y * worldScale;
+      pos[i * 3 + 2] = center[2] + (Math.random() * 2 - 1) * depthJitter;
+      bright[i] = 0.7 + Math.random() * 0.3;
+      phase[i] = Math.random();
+      color[i * 3] = s.r;
+      color[i * 3 + 1] = s.g;
+      color[i * 3 + 2] = s.b;
+    }
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new BufferAttribute(pos, 3));
+    geo.setAttribute('aSize', new BufferAttribute(sizes, 1));
+    geo.setAttribute('aBright', new BufferAttribute(bright, 1));
+    geo.setAttribute('aPhase', new BufferAttribute(phase, 1));
+    geo.setAttribute('aColor', new BufferAttribute(color, 3));
+    const points = new Points(geo, material);
+    points.frustumCulled = false;
+    return points;
+  }
+
   // Variant 15 — see PIXEL_BLUE_COLOR's own comment.
   private _buildPixelCrtGlow(): Group {
     const group = new Group();
@@ -1508,7 +1718,298 @@ export class ArtTestVfxSystem extends createSystem({
       ),
     );
 
+    const ghostMat = makePixelCrtMaterial({ color: PIXEL_GHOST_COLOR });
+    this._timeUniformMats.push(ghostMat);
+    const ghostColorMat = makePixelCrtVertexColorMaterial();
+    this._timeUniformMats.push(ghostColorMat);
+
+    PIXEL_GHOST_KEYS.forEach((key, ghostIndex) => {
+      const texture = AssetManager.getTexture(key);
+      if (!texture) return;
+
+      const center: [number, number, number] = [
+        FIELD_CENTER[0] + PIXEL_GHOST_OFFSETS[ghostIndex][0],
+        FIELD_CENTER[1] + PIXEL_GHOST_OFFSETS[ghostIndex][1],
+        FIELD_CENTER[2] + PIXEL_GHOST_OFFSETS[ghostIndex][2],
+      ];
+
+      if (ghostIndex === 0) {
+        const samples = sampleOpaquePixelPositions(texture, PIXEL_GHOST_HIRES_SAMPLE_COUNT);
+        if (samples.length === 0) return;
+        group.add(
+          this._buildPixelPointsColored(
+            samples,
+            PIXEL_GHOST_HIRES_PIXEL_SIZE,
+            center,
+            PIXEL_GHOST_SIZE,
+            ghostColorMat,
+            PIXEL_GHOST_DEPTH_JITTER,
+          ),
+        );
+        return;
+      }
+
+      const samples = sampleOpaquePixelPositions(texture, PIXEL_GHOST_SAMPLE_COUNT);
+      if (samples.length === 0) return;
+      let sampleIdx = 0;
+      group.add(
+        this._buildPixelPoints(samples.length, PIXEL_GHOST_PIXEL_SIZE, ghostMat, () => {
+          const s = samples[sampleIdx++];
+          return [
+            center[0] + s.x * PIXEL_GHOST_SIZE,
+            center[1] + s.y * PIXEL_GHOST_SIZE,
+            center[2] + (Math.random() * 2 - 1) * PIXEL_GHOST_DEPTH_JITTER,
+          ];
+        }),
+      );
+    });
+
     return group;
+  }
+
+  // Builds one rock photo's own PlaneGeometry: sized to `size` tall by
+  // `rect.aspect` wide (so a rock's own photographed proportions are kept,
+  // not stretched into a square), UV-remapped from the plane's default
+  // [0,1]x[0,1] range into that rock's own detected sub-rect, and given a
+  // random in-plane roll around local Z baked directly into the vertex
+  // positions — _updateBillboards only ever sets a mesh's quaternion to
+  // face the camera (see its own comment on that), so any extra "which way
+  // is up" variety has to live in the geometry itself to survive that.
+  private _buildRockPlaneGeometry(rect: SpriteRect, size: number): PlaneGeometry {
+    const geo = new PlaneGeometry(size * rect.aspect, size);
+
+    const uv = geo.getAttribute('uv') as BufferAttribute;
+    for (let i = 0; i < uv.count; i++) {
+      const u = uv.getX(i);
+      const v = uv.getY(i);
+      uv.setXY(i, rect.u0 + u * (rect.u1 - rect.u0), rect.v0 + v * (rect.v1 - rect.v0));
+    }
+    uv.needsUpdate = true;
+
+    this._applyRandomPlaneRoll(geo);
+    return geo;
+  }
+
+  // A random in-plane roll around local Z, baked directly into a
+  // PlaneGeometry's vertex positions rather than left to the mesh's
+  // quaternion — _updateBillboards only ever sets a mesh's quaternion to
+  // face the camera (see its own comment on that), so any extra "which way
+  // is up" variety has to live in the geometry itself to survive that. Used
+  // by anything billboarded from a handful of shared source images (rock
+  // photos, glitter) where every instance rendering with the same
+  // orientation would look mechanically repetitive.
+  private _applyRandomPlaneRoll(geo: PlaneGeometry): void {
+    const roll = Math.random() * Math.PI * 2;
+    const cos = Math.cos(roll);
+    const sin = Math.sin(roll);
+    const pos = geo.getAttribute('position') as BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      pos.setXY(i, x * cos - y * sin, x * sin + y * cos);
+    }
+    pos.needsUpdate = true;
+  }
+
+  // Shared building block for both the rock-photos field variant
+  // (world-space scatter, tracked via _billboardSets for camera-facing —
+  // see _buildRockPhotosField) and its test comet (hand-relative cluster,
+  // tracked via _updateTestComet's own mechanism instead — see
+  // _buildTestCometRockPhotosField). Deliberately does NOT decide how the
+  // resulting meshes get their visibility/facing tracked — those two paths
+  // use genuinely different mechanisms (a test comet's mesh.position is
+  // relative to a moving parent, not the world, so it can't go through
+  // _billboardSets' world-space camera-facing math), so that decision is
+  // left to each caller. One shared MeshBasicMaterial across every
+  // instance regardless of which rock sub-rect it drew — only each
+  // instance's own geometry/UV differs, per the "share plain three.js
+  // types across many owners" convention already used elsewhere in this
+  // file (see _buildTintedInstancedMesh's own family).
+  private _buildSpriteSheetMeshes(
+    textureKey: string,
+    count: number,
+    instanceFn: (i: number) => { size: number; position: [number, number, number] },
+  ): { meshes: Mesh[]; basePos: Vector3[] } {
+    const meshes: Mesh[] = [];
+    const basePos: Vector3[] = [];
+    const texture = AssetManager.getTexture(textureKey);
+    if (!texture) {
+      console.warn(`[ArtTestVfxSystem] texture '${textureKey}' not found — skipping rock photos field.`);
+      return { meshes, basePos };
+    }
+
+    let rects = extractSpriteRects(texture);
+    if (rects.length === 0) {
+      console.warn(
+        `[ArtTestVfxSystem] no opaque sprites detected in '${textureKey}' — using the whole image as one sprite.`,
+      );
+      rects = [{ u0: 0, v0: 0, u1: 1, v1: 1, aspect: 1 }];
+    }
+
+    const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
+    for (let i = 0; i < count; i++) {
+      const rect = rects[Math.floor(Math.random() * rects.length)];
+      const { size, position } = instanceFn(i);
+      const mesh = new Mesh(this._buildRockPlaneGeometry(rect, size), material);
+      mesh.position.set(position[0], position[1], position[2]);
+      meshes.push(mesh);
+      basePos.push(new Vector3(position[0], position[1], position[2]));
+    }
+    return { meshes, basePos };
+  }
+
+  private _buildRockPhotosField(
+    textureKey: string,
+    instanceFn: (i: number) => { size: number; position: [number, number, number] },
+    bobAmplitude: number,
+  ): Group {
+    const { meshes, basePos } = this._buildSpriteSheetMeshes(textureKey, ROCK_PHOTO_COUNT, instanceFn);
+    const group = new Group();
+    for (const mesh of meshes) group.add(mesh);
+    const phase = new Float32Array(meshes.length);
+    for (let i = 0; i < phase.length; i++) phase[i] = Math.random() * Math.PI * 2;
+    this._billboardSets.push({
+      group,
+      meshes,
+      basePos,
+      phase,
+      bobAmplitude,
+      bobFreq: ROCK_PHOTO_BOB_FREQ,
+    });
+    return group;
+  }
+
+  // Variant 16 — rocks.png. Keeps its inner/outer ring size split (see
+  // ringSizeAndPosition) but scaled 10x and moved well past the shared field
+  // volume — huge and distant rather than nearby. No bob, matching
+  // _buildRockPhotosBW's own reasoning: something read as far away
+  // shouldn't visibly bounce like nearby floating dust.
+  private _buildRockPhotos(): Group {
+    return this._buildRockPhotosField(
+      'rocksPhotos',
+      (i) => {
+        const { size } = ringSizeAndPosition(i, ROCK_PHOTO_COUNT, ROCK_PHOTO_SIZE);
+        return {
+          size: size * ROCK_PHOTO_FAR_SIZE_SCALE,
+          position: scatterPointInRing(ROCK_PHOTO_FAR_DISTANCE_MIN, ROCK_PHOTO_FAR_DISTANCE_MAX),
+        };
+      },
+      0,
+    );
+  }
+
+  // Variant 17 — rockBW.png, the black/white sibling image. All huge and
+  // far out at the edge of (and past) the shared field volume, reading as
+  // distant moons rather than nearby photographed pebbles — a deliberately
+  // different composition from rocks.png's own ring split, not the same
+  // treatment scaled up. No bob (bobAmplitude 0) — something read as a
+  // distant moon shouldn't visibly bounce like nearby floating dust.
+  private _buildRockPhotosBW(): Group {
+    return this._buildRockPhotosField(
+      'rocksPhotosBW',
+      () => ({
+        size: ROCK_PHOTO_SIZE * ROCK_PHOTO_MOON_SIZE_SCALE,
+        position: scatterPointInRing(ROCK_PHOTO_MOON_DISTANCE_MIN, ROCK_PHOTO_MOON_DISTANCE_MAX),
+      }),
+      0,
+    );
+  }
+
+  private _buildTestCometRockPhotosField(textureKey: string): TestComet {
+    const { meshes } = this._buildSpriteSheetMeshes(textureKey, TEST_COMET_COUNT, () => {
+      const o = clusterOffset();
+      return { size: ROCK_PHOTO_TEST_COMET_SIZE, position: [o.x, o.y, o.z] };
+    });
+    const group = new Group();
+    for (const mesh of meshes) group.add(mesh);
+    return { group, billboardMeshes: meshes };
+  }
+
+  private _buildTestCometRockPhotos(): TestComet {
+    return this._buildTestCometRockPhotosField('rocksPhotos');
+  }
+
+  private _buildTestCometRockPhotosBW(): TestComet {
+    return this._buildTestCometRockPhotosField('rocksPhotosBW');
+  }
+
+  // Shared building block for the glitter field variant and its test
+  // comet — see GLITTER_KEYS' own comment. Builds `count` textured
+  // billboard planes (own roll baked in), round-robin across whichever
+  // glitter textures actually resolved (so a missing/renamed asset degrades
+  // to "just the other one" instead of throwing). Each instance's own
+  // size/position comes from the caller (see _buildGlitterBillboards' own
+  // ring split vs. the test comet's plain cluster) rather than being
+  // decided in here.
+  private _buildGlitterMeshes(
+    count: number,
+    instanceFn: (i: number) => { size: number; position: [number, number, number] },
+  ): Mesh[] {
+    const materials = GLITTER_KEYS.map((key) => {
+      const texture = AssetManager.getTexture(key);
+      if (!texture) {
+        console.warn(`[ArtTestVfxSystem] texture '${key}' not found — skipping it for glitter billboards.`);
+        return null;
+      }
+      const mat = makeSparkleTexturedMaterial({ texture, blending: AdditiveBlending });
+      this._timeUniformMats.push(mat);
+      return mat;
+    }).filter((m): m is ShaderMaterial => m !== null);
+
+    const meshes: Mesh[] = [];
+    if (materials.length === 0) return meshes;
+
+    for (let i = 0; i < count; i++) {
+      const { size, position } = instanceFn(i);
+      const geo = new PlaneGeometry(size, size);
+      const phaseValue = Math.random() * Math.PI * 2;
+      geo.setAttribute('aPhase', new BufferAttribute(new Float32Array(4).fill(phaseValue), 1));
+      this._applyRandomPlaneRoll(geo);
+      const mesh = new Mesh(geo, materials[i % materials.length]);
+      mesh.position.set(position[0], position[1], position[2]);
+      meshes.push(mesh);
+    }
+    return meshes;
+  }
+
+  // Same "half inner ring at 1/4 size, half outer ring at 4x size" split as
+  // the rock-photos variant (see ringSizeAndPosition) — each instance's own
+  // base size is still randomized within GLITTER_MIN_SIZE/MAX_SIZE first,
+  // same as before, the ring split just scales that random base up/down
+  // depending on which ring it landed in.
+  private _buildGlitterBillboards(): Group {
+    const meshes = this._buildGlitterMeshes(GLITTER_COUNT, (i) => {
+      const baseSize = GLITTER_MIN_SIZE + Math.random() * (GLITTER_MAX_SIZE - GLITTER_MIN_SIZE);
+      return ringSizeAndPosition(i, GLITTER_COUNT, baseSize);
+    });
+    const group = new Group();
+    const basePos: Vector3[] = [];
+    const phase = new Float32Array(meshes.length);
+    for (let i = 0; i < meshes.length; i++) {
+      group.add(meshes[i]);
+      basePos.push(meshes[i].position.clone());
+      phase[i] = Math.random() * Math.PI * 2;
+    }
+    this._billboardSets.push({
+      group,
+      meshes,
+      basePos,
+      phase,
+      bobAmplitude: GLITTER_BOB_AMPLITUDE,
+      bobFreq: GLITTER_BOB_FREQ,
+    });
+    return group;
+  }
+
+  private _buildTestCometGlitterBillboards(): TestComet {
+    const meshes = this._buildGlitterMeshes(GLITTER_TEST_COMET_COUNT, () => {
+      const baseSize = GLITTER_MIN_SIZE + Math.random() * (GLITTER_MAX_SIZE - GLITTER_MIN_SIZE);
+      const o = clusterOffset();
+      return { size: baseSize, position: [o.x, o.y, o.z] };
+    });
+    const group = new Group();
+    for (const mesh of meshes) group.add(mesh);
+    return { group, billboardMeshes: meshes };
   }
 
   // Variant 14 — literally every other variant's build stacked into one
@@ -1537,6 +2038,9 @@ export class ArtTestVfxSystem extends createSystem({
       () => this._buildStardustOrganicStars(),
       () => this._buildStardustNebulaTones(),
       () => this._buildPixelCrtGlow(),
+      () => this._buildRockPhotos(),
+      () => this._buildRockPhotosBW(),
+      () => this._buildGlitterBillboards(),
     ];
     for (const build of builders) group.add(build());
     return group;
@@ -1597,7 +2101,7 @@ export class ArtTestVfxSystem extends createSystem({
       scale.setScalar(PEBBLE_RADIUS * (0.85 + Math.random() * 0.3));
       mat4.compose(o, quat, scale);
       mesh.setMatrixAt(i, mat4);
-      const [r, g, b] = PEBBLE_TYPES[i % PEBBLE_TYPES.length].color;
+      const [r, g, b] = PEBBLE_COLORED_PALETTE[Math.floor(Math.random() * PEBBLE_COLORED_PALETTE.length)];
       tintAttr.setXYZ(i, r, g, b);
     }
     mesh.instanceMatrix.needsUpdate = true;
@@ -1626,7 +2130,7 @@ export class ArtTestVfxSystem extends createSystem({
       offsets.push(o);
       axis.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
       quat.setFromAxisAngle(axis, Math.random() * Math.PI * 2);
-      scale.setScalar(PEBBLE_RADIUS * (0.85 + Math.random() * 0.3));
+      scale.setScalar(PEBBLE_RADIUS * (BLACK_HAZE_SIZE_MIN + Math.random() * (BLACK_HAZE_SIZE_MAX - BLACK_HAZE_SIZE_MIN)));
       mat4.compose(o, quat, scale);
       bodyMesh.setMatrixAt(i, mat4);
     }
@@ -1663,7 +2167,6 @@ export class ArtTestVfxSystem extends createSystem({
 
   private _buildTestCometGhostBillboard(): TestComet {
     const n = TEST_COMET_COUNT;
-    const geo = new PlaneGeometry(GHOST_BILLBOARD_SIZE, GHOST_BILLBOARD_SIZE);
     const materials = FABRIC_GHOST_KEYS.map((key) => {
       const mat = makeGhostWiggleMaterial({
         texture: AssetManager.getTexture(key)!,
@@ -1677,7 +2180,7 @@ export class ArtTestVfxSystem extends createSystem({
     const group = new Group();
     const billboardMeshes: Mesh[] = [];
     for (let i = 0; i < n; i++) {
-      const mesh = new Mesh(geo, materials[i % materials.length]);
+      const mesh = new Mesh(this._buildGhostBillboardGeometry(), materials[i % materials.length]);
       mesh.position.copy(clusterOffset());
       group.add(mesh);
       billboardMeshes.push(mesh);
@@ -1812,13 +2315,16 @@ export class ArtTestVfxSystem extends createSystem({
         rimColor: [1, 1, 1],
       });
       mat.uniforms.uDecalTex.value = AssetManager.getTexture(key)!;
+      this._timeUniformMats.push(mat);
       return mat;
     });
     const group = new Group();
     const quat = new Quaternion();
     const axis = new Vector3();
     for (let i = 0; i < n; i++) {
-      const mesh = new Mesh(buildOrganicGeometry(), materials[i % materials.length]);
+      const geo = buildOrganicGeometry();
+      geo.setAttribute('aWigglePhase', new BufferAttribute(new Float32Array(geo.getAttribute('position').count).fill(Math.random()), 1));
+      const mesh = new Mesh(geo, materials[i % materials.length]);
       mesh.position.copy(clusterOffset());
       axis.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
       quat.setFromAxisAngle(axis, Math.random() * Math.PI * 2);
@@ -2047,6 +2553,9 @@ export class ArtTestVfxSystem extends createSystem({
       this._buildTestCometOrganicStars(),
       this._buildTestCometNebulaTones(),
       this._buildTestCometPixelCrtGlow(),
+      this._buildTestCometRockPhotos(),
+      this._buildTestCometRockPhotosBW(),
+      this._buildTestCometGlitterBillboards(),
     ];
     const group = new Group();
     const billboardMeshes: Mesh[] = [];

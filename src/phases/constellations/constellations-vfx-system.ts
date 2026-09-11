@@ -4,6 +4,7 @@ import {
   BufferGeometry,
   createSystem,
   DynamicDrawUsage,
+  Mesh,
   Points,
   ShaderMaterial,
   Vector3,
@@ -15,9 +16,12 @@ import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import {
   ANCHOR_SURFACE_OFFSET,
   placeConstellationAnchorsAroundPlanet,
+  sampleSmoothPath,
 } from '../../vfx/geometry/constellation-path.js';
 import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
+import { buildStreakRibbonGeometry } from '../../vfx/geometry/streak-path.js';
 import { makeSparkleMaterial, makeSparkleMaterialVertexColor } from '../../vfx/shaders/sparkle-material.js';
+import { makeStreakRibbonMaterial } from '../../vfx/shaders/streak-ribbon-material.js';
 import {
   INTERMEDIATE_PLANET_CENTER,
   INTERMEDIATE_PLANET_RADIUS,
@@ -70,6 +74,27 @@ const FIELD_STAR_MIN_RADIUS = 0.3; // leaves room near the anchor for the conste
 const FIELD_STAR_MAX_RADIUS = 1.8;
 const FIELD_STAR_COLOR: [number, number, number] = [0.8, 0.85, 0.95];
 
+// Ambient "shape traced out" line — the same continuous trace/fade/retrace
+// loop as the art-test magic-stardust-sweep variant (makeStreakRibbonMaterial,
+// waitSeconds left at its own default of 0 — no pause between fade and
+// retrace), just with a near-uniform width (RIBBON_WIDTH_PROFILE) instead of
+// that variant's tapered "shooting star" profile, since a constellation's
+// traced outline should read as one consistent line weight rather than
+// thin-to-thick-to-thin along its length.
+const RIBBON_SEGMENTS = 120;
+const RIBBON_WIDTH = 0.035;
+const RIBBON_REVEAL_SECONDS = 2.6;
+const RIBBON_FADE_SECONDS = 1.0;
+const RIBBON_WAIT_SECONDS = 0;
+const RIBBON_LOOP_DURATION = RIBBON_REVEAL_SECONDS + RIBBON_FADE_SECONDS;
+const RIBBON_REVEAL_FRACTION = RIBBON_REVEAL_SECONDS / RIBBON_LOOP_DURATION;
+// Full width through the middle, soft rounded taper only right at the two
+// tips (first/last 6% of the curve) — reads as one consistent traced line
+// rather than art-test's tapered "shooting star" ribbon.
+function ribbonWidthProfile(t: number): number {
+  return 0.25 + 0.75 * Math.min(1, Math.min(t, 1 - t) / 0.06);
+}
+
 // TwinkleSynth's playCatch() scales pitch/brightness off a "speed" it
 // normally reads from the comet's swing — there's no equivalent concept for
 // touching a star, so every touch just gets a fixed mid-range value for a
@@ -116,6 +141,18 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   // Reset to false each time Constellations begins (see _onPhaseChange),
   // flips true once update() sees Leg A (the spin+recede transition) finish.
   private _revealed = false;
+
+  // Ambient "shape traced out" ribbon — one shared material (color/timing
+  // are the same for every constellation, and only one is ever visible at a
+  // time, so no per-instance phase offset is needed the way art-test's own
+  // multi-curve variant needed one). Geometry is built once per [type][slot]
+  // in the SAME anchor-local offset space as the stars, then each frame only
+  // the active slot's Mesh.position is updated to the live anchor — much
+  // simpler than the stars' own per-vertex live-offset scheme, since this is
+  // one rigid Mesh rather than a Points cloud representing many independent
+  // things.
+  private _ribbonMat!: ShaderMaterial;
+  private _ribbonMeshes: Mesh[][] = [];
 
   // All indexed [type][slot].
   private _starPoints: Points[][] = [];
@@ -180,6 +217,12 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     this._scratchLiveCenter = new Vector3();
 
     this._starMat = makeSparkleMaterialVertexColor({ pointSizeFactor: 260 });
+    this._ribbonMat = makeStreakRibbonMaterial({
+      color: UNTOUCHED_STAR_COLOR,
+      loopDurationSeconds: RIBBON_LOOP_DURATION,
+      revealFraction: RIBBON_REVEAL_FRACTION,
+      waitSeconds: RIBBON_WAIT_SECONDS,
+    });
 
     for (let type = 0; type < N_TYPES; type++) {
       const defs = this._constellations.getDefs(type);
@@ -194,6 +237,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       const flashPhaseRow: Float32Array[] = [];
       const offsetRow: Float32Array[] = [];
       const wasTracedRow: Uint8Array[] = [];
+      const ribbonRow: Mesh[] = [];
 
       for (let slot = 0; slot < defs.length; slot++) {
         const anchor = bakedAnchors[slot];
@@ -207,8 +251,10 @@ export class ConstellationsVfxSystem extends createSystem({}) {
         colorArrRow.push(built.colorArr);
         colorAttrRow.push(built.colorAttr);
         flashPhaseRow.push(built.flashPhaseArr);
-        offsetRow.push(this._computeOffsets(built.posAttr.array as Float32Array, anchor));
+        const localOffset = this._computeOffsets(built.posAttr.array as Float32Array, anchor);
+        offsetRow.push(localOffset);
         wasTracedRow.push(new Uint8Array(defs[slot].starCount));
+        ribbonRow.push(this._buildRibbon(localOffset));
       }
       this._starPoints.push(pointsRow);
       this._starPosAttrs.push(posAttrRow);
@@ -218,6 +264,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       this._sizeAttrs.push(sizeAttrRow);
       this._colorArrs.push(colorArrRow);
       this._colorAttrs.push(colorAttrRow);
+      this._ribbonMeshes.push(ribbonRow);
       this._flashPhaseArrs.push(flashPhaseRow);
       this._starOffsets.push(offsetRow);
       this._wasTracedArrs.push(wasTracedRow);
@@ -284,8 +331,8 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   }
 
   // world - anchor, per point — a fixed local offset (see
-  // generateConstellationLayout: each point is anchor + a random local
-  // scatter, independent of the planet's own radius) that liveAnchor + this
+  // generateConstellationLayout: each point is anchor + a fixed shape
+  // offset, independent of the planet's own radius) that liveAnchor + this
   // reconstructs every frame.
   private _computeOffsets(positions: Float32Array, anchor: readonly [number, number, number]): Float32Array {
     const offsets = new Float32Array(positions.length);
@@ -295,6 +342,26 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       offsets[i + 2] = positions[i + 2] - anchor[2];
     }
     return offsets;
+  }
+
+  // Builds one ribbon Mesh tracing a smooth curve through localOffset's own
+  // points (the SAME anchor-relative offsets the stars use — see
+  // _computeOffsets) — geometry is built once in this local space and never
+  // touched again; live anchor tracking (see update()) just moves the whole
+  // Mesh's own .position each frame, no per-vertex rewrite needed the way
+  // the stars' Points cloud requires.
+  private _buildRibbon(localOffset: Float32Array): Mesh {
+    const localPoints: Vector3[] = [];
+    for (let i = 0; i < localOffset.length; i += 3) {
+      localPoints.push(new Vector3(localOffset[i], localOffset[i + 1], localOffset[i + 2]));
+    }
+    const curve = sampleSmoothPath(localPoints, RIBBON_SEGMENTS);
+    const geo = buildStreakRibbonGeometry(curve, RIBBON_WIDTH, ribbonWidthProfile);
+    const mesh = new Mesh(geo, this._ribbonMat);
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    this.world.createTransformEntity(mesh);
+    return mesh;
   }
 
   private _buildStars(
@@ -363,7 +430,15 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       this._revealed = false;
     }
     this._applyVisibility(phase);
-    if (phase === Phase.Stardust) this._resetAll();
+    // Also reset on entering Constellations itself, not just Stardust — a
+    // normal full loop already resets via Stardust well before this fires
+    // again, but a debug-menu jump straight to Constellations (skipping
+    // Stardust/Pebbles/Seeding — see phase-menu-system.ts) would otherwise
+    // leave the previous test's star brightness/color/traced-drone state
+    // stale until _updateStarState's per-frame untouched-branch overwrite
+    // quietly self-corrected it — this makes the reset immediate and
+    // explicit instead of relying on that.
+    if (phase === Phase.Stardust || phase === Phase.Constellations) this._resetAll();
   }
 
   private _applyVisibility(phase: Phase): void {
@@ -376,6 +451,11 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       for (let slot = 0; slot < this._starPoints[type].length; slot++) {
         const isActiveSlot = type === dominant && slot === activeSlot;
         this._starPoints[type][slot].visible = isActiveSlot && (active || completed);
+        // Keeps looping (trace/fade/wait/repeat) for as long as the stars
+        // themselves stay visible, including after completion — a completed
+        // constellation persists as permanent sky scenery, and the ambient
+        // trace is a nice ongoing touch rather than something gameplay-gated.
+        this._ribbonMeshes[type][slot].visible = isActiveSlot && (active || completed);
       }
     }
     this._fieldStarPoints.visible = active || completed;
@@ -404,6 +484,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   update(delta: number, time: number): void {
     this._starMat.uniforms.uTime.value = time;
     this._fieldStarMat.uniforms.uTime.value = time;
+    this._ribbonMat.uniforms.uTime.value = time;
 
     const phase = getGlobals(this.world).gamePhase.peek();
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
@@ -411,6 +492,11 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     this._updateLiveAnchor(activeSlot);
     this._applyLiveOffsets(this._starOffsets[dominant][activeSlot], this._starPosAttrs[dominant][activeSlot], this._liveAnchor[activeSlot]);
     this._applyLiveOffsets(this._fieldStarOffsets, this._fieldStarPosAttr, this._liveAnchor[activeSlot]);
+    // Only the active slot's ribbon is ever visible (see _applyVisibility) —
+    // its geometry is fixed local-space, so tracking the live anchor is just
+    // moving the whole Mesh, not rewriting per-vertex positions like the
+    // stars/field stars above.
+    this._ribbonMeshes[dominant][activeSlot].position.copy(this._liveAnchor[activeSlot]);
 
     const activePositions = this._starPosAttrs[dominant][activeSlot].array as Float32Array;
     const def = this._constellations.getDefs(dominant)[activeSlot];

@@ -81,6 +81,7 @@ type QueueEntry = {
   holdSeconds: number;
   delaySeconds: number;
   lineColors?: (readonly [number, number, number] | null)[];
+  onComplete?: () => void;
 };
 
 enum FadeState {
@@ -117,6 +118,10 @@ export class NotificationHudSystem extends createSystem({
   // Held during FadeState.Delay — the message waiting out its silent gap
   // before _beginShow() actually puts it on screen.
   private _pending: QueueEntry | null = null;
+  // The entry currently on screen (In/Hold/Out) — held so its onComplete can
+  // fire once it actually finishes fading out, rather than the instant it
+  // was queued (see onComplete's own comment on notify()).
+  private _current: QueueEntry | null = null;
   private _bootTriggered = false;
 
   init(): void {
@@ -208,14 +213,20 @@ export class NotificationHudSystem extends createSystem({
   // NotificationCopy's own comment; 0 (the default) behaves exactly as
   // before, fading in the instant the previous message finishes fading out.
   // lineColors — see NotificationCopy's own comment — is index-matched
-  // against text.split('\n'); omit for the default all-white text.
+  // against text.split('\n'); omit for the default all-white text. onComplete
+  // fires the instant THIS message finishes its own fade-out — the only
+  // reliable way for a caller to gate on "has this actually been shown yet",
+  // since an estimated duration computed at queue-time (e.g. a hand-rolled
+  // notifyDuration() helper) has no way to know how much unrelated content
+  // was already ahead of it in the queue.
   notify(
     text: string,
     holdSeconds: number,
     delaySeconds = 0,
     lineColors?: (readonly [number, number, number] | null)[],
+    onComplete?: () => void,
   ): void {
-    this._queue.push({ text, holdSeconds, delaySeconds, lineColors });
+    this._queue.push({ text, holdSeconds, delaySeconds, lineColors, onComplete });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -232,8 +243,9 @@ export class NotificationHudSystem extends createSystem({
     holdSeconds: number,
     delaySeconds = 0,
     lineColors?: (readonly [number, number, number] | null)[],
+    onComplete?: () => void,
   ): void {
-    this._queue.unshift({ text, holdSeconds, delaySeconds, lineColors });
+    this._queue.unshift({ text, holdSeconds, delaySeconds, lineColors, onComplete });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -272,6 +284,7 @@ export class NotificationHudSystem extends createSystem({
       }
     }
     this._holdSeconds = next.holdSeconds;
+    this._current = next;
     this._state = FadeState.In;
     this._elapsed = 0;
     this._setBoxVisible(true, 0);
@@ -326,7 +339,14 @@ export class NotificationHudSystem extends createSystem({
         this._setBoxVisible(false, 0);
         this._active = false;
         this._state = FadeState.Idle;
-        this._pump();
+        const finished = this._current;
+        this._current = null;
+        finished?.onComplete?.();
+        // onComplete may itself have called notify()/notifyNext() (state is
+        // Idle right now, so that call already self-pumped) — only pump here
+        // if nothing did, otherwise this would double-pump and clobber
+        // whatever onComplete's own notify() just started showing.
+        if (this._state === FadeState.Idle) this._pump();
       }
     }
   }

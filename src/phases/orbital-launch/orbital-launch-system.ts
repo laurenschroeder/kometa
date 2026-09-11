@@ -3,12 +3,12 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import {
   LAUNCH_BUILDUP_SEQUENCE,
-  NOTIFICATION_COPY,
-  ORBIT_COMMIT_MESSAGE,
-  UNKNOWN_COMMIT_MESSAGE,
+  launchIntroMessage,
+  orbitCommitMessage,
+  unknownCommitMessage,
 } from '../../core/notification-copy.js';
+import { getGlobals } from '../../core/globals.js';
 import { FADE_SECONDS, NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { Phase } from '../../core/phase.js';
 import { OrbitalLaunchSynth } from '../../vfx/audio/orbital-launch-synth.js';
 import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from '../planet-seeding/planet-seeding-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
@@ -190,11 +190,15 @@ export class OrbitalLaunchSystem extends createSystem({
     this._placeZones();
 
     // The choice zones stay hidden (see isReadyToChoose(), read by
-    // OrbitalLaunchVfxSystem) until this phase's own "you can choose to
-    // orbit or fling yourself into space" blurb has finished its on-screen
-    // time — otherwise a player already standing at a zone could commit
-    // before they've even been told what these spheres are for.
-    const launchBlurb = NOTIFICATION_COPY[Phase.Launch][0];
+    // OrbitalLaunchVfxSystem) until this phase's own opening blurb has
+    // finished its on-screen time — otherwise a player already standing at
+    // a zone could commit before they've even been told what these spheres
+    // are for. Fired directly here (not via NOTIFICATION_COPY[Phase.Launch],
+    // which is empty) since the line itself is now per-type — see
+    // launchIntroMessage's own comment.
+    const dominantType = getGlobals(this.world).dominantPebbleType.peek();
+    const launchBlurb = launchIntroMessage(dominantType);
+    this.world.getSystem(NotificationHudSystem)?.notify(launchBlurb.text, launchBlurb.holdSeconds);
     this._zonesReadyAtSeconds = notifyDuration(launchBlurb.holdSeconds);
 
     // Leg C: the planet recedes/shrinks away to exactly where the orbit
@@ -345,7 +349,9 @@ export class OrbitalLaunchSystem extends createSystem({
     // the commit chord takes over.
     this._synth.stopCharge();
     const notifications = this.world.getSystem(NotificationHudSystem);
-    const { text, holdSeconds } = choice === 'orbit' ? ORBIT_COMMIT_MESSAGE : UNKNOWN_COMMIT_MESSAGE;
+    const dominantType = getGlobals(this.world).dominantPebbleType.peek();
+    const { text, holdSeconds } =
+      choice === 'orbit' ? orbitCommitMessage(dominantType) : unknownCommitMessage(dominantType);
     notifications?.notify(text, holdSeconds);
     // _scratchPos was just set to the comet's current position by update()'s
     // own per-entity loop, right before this was called.

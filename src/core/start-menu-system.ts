@@ -1,13 +1,16 @@
 import {
   createSystem,
   Entity,
+  Euler,
   Follower,
   FollowBehavior,
   Object3D,
   PanelDocument,
   PanelUI,
+  Quaternion,
   RayInteractable,
   UIKit,
+  Vector3,
 } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { ACHIEVEMENTS } from './achievement-list.js';
@@ -61,6 +64,10 @@ export class StartMenuSystem extends createSystem({
   private _pinchHoldSeconds = 0;
   private _startTriggered = false;
 
+  private _scratchQuat = new Quaternion();
+  private _scratchEuler = new Euler();
+  private _scratchCamPos = new Vector3();
+
   init(): void {
     // GameDirectorSystem must be registered before this system (see
     // index.ts) so it already exists when this init() runs.
@@ -98,6 +105,7 @@ export class StartMenuSystem extends createSystem({
 
         this._startHintEl = doc.getElementById('start-hint');
         this._startAction = () => {
+          this._recenterToHead();
           this._director.start();
           getGlobals(this.world).gameStarted.value = true;
           this._panelObject.visible = false;
@@ -160,6 +168,33 @@ export class StartMenuSystem extends createSystem({
     } else {
       this._pinchHoldSeconds = 0;
     }
+  }
+
+  // Fired once, the instant Start is triggered, before GameDirectorSystem's
+  // own director.start() ever runs (so every hardcoded scene position — the
+  // Seeding planet, Fate Events' PLANET_CENTER, the swirl's "in front of
+  // you" spawn, etc. — is built assuming a player facing -Z at the origin)
+  // lines up with wherever the player is actually standing/facing right
+  // now, rather than wherever they happened to be in their physical room
+  // when the page loaded. Not a native WebXR reference-space reset — just
+  // re-anchors world.player (the XR origin every other transform in this
+  // game is ultimately relative to) so the camera's CURRENT world position/
+  // yaw becomes the new logical origin/forward. Works identically in
+  // NonImmersive browser mode too (harmless there — just re-zeroes
+  // whatever render.camera's initial framing left it at).
+  private _recenterToHead(): void {
+    const player = this.player;
+    const camera = this.camera;
+
+    camera.getWorldQuaternion(this._scratchQuat);
+    this._scratchEuler.setFromQuaternion(this._scratchQuat, 'YXZ');
+    player.rotation.y -= this._scratchEuler.y;
+    player.updateMatrixWorld(true);
+
+    camera.getWorldPosition(this._scratchCamPos);
+    player.position.x -= this._scratchCamPos.x;
+    player.position.z -= this._scratchCamPos.z;
+    player.updateMatrixWorld(true);
   }
 
   private _registerButton(

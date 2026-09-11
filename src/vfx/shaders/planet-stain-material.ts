@@ -27,13 +27,23 @@ const OUTLINE_GLSL = `
 // landing. PlanetSeedingSystem's own win condition is "half of these cells
 // have been colored" (see its COVERAGE_WIN_FRACTION).
 export const MAX_SPLATS = 40;
-// Dot-product threshold a fully-grown splat reaches — 0.93 ≈ a ~21.6°
-// angular cap, a local patch on the planet's small (~0.11m) radius rather
-// than something that could cover the whole sphere on its own; many
-// overlapping splats from wandering near the planet are what eventually
-// give it broad coverage.
-const MAX_SPLAT_DOT = 0.93;
-const SPLAT_GROW_SECONDS = 0.5;
+// Splats now grow in TWO stages rather than one: during Seeding, a landing
+// only ever grows to SEED_SPLAT_DOT (tiny — a ~8.6° cap, just enough to read
+// as "something landed here"), so the planet fills in with a scatter of
+// small dots rather than looking done already. Only once Leg A (the spin+
+// recede transition into Constellations — see PlanetSpinTransition) starts
+// does the whole surface bloom from those tiny dots up to FINAL_SPLAT_DOT's
+// full ~21.6° patches — see uFinalGrowT below, driven every frame from
+// PlanetSpinTransition.getProgress() (0 before Leg A, ramping to 1 across
+// it, then holding at 1 forever). Local patches on the planet's small
+// (~0.11m) radius either way — many overlapping splats from wandering near
+// the planet are what eventually give it broad coverage.
+const SEED_SPLAT_DOT = 0.988;
+const FINAL_SPLAT_DOT = 0.93;
+// Bumped from 0.5 — with each cell now only ever growing in once (see
+// planet-seeding-vfx-system.ts's _addSplat), a slower, more visible grow-in
+// reads as real progress forming rather than a near-instant pop.
+const SPLAT_GROW_SECONDS = 0.9;
 const SPLAT_SOFTNESS = 0.05;
 
 // Each landing (see PlanetSeedingVfxSystem._addSplat) drops a small colored
@@ -62,6 +72,7 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
 
   const fragmentShader = `
     uniform float uTime;
+    uniform float uFinalGrowT;
     uniform vec3  uSplatCenter[${MAX_SPLATS}];
     uniform vec3  uSplatColor[${MAX_SPLATS}];
     uniform float uSplatBirth[${MAX_SPLATS}];
@@ -83,7 +94,8 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
         if (uSplatBirth[i] < 0.0) continue;
         float age    = max(0.0, uTime - uSplatBirth[i]);
         float growT  = clamp(age / ${SPLAT_GROW_SECONDS.toFixed(4)}, 0.0, 1.0);
-        float threshold = mix(1.0, ${MAX_SPLAT_DOT.toFixed(4)}, growT);
+        float stageDot = mix(${SEED_SPLAT_DOT.toFixed(4)}, ${FINAL_SPLAT_DOT.toFixed(4)}, uFinalGrowT);
+        float threshold = mix(1.0, stageDot, growT);
         float d = dot(localDir, uSplatCenter[i]);
         float splatEdge = smoothstep(threshold - ${SPLAT_SOFTNESS.toFixed(4)}, threshold + ${SPLAT_SOFTNESS.toFixed(4)}, d);
         bodyCol = mix(bodyCol, uSplatColor[i], splatEdge);
@@ -101,6 +113,7 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
   return new ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
+      uFinalGrowT: { value: 0 },
       uSplatCenter: { value: splatCenters },
       uSplatColor: { value: splatColors },
       uSplatBirth: { value: splatBirths },

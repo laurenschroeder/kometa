@@ -39,14 +39,11 @@ export interface GatherableFieldParams {
   spawnCenter: [number, number, number];
   spawnRadiusMin: number;
   spawnRadiusMax: number;
-  // The comet "notices" a particle within this radius; attraction strength
-  // then scales by how slow it's moving, rewarding gentle, deliberate
-  // gestures over fast grabbing.
+  // The comet "notices" a particle within this radius and pulls it in at
+  // full strength regardless of hand speed — no penalty for swinging fast.
   attractRadius: number;
   captureDistance: number;
-  slowSpeed: number; // m/s — at or below this, full attraction strength
-  fastSpeed: number; // m/s — at or above this, ~no attraction
-  attractRate: number; // 1/s exponential approach rate at full strength
+  attractRate: number; // 1/s exponential approach rate
   // Distribution for a newly captured particle riding the comet's trail (see
   // vfx/particles/trail-sampler.ts) — how "far back" and spread out it lands.
   capturedAgeDecay: number;
@@ -217,11 +214,10 @@ export class GatherableField {
       p.onAttractStart?.(i, this.positions[i * 3], this.positions[i * 3 + 1], this.positions[i * 3 + 2], hand.speed);
     }
     this.states[i] = GatherState.Attracting;
-    // Slower comet movement = stronger pull — rewards gentle, deliberate
-    // gestures over fast grabbing. (Type is no longer derived from this —
-    // see assignedType/params.spawnPoint above.)
-    const slowness = 1.0 - smoothstep(p.slowSpeed, p.fastSpeed, hand.speed);
-    const pull = 1.0 - Math.exp(-p.attractRate * slowness * delta);
+    // Full-strength pull regardless of hand speed — fast swinging no longer
+    // penalized (used to scale down via a hand-speed "slowness" factor,
+    // which made gathering feel stuck in place unless you moved gently).
+    const pull = 1.0 - Math.exp(-p.attractRate * delta);
     const oldX = this._scratchPos.x;
     const oldY = this._scratchPos.y;
     const oldZ = this._scratchPos.z;
@@ -300,9 +296,4 @@ export class GatherableField {
     const pos = this.captured.indexOf(particleIndex);
     if (pos !== -1) this.captured.splice(pos, 1);
   }
-}
-
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
-  return t * t * (3 - 2 * t);
 }

@@ -1,4 +1,4 @@
-import { BoxGeometry, CylinderGeometry, Group, Mesh, ShaderMaterial, SphereGeometry } from '@iwsdk/core';
+import { BoxGeometry, BufferGeometry, CylinderGeometry, Group, Mesh, ShaderMaterial, SphereGeometry } from '@iwsdk/core';
 
 // 2.2x the original size — at 0.6-1.4m viewing distance against a 1.4m
 // planet, the original 9cm figures (with 5-7mm limbs) were only legible up
@@ -64,6 +64,56 @@ export function buildPlaceholderPerson(material: ShaderMaterial): PlaceholderPer
   const head = new Mesh(new SphereGeometry(HEAD_RADIUS, 8, 6), material);
   head.position.set(0, headY, 0);
   group.add(head);
+
+  return { group, rightArm };
+}
+
+// Where the invisible arm pivot (see buildIslandPerson) sits, as a fraction
+// of bodyRadius — roughly shoulder height/width on the source figure.
+const ARM_PIVOT_SPACING_FACTOR = 0.85;
+const ARM_PIVOT_HEIGHT_FACTOR = 1.0;
+
+// "Person made from one real OBJ mesh island" — same PlaceholderPerson shape
+// (group origin at the feet, a `rightArm` Mesh exposed for the existing
+// wave/point-up/war-pose animations) but standing in for
+// buildPlaceholderPerson's primitive shapes with one real sculpted mesh
+// fragment (see loadObjLargestIslands) — no second island glued on as a
+// fake limb; each figure is just the one recognizable shape. `rightArm`
+// still exists as a real Mesh (existing animation code rotates it) but is
+// zero-scale and invisible — a pure pivot, not a rendered body part.
+// Geometry is NOT mutated (no setAttribute calls — just this Mesh's own
+// position/scale/rotation), so, unlike ArtTestVfxSystem's InstancedMesh
+// consumers of the same cached islands, callers do NOT need to .clone()
+// before use here — multiple people can safely share the same island
+// BufferGeometry instance. Each island's own local origin is already
+// re-centered to its geometric center (see extractMeshIslands), so
+// `bodyRadius` (the island's own boundingSphere.radius) is enough to both
+// auto-scale AND rest it exactly on the ground (position.y = the scaled
+// radius).
+export function buildIslandPerson(material: ShaderMaterial, bodyGeo: BufferGeometry, bodyRadius: number): PlaceholderPerson {
+  const group = new Group();
+
+  const bodyIslandRadius =
+    bodyGeo.boundingSphere && bodyGeo.boundingSphere.radius > 1e-6 ? bodyGeo.boundingSphere.radius : 1;
+  const body = new Mesh(bodyGeo, material);
+  body.scale.setScalar(bodyRadius / bodyIslandRadius);
+  body.position.set(0, bodyRadius, 0);
+  // Random facing per figure — no authored/inspectable way to hand-pick a
+  // "desired rotation" for these (see loadObjLargestIslands' own comment:
+  // they're procedurally split out of one combined sculpt, not individually
+  // authored/tagged assets a tool like Spatial Editor could list), so this
+  // is a guess/randomize by design rather than an oversight.
+  body.rotation.y = Math.random() * Math.PI * 2;
+  group.add(body);
+
+  // Invisible pivot — shares the body's own geometry (avoids allocating a
+  // throwaway one per figure) but renders nothing, so existing rotation-only
+  // pose animations keep working without adding a visible second shape.
+  const rightArm = new Mesh(bodyGeo, material);
+  rightArm.visible = false;
+  rightArm.scale.setScalar(0);
+  rightArm.position.set(bodyRadius * ARM_PIVOT_SPACING_FACTOR, bodyRadius * ARM_PIVOT_HEIGHT_FACTOR, 0);
+  group.add(rightArm);
 
   return { group, rightArm };
 }

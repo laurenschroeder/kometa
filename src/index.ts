@@ -54,6 +54,10 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     fabricGhost3: { url: '/textures/fabricghosts3.png', type: AssetType.Texture },
     fabricGhost4: { url: '/textures/fabricghosts4.png', type: AssetType.Texture },
     starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture },
+    rocksPhotos: { url: '/textures/rocks.png', type: AssetType.Texture },
+    rocksPhotosBW: { url: '/textures/rockBW.png', type: AssetType.Texture },
+    glitter1: { url: '/textures/glitter.png', type: AssetType.Texture },
+    glitter2: { url: '/textures/glitter2.png', type: AssetType.Texture },
     dustLand: { url: '/audio/dust-land.wav', type: AssetType.Audio },
     backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
   },
@@ -194,7 +198,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(StardustVfxSystem, { priority: 32 });
   director.definePhase(Phase.Stardust, {
     systems: [world.getSystem(StardustSystem)!],
-    timeoutSeconds: 90,
+    // Bumped from 90 — StardustSystem's own two-stage swirl finale (Stage A
+    // up to 60s, Stage B up to +30s more) plus the win-sequence notification
+    // playback (~13s) can now total more than the old timeout on a slow/idle
+    // player; this stays purely a safety net for someone who never engages
+    // at all.
+    timeoutSeconds: 150,
   });
 
   world
@@ -220,7 +229,11 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
   director.definePhase(Phase.Seeding, {
     systems: [world.getSystem(PlanetSeedingSystem)!],
-    timeoutSeconds: 90,
+    // Bumped from 90 — PlanetSeedingSystem's own COVERAGE_WIN_FRACTION and
+    // fall-cooldown pacing were both slowed down (see their own comments) so
+    // the phase reads as a gradual reveal rather than finishing almost
+    // instantly; this safety net needed matching headroom.
+    timeoutSeconds: 150,
   });
 
   // ConstellationsVfxSystem is registered but, like StardustVfxSystem/
@@ -255,10 +268,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(FateEventVfxSystem, { priority: 32 });
   director.definePhase(Phase.FateEvents, {
     systems: [world.getSystem(FateEventSystem)!],
-    // Safety net for a player who doesn't visit everyone (see
-    // FateEventSystem's VISIT_FRACTION_TO_COMPLETE) — no minimum-duration
-    // floor anymore, so visiting everyone quickly moves on immediately.
-    timeoutSeconds: 65,
+    // Bumped from 65 — the phase is now a fixed 5-beat sequence (Zoom 6s +
+    // Ambient 10s + Explain ~5.3s + Collect, gameplay-paced + Payoff's own
+    // ~7s hold before phaseComplete — see fate-event-system.ts's FateBeat)
+    // rather than a single unscripted "visit everyone" loop; worst-case
+    // Collect time alone could exceed the old timeout. Still purely a safety
+    // net — a player who moves through the beats quickly advances well
+    // before this fires.
+    timeoutSeconds: 100,
   });
 
   // Per-constellation "situation on Earth" — ambient decorations, the

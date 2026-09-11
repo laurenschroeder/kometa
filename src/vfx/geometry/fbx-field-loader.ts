@@ -16,7 +16,8 @@ import { makeToonRimFlatMaterial } from '../shaders/toon-rim-material.js';
 // references that hasn't actually been dropped in / doesn't contain the
 // expected geometry yet. Module-scope singletons: safe to share across
 // every fallback instance in every field, same "shared decoration, never
-// disposed" convention as pebble-material.ts's kPebbleFieldTintedMat.
+// disposed" convention as pebble-material.ts's kOrganicGlitterMat/
+// kSoulIslandMat/kGasCloudMat.
 // Exported so obj-field-loader.ts reuses the exact same placeholder rather
 // than building its own.
 export const FALLBACK_GEO = buildOrganicGeometry();

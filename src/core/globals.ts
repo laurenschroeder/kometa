@@ -39,7 +39,7 @@ export interface KometaGlobals {
   // relevant if the body becomes visible before Chapter 2 ever completes
   // (e.g. a dev-menu jump straight to Seeding).
   pebbleTypeWeights: Signal<[number, number, number]>;
-  // Set once by EarthSituationsVfxSystem on the Dog/Human constellation's
+  // Set once by EarthSituationsVfxSystem on the Dog constellation's
   // completion edge (see earth-situations-vfx-system.ts) — which of
   // FateEventSystem's people index gets a fixed override line instead of
   // the normal per-type cycling dialogue, and what that line is. Routed
@@ -48,6 +48,16 @@ export interface KometaGlobals {
   // EarthSituationsVfxSystem don't need to import each other.
   pairedPersonIndex: Signal<number | null>;
   pairedPersonLine: Signal<string | null>;
+  // Flips true the instant EarthSituationsVfxSystem's crown-rise mechanic
+  // (see crown-rise.ts) attaches to the comet's head — ConstellationsSystem
+  // polls this instead of a flat hold timer so celestialSymbolMessage/
+  // phaseComplete can't fire until the ~30s crown cinematic has actually
+  // finished. Routed through globals rather than a direct import (same
+  // reasoning as pairedPersonIndex/pairedPersonLine) so constellations-
+  // system.ts stays decoupled from the crown's visual mechanic. Reset to
+  // false in EarthSituationsVfxSystem._resetAll() on a fresh Phase.Stardust
+  // loop.
+  crownLanded: Signal<boolean>;
 }
 
 export function bootstrapGlobals(world: World): KometaGlobals {
@@ -62,6 +72,7 @@ export function bootstrapGlobals(world: World): KometaGlobals {
   globals.pebbleTypeWeights = signal([1 / 3, 1 / 3, 1 / 3]);
   globals.pairedPersonIndex = signal(null);
   globals.pairedPersonLine = signal(null);
+  globals.crownLanded = signal(false);
   return globals;
 }
 
