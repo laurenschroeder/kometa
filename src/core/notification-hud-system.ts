@@ -197,6 +197,33 @@ export class NotificationHudSystem extends createSystem({
     if (this._boxEl) this._setBoxVisible(false, 0);
   }
 
+  // Cancels a message meant to stay up only until some gameplay condition
+  // is met (e.g. Constellations' "why not visit those nearby stars" blurb,
+  // dismissed the instant the player actually touches one) — regardless of
+  // where it currently sits in the pipeline. Currently ON SCREEN (In or
+  // Hold): skips straight to fade-out rather than vanishing instantly, so
+  // it doesn't read as a glitch. Still waiting out its own delaySeconds
+  // (Delay/_pending): drops it and re-pumps, so whatever's next isn't stuck
+  // waiting on a delay that no longer matters. Still further back in
+  // _queue, never yet shown: just removed outright. Matches by exact
+  // text — fine for the one-off "hold until X" messages this exists for,
+  // which each use their own unique copy.
+  dismissByText(text: string): void {
+    if (this._current?.text === text && (this._state === FadeState.In || this._state === FadeState.Hold)) {
+      this._state = FadeState.Out;
+      this._elapsed = 0;
+      return;
+    }
+    if (this._pending?.text === text) {
+      this._pending = null;
+      this._active = false;
+      this._state = FadeState.Idle;
+      this._pump();
+      return;
+    }
+    this._queue = this._queue.filter((entry) => entry.text !== text);
+  }
+
   // Called by EndRunMenuSystem's "Main Menu" choice, alongside
   // GameDirectorSystem.returnToMenu() — without this, _maybeTriggerBoot's
   // guard (meant to stop the very first boot's blurb from double-firing)

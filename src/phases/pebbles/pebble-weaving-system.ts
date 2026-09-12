@@ -6,12 +6,7 @@ import { getGlobals } from '../../core/globals.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { pebbleCompletionMessage } from '../../core/notification-copy.js';
 import { samplePebbleSizes } from '../../vfx/particles/pebble-size.js';
-import {
-  assignPebbleSpawnPoint,
-  getPebbleSpawnCenter,
-  PEBBLE_SPAWN_RADIUS_MAX,
-  PEBBLE_SPAWN_RADIUS_MIN,
-} from './pebble-layout.js';
+import { assignPebbleSpawnPoint } from './pebble-layout.js';
 import { PEBBLE_TYPES } from './pebble-type.js';
 
 // Bumped from 150 — puts meaningfully more pebbles across the layout
@@ -97,14 +92,12 @@ export class PebbleWeavingSystem extends createSystem({
   init(): void {
     this._field = new GatherableField({
       count: N_PEBBLES_FIELD,
-      spawnCenter: getPebbleSpawnCenter(),
-      spawnRadiusMin: PEBBLE_SPAWN_RADIUS_MIN,
-      spawnRadiusMax: PEBBLE_SPAWN_RADIUS_MAX,
-      // Lowered from 0.4 — that let a hand just swinging near a vein
-      // (see pebble-layout.ts) auto-vacuum whatever was nearby regardless
-      // of type, which is exactly the "run into the others" friction this
-      // vein layout is meant to reduce; tighter now asks for the hand to
-      // actually be on the strand you're following.
+      spawnCenter: [0, 1.2, 0],
+      spawnRadiusMin: 0.5,
+      spawnRadiusMax: 1.8,
+      // Lowered from 0.4 — that let a hand just passing near a group
+      // auto-vacuum whatever was nearby regardless of type, more than the
+      // "get close to the type you want" feel this phase is going for.
       attractRadius: 0.22,
       captureDistance: 0.05,
       attractRate: 3.0,

@@ -386,14 +386,15 @@ export class PlanetSeedingVfxSystem extends createSystem({
   }
 
   // Called by ConstellationsSystem.play() — kicks off Leg A (the spin +
-  // recede into the intermediate Constellations waypoint). Seeding's own
-  // class-flourish decorations (atmosphere glow, grown-in sprouts) are
-  // hidden here rather than carried along — see PlanetGrowthPool's own
-  // comment on hidePlanet() for why — since this is the moment Seeding's
-  // visual identity starts transforming away.
+  // recede into the intermediate Constellations waypoint). The atmosphere
+  // glow is hidden here (Seeding-only flourish, doesn't fit the reveal from
+  // here on) but the grown-in sprouts are deliberately NOT hidden — they're
+  // parented under this same planet entity (see PlanetGrowthPool.build())
+  // and meant to persist and keep growing (see its own GROWTH_FINAL_SCALE)
+  // as permanent scenery straight through Constellations/Fate Events/
+  // Launch, riding along with every leg exactly like the moons/splats do.
   startSpinTransition(): void {
     this._atmosphereMesh.visible = false;
-    this._growthPool.hidePlanet(0);
     // Leg A must pick up from wherever the player actually left the planet
     // floating (see planet-seeding-system.ts's head-following), not the
     // stale spawn-point _spinTransition was built() with — see
@@ -488,7 +489,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._launchQueued();
     this._advanceFlights(delta);
     this._easeCoverage(delta, time);
-    this._growthPool.update(delta);
+    this._growthPool.update(delta, this._spinTransition.getProgress());
     this._updatePlanetTransitions(delta);
   }
 
@@ -741,16 +742,14 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._addSplat(cellIndex, dirX, dirY, dirZ, color);
     AudioUtils.play(this._planetEntity);
 
-    // Class-specific flourish — green triggers once per landing; red is
+    // Growth pool now triggers on every landing regardless of dominant
+    // type — see its own class comment. Red's atmosphere flourish is
     // purely coverage-driven (see _easeCoverage), since coverage was just
     // incremented above regardless of class. Souls no longer get a landing
     // flourish here — the heart-burst pool read as literal white hearts
     // raining onto the planet, which didn't fit the gentler "already with
     // you" reframing the Dog constellation got (see soul-pack-flight.ts).
-    const dominant = getGlobals(this.world).dominantPebbleType.peek();
-    if (dominant === 1) {
-      this._growthPool.trySpawn(0, dirX, dirY, dirZ);
-    }
+    this._growthPool.trySpawn(0);
   }
 
   private _easeCoverage(delta: number, time: number): void {

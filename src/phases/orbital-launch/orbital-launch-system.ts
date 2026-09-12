@@ -2,6 +2,7 @@ import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import {
+  FINAL_CHOICE_MESSAGE,
   LAUNCH_BUILDUP_SEQUENCE,
   launchIntroMessage,
   orbitCommitMessage,
@@ -198,8 +199,14 @@ export class OrbitalLaunchSystem extends createSystem({
     // launchIntroMessage's own comment.
     const dominantType = getGlobals(this.world).dominantPebbleType.peek();
     const launchBlurb = launchIntroMessage(dominantType);
-    this.world.getSystem(NotificationHudSystem)?.notify(launchBlurb.text, launchBlurb.holdSeconds);
-    this._zonesReadyAtSeconds = notifyDuration(launchBlurb.holdSeconds);
+    const notifications = this.world.getSystem(NotificationHudSystem);
+    // A short, generic heads-up plays first (queued via plain notify(), so
+    // it plays strictly before the per-type line below), then the actual
+    // per-type explanation — zones wait for BOTH to finish their on-screen
+    // time, not just the second one.
+    notifications?.notify(FINAL_CHOICE_MESSAGE.text, FINAL_CHOICE_MESSAGE.holdSeconds);
+    notifications?.notify(launchBlurb.text, launchBlurb.holdSeconds);
+    this._zonesReadyAtSeconds = notifyDuration(FINAL_CHOICE_MESSAGE.holdSeconds) + notifyDuration(launchBlurb.holdSeconds);
 
     // Leg C: the planet recedes/shrinks away to exactly where the orbit
     // choice zone was just placed (see ORBIT_DIR's own comment) — fired

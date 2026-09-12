@@ -47,14 +47,20 @@ interface StarCloud {
 // Distant, always-present background starfield — visible from world boot
 // (the start menu's sky is already pure black, see index.ts's DomeGradient
 // zeroing) straight through every phase, never GameDirector-managed. Two
-// point clouds share one big spherical shell around world origin (the player
-// rig never moves — no system in this codebase ever touches
-// world.player.position — so a fixed world-space cloud needs no per-frame
-// recentering): a BASE layer that's always fully visible, and a denser FILL
-// layer that eases in during Phase.Constellations (see FILL_EASE_RATE) so
-// the sky visibly "fills in" around the player for that phase, easing back
-// out once it ends. Both reuse makeSparkleMaterialVertexColor so per-star
-// color can vary across a cool-to-warm white range instead of one flat hue.
+// point clouds share one big spherical shell, re-centered on world.player
+// every frame (see update()) rather than built once and left fixed in world
+// space — StartMenuSystem's _recenterToHead() (fired both on Start and on
+// every native WebXR reference-space 'reset', i.e. a system-level recenter)
+// moves world.player around, and a shell that DIDN'T track it would appear
+// to shift the opposite way relative to the viewer every time that fires —
+// exactly the "starfield jumped a few feet" bug this fixes. Following the
+// player's position (not rotation — the shell is symmetric, so spin doesn't
+// matter) is a single Vector3 copy per cloud, cheap regardless of star
+// count. A BASE layer that's always fully visible, and a denser FILL layer
+// that eases in during Phase.Constellations (see FILL_EASE_RATE) so the sky
+// visibly "fills in" around the player for that phase, easing back out once
+// it ends. Both reuse makeSparkleMaterialVertexColor so per-star color can
+// vary across a cool-to-warm white range instead of one flat hue.
 export class StarfieldSystem extends createSystem({}) {
   private _material!: ShaderMaterial;
   private _base!: StarCloud;
@@ -119,6 +125,11 @@ export class StarfieldSystem extends createSystem({}) {
 
   update(delta: number, time: number): void {
     this._material.uniforms.uTime.value = time;
+
+    // Keep the shell centered on the player — see this class's own top
+    // comment for why this can no longer assume world.player stays put.
+    this._base.points.position.copy(this.player.position);
+    this._fill.points.position.copy(this.player.position);
 
     if (Math.abs(this._fillScalar - this._fillTarget) > 1e-4) {
       const pull = 1 - Math.exp(-FILL_EASE_RATE * delta);

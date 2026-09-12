@@ -7,6 +7,7 @@ import {
   celestialSymbolMessage,
   constellationSpottedMessage,
   kingRisingMessage,
+  VISIT_STARS_TEXT,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import {
@@ -26,19 +27,20 @@ const TOUCH_RADIUS = 0.1;
 // This phase stays open after the trace completes until globals.crownLanded
 // flips true — set by EarthSituationsVfxSystem's universal crown-rise
 // cinematic (see crown-rise.ts) the instant it attaches to the comet's
-// head, ~30s after completion. celestialSymbolFlavorMessage's "this means
-// something to them" myth-beat fires immediately at trace-completion
-// instead (the same instant the crown starts rising), so the ~30s cinematic
-// isn't silent — only celestialSymbolMessage's explicit "you are crowned"
-// reveal and phaseComplete wait for crownLanded (via that notification's
-// own onComplete — same idiom stardust-system.ts's win sequence uses), so
-// that specific reveal always lands right as the crown does, not buried
-// mid-cinematic. Deliberately not imported from earth-situations-
-// vfx-system.ts/ghost-rise.ts/crown-rise.ts — this file only polls a
-// globals signal, not the mechanic itself, so the two stay decoupled (same
-// reasoning as globals.pairedPersonIndex/pairedPersonLine). index.ts's own
-// Phase.Constellations timeoutSeconds (120) remains the safety net if the
-// crown mechanic ever stalls.
+// head, ~30s after completion — so the player watches the whole crown
+// travel to and land on the comet before moving on to Fate Events. Both
+// notifications, though, fire together immediately at trace-completion:
+// celestialSymbolFlavorMessage's "this means something to them" myth-beat,
+// then celestialSymbolMessage's explicit "you are crowned" reveal right
+// after it — no longer held back until the crown actually lands, since
+// that made the reveal feel disconnected from the moment that actually
+// earned it (finishing the trace). Only phaseComplete itself still waits
+// for crownLanded (see the _completed branch below). Deliberately not
+// imported from earth-situations-vfx-system.ts/ghost-rise.ts/crown-rise.ts
+// — this file only polls a globals signal, not the mechanic itself, so the
+// two stay decoupled (same reasoning as globals.pairedPersonIndex/
+// pairedPersonLine). index.ts's own Phase.Constellations timeoutSeconds
+// (120) remains the safety net if the crown mechanic ever stalls.
 
 // Gameplay for Chapter 2.5, staged around the planet at its INTERMEDIATE
 // Constellations waypoint (Seeding runs first — see phase.ts's PHASE_ORDER —
@@ -76,12 +78,18 @@ export class ConstellationsSystem extends createSystem({
   private _activeType = 0;
   private _activeSlot = 0;
   private _completed = false;
-  // Guards celestialSymbolMessage/phaseComplete from firing more than once
-  // per play() — set true the first update() tick that sees
-  // globals.crownLanded true after _completed. isComplete() (which flips
-  // immediately on the last star) still drives the completion payoff/hero
-  // star reveal while the phase itself stays open until this fires.
+  // Guards phaseComplete from firing more than once per play() — set true
+  // the first update() tick that sees globals.crownLanded true after
+  // _completed. isComplete() (which flips immediately on the last star)
+  // still drives the completion payoff/hero star reveal while the phase
+  // itself stays open until this fires. The "you are crowned" notification
+  // no longer waits on this — see the trace-completion block in update().
   private _notifiedCompletion = false;
+  // Text of the "you are crowned" reveal, captured at fire time so update()'s
+  // crownLanded edge can dismiss this exact notification (see
+  // celestialSymbolMessage's own comment: it holds generously long and is
+  // meant to be actively cut short here, not to fade out on its own timer).
+  private _crownedMessageText: string | null = null;
   private _scratchHandPos!: Vector3;
   private _planetSeeding!: PlanetSeedingVfxSystem;
 
@@ -136,6 +144,7 @@ export class ConstellationsSystem extends createSystem({
     this._startedNotified[this._activeType][this._activeSlot] = false;
     this._completed = false;
     this._notifiedCompletion = false;
+    this._crownedMessageText = null;
 
     // Kicks off Leg A — the spin + recede into the intermediate waypoint
     // this phase's own anchors are staged around (see init()). Leg B (the
@@ -146,21 +155,21 @@ export class ConstellationsSystem extends createSystem({
 
   update(delta: number): void {
     if (this._completed) {
-      // Trace already finished — wait for the crown cinematic to actually
-      // land before revealing/advancing (see this file's own top comment).
+      // Trace already finished (the "you are crowned" reveal already fired
+      // back when it did — see below) — wait for the crown cinematic to
+      // actually land before advancing to Fate Events (see this file's own
+      // top comment).
       if (!this._notifiedCompletion && getGlobals(this.world).crownLanded.peek()) {
         this._notifiedCompletion = true;
-        const def = CONSTELLATION_SETS[this._activeType][this._activeSlot];
-        getGlobals(this.world).celestialSymbol.value = def.name;
-        const { text, holdSeconds } = celestialSymbolMessage(def.name);
-        // Same onComplete-gates-phaseComplete idiom stardust-system.ts's
-        // win sequence uses — phaseComplete only flips once this exact
-        // message has actually finished its own on-screen fade-out.
-        this.world
-          .getSystem(NotificationHudSystem)
-          ?.notifyNext(text, holdSeconds, 0, undefined, () => {
-            getGlobals(this.world).phaseComplete.value = true;
-          });
+        // The "you are crowned" reveal (celestialSymbolMessage) holds
+        // generously long specifically so it stays up for this whole
+        // cinematic instead of fading on its own — cut it short right here,
+        // the instant the crown actually lands, rather than let it linger
+        // into Fate Events.
+        if (this._crownedMessageText) {
+          this.world.getSystem(NotificationHudSystem)?.dismissByText(this._crownedMessageText);
+        }
+        getGlobals(this.world).phaseComplete.value = true;
       }
       return;
     }
@@ -186,6 +195,10 @@ export class ConstellationsSystem extends createSystem({
 
         if (!this._startedNotified[this._activeType][this._activeSlot]) {
           this._startedNotified[this._activeType][this._activeSlot] = true;
+          // The phase-entry "why not visit those nearby stars" blurb is
+          // only meant to stay up until this exact moment — see its own
+          // comment in notification-copy.ts.
+          notifications?.dismissByText(VISIT_STARS_TEXT);
           // notifyNext (not notify) — this is a direct reaction to the
           // player just touching their first star, so it should play next
           // rather than getting stuck behind the phase-entry blurb and/or
@@ -205,16 +218,21 @@ export class ConstellationsSystem extends createSystem({
         }
 
         if (this._tracedCount[this._activeType][this._activeSlot] >= def.starCount) {
-          // celestialSymbolMessage (the "you are crowned" reveal) and
-          // globals.celestialSymbol are still deferred to the crown
-          // cinematic's landing — see the _completed branch above. The
-          // flavor beat fires right here instead, though — the same
-          // instant EarthSituationsVfxSystem's crown-rise cinematic begins
-          // (see its own isComplete() edge) — so there's an immediate
-          // acknowledgment as the crown starts forming, not just silence
-          // for the ~30s until it lands.
+          // Both notifications fire right here, together, the same instant
+          // the trace finishes (and EarthSituationsVfxSystem's crown-rise
+          // cinematic begins — see its own isComplete() edge) — no longer
+          // waiting on the crown to actually land (see this file's own top
+          // comment). notifyNext unshifts, so calling celestialSymbolMessage
+          // FIRST then celestialSymbolFlavorMessage SECOND is what makes the
+          // flavor line end up displaying first, the reveal right after it.
+          getGlobals(this.world).celestialSymbol.value = def.name;
+          const { text, holdSeconds } = celestialSymbolMessage(def.name);
+          this._crownedMessageText = text;
+          notifications?.notifyNext(text, holdSeconds);
+
           const flavor = celestialSymbolFlavorMessage(def.name);
           if (flavor) notifications?.notifyNext(flavor.text, flavor.holdSeconds);
+
           this._completed = true;
           break;
         }

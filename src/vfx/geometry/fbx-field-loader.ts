@@ -164,6 +164,17 @@ const groupChildMeshCache = new Map<string, Promise<BufferGeometry[]>>();
 // whatever placeholder they already have. `maxCount` caps how many distinct
 // meshes are returned (in whatever order they appear in the file); pass a
 // generous number to get all of them.
+function collectAndNormalizeMeshes(root: Object3D, maxCount: number): BufferGeometry[] {
+  const geos: BufferGeometry[] = [];
+  root.traverse((child) => {
+    if (child instanceof Mesh) geos.push(child.geometry as BufferGeometry);
+  });
+  if (geos.length === 0) return [];
+  const top = geos.slice(0, maxCount).map((geo) => geo.clone());
+  for (const geo of top) normalizeGeometryToUnitRadius(geo);
+  return top;
+}
+
 export function loadFbxNamedGroupChildMeshes(
   url: string,
   groupName: string,
@@ -186,19 +197,39 @@ export function loadFbxNamedGroupChildMeshes(
         );
         return [];
       }
-      const geos: BufferGeometry[] = [];
-      found.traverse((child) => {
-        if (child instanceof Mesh) geos.push(child.geometry as BufferGeometry);
-      });
-      if (geos.length === 0) {
+      const top = collectAndNormalizeMeshes(found, maxCount);
+      if (top.length === 0) {
         console.warn(`[fbx-field-loader] '${groupName}' in '${url}' has no mesh children — keeping the placeholder.`);
-        return [];
       }
-      const top = geos.slice(0, maxCount).map((geo) => geo.clone());
-      for (const geo of top) normalizeGeometryToUnitRadius(geo);
       return top;
     });
     groupChildMeshCache.set(key, promise);
+  }
+  return promise;
+}
+
+// Same as loadFbxNamedGroupChildMeshes, but for files with no single
+// wrapping group node to search under — the individual meshes are direct
+// children of the FBX's own root instead (confirmed this is the actual
+// shape of flowers.fbx via a direct FBXLoader parse: its root's own
+// children are named 'grass'/'Layer_2'/'flower'/'cactus', not a further
+// 'Layer_1' descendant containing them — 'Layer_2' here is just one mesh's
+// own arbitrary name, not a grouping convention). Otherwise identical
+// behavior/caching/fallback to loadFbxNamedGroupChildMeshes.
+const allMeshCache = new Map<string, Promise<BufferGeometry[]>>();
+export function loadFbxAllMeshes(url: string, maxCount: number): Promise<BufferGeometry[]> {
+  const key = `${url}|${maxCount}`;
+  let promise = allMeshCache.get(key);
+  if (!promise) {
+    promise = loadFbxTemplate(url).then((root) => {
+      if (!root) return [];
+      const top = collectAndNormalizeMeshes(root, maxCount);
+      if (top.length === 0) {
+        console.warn(`[fbx-field-loader] '${url}' has no mesh children at all — keeping the placeholder.`);
+      }
+      return top;
+    });
+    allMeshCache.set(key, promise);
   }
   return promise;
 }

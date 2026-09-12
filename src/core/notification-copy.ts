@@ -32,6 +32,12 @@ export interface NotificationCopy {
   lineColors?: (readonly [number, number, number] | null)[];
 }
 
+// Exported so ConstellationsSystem can dismiss this exact message the
+// instant the player touches their first star — see its own use of
+// NotificationHudSystem.dismissByText() and Phase.Constellations' own entry
+// below.
+export const VISIT_STARS_TEXT = 'Why not visit those nearby stars? The people on the planet seem very interested in them.';
+
 // Every phase gets a sequence (most are one message) — NotificationHudSystem
 // queues them, so a multi-entry sequence plays as consecutive messages, each
 // fully fading out before the next fades in.
@@ -76,8 +82,15 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
     },
     { text: "What a nice looking planet.", holdSeconds: 3 },
     {
-      text: 'Why not visit those nearby stars? The people on the planet seem very interested in them.',
-      holdSeconds: 6.5,
+      text: VISIT_STARS_TEXT,
+      // Generously long — this one is meant to stay up until the player
+      // actually touches their first star, not fade out on its own clock.
+      // ConstellationsSystem calls NotificationHudSystem.dismissByText()
+      // the instant that happens, cutting this short (or canceling it
+      // outright if it hasn't started showing yet) — see dismissByText's
+      // own comment. This hold is just the fallback cap for a player who
+      // never does.
+      holdSeconds: 45,
     },
   ],
   // Was one generic line for every type (Gas alone also got a supplemental
@@ -155,15 +168,15 @@ export function kingRisingMessage(): NotificationCopy {
   };
 }
 
-// Split into two beats now, fired from two different moments instead of
-// one combined message fired only once the crown cinematic lands:
-//  - celestialSymbolFlavorMessage fires the instant a constellation's path
-//    is fully traced — the same edge EarthSituationsVfxSystem's crown-rise
-//    cinematic starts from (see its own _onCompletion) — so the "this means
-//    something to them" myth-beat lands right as the crown begins forming,
-//    not buried ~30s later.
-//  - celestialSymbolMessage (the explicit "you are crowned" reveal) still
-//    waits for globals.crownLanded, gating phaseComplete same as before.
+// Split into two beats, both fired together the instant a constellation's
+// path is fully traced (the same edge EarthSituationsVfxSystem's crown-rise
+// cinematic starts from — see its own _onCompletion):
+//  - celestialSymbolFlavorMessage — the "this means something to them"
+//    myth-beat, displays first (see ConstellationsSystem's notifyNext
+//    ordering comment).
+//  - celestialSymbolMessage (the explicit "you are crowned" reveal) displays
+//    right after, then stays up (see its own comment) until globals.
+//    crownLanded flips true, which is also what gates phaseComplete.
 // Each line deliberately does NOT claim the comet caused whatever's
 // happening below — the dog running loose, the war already brewing, the
 // king already failing — that was always going to happen. What changes is
@@ -182,10 +195,15 @@ export function celestialSymbolFlavorMessage(name: string): NotificationCopy | n
   return { text: flavor, holdSeconds: 5 };
 }
 
+// holdSeconds is a generous fallback cap, not the real hold time — this is
+// meant to stay up the whole ~30s crown-rise cinematic (see crown-rise.ts's
+// Emerge/Hover/Travel/Land stage durations), actively dismissed the instant
+// globals.crownLanded flips true (see ConstellationsSystem's own dismissal),
+// same "long fallback + active dismiss" idiom VISIT_STARS_TEXT already uses.
 export function celestialSymbolMessage(name: string): NotificationCopy {
   return {
     text: `It's been realized, you are crowned the celestial symbol of ${name}.`,
-    holdSeconds: 6.5,
+    holdSeconds: 40,
   };
 }
 
@@ -389,6 +407,14 @@ export function farewellMessage(): NotificationCopy {
     holdSeconds: 5.7,
   };
 }
+
+// Fired directly by OrbitalLaunchSystem.play(), right before the per-type
+// launchIntroMessage below — a short, generic heads-up that a decision is
+// coming, before the type-specific line actually explains what it is.
+export const FINAL_CHOICE_MESSAGE: NotificationCopy = {
+  text: 'You have a final choice to make.',
+  holdSeconds: 3,
+};
 
 // Fired directly by OrbitalLaunchSystem.play() (indexed by
 // dominantPebbleType — replaces NOTIFICATION_COPY[Phase.Launch], now empty)

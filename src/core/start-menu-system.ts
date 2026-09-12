@@ -73,6 +73,24 @@ export class StartMenuSystem extends createSystem({
     // index.ts) so it already exists when this init() runs.
     this._director = this.world.getSystem(GameDirectorSystem)!;
 
+    // A system-level recenter (e.g. long-pressing the Meta button) resets
+    // the XR runtime's own reference space to the player's CURRENT physical
+    // position/orientation — it has no idea this app also maintains its own
+    // world.player offset (see _recenterToHead's own comment), so without
+    // this the two compound: world.player still carries whatever offset was
+    // computed back when Start was pressed, now applied on top of a
+    // reference space that just moved out from under it, producing exactly
+    // the "big jump" a mid-game system recenter caused. Re-running the same
+    // recenter math on the WebXR reference space's own 'reset' event drops
+    // that stale offset and recomputes it fresh against wherever the player
+    // actually is right now, instead of leaving it stacked. The reference
+    // space only exists once a session is live, and three.js can hand out a
+    // new instance per session, so this re-attaches on every 'sessionstart'
+    // rather than trying to grab it once up front.
+    this.xrManager.addEventListener('sessionstart', () => {
+      this.xrManager.getReferenceSpace()?.addEventListener('reset', () => this._recenterToHead());
+    });
+
     const entity = this.world.createTransformEntity();
     this._entity = entity;
     this._panelObject = entity.object3D!;
@@ -170,18 +188,23 @@ export class StartMenuSystem extends createSystem({
     }
   }
 
-  // Fired once, the instant Start is triggered, before GameDirectorSystem's
-  // own director.start() ever runs (so every hardcoded scene position — the
-  // Seeding planet, Fate Events' PLANET_CENTER, the swirl's "in front of
-  // you" spawn, etc. — is built assuming a player facing -Z at the origin)
-  // lines up with wherever the player is actually standing/facing right
-  // now, rather than wherever they happened to be in their physical room
-  // when the page loaded. Not a native WebXR reference-space reset — just
-  // re-anchors world.player (the XR origin every other transform in this
+  // Re-anchors world.player (the XR origin every other transform in this
   // game is ultimately relative to) so the camera's CURRENT world position/
-  // yaw becomes the new logical origin/forward. Works identically in
-  // NonImmersive browser mode too (harmless there — just re-zeroes
-  // whatever render.camera's initial framing left it at).
+  // yaw becomes the new logical origin/forward — every hardcoded scene
+  // position (the Seeding planet, Fate Events' PLANET_CENTER, the swirl's
+  // "in front of you" spawn, etc.) is built assuming a player facing -Z at
+  // the origin, so this is what lines that up with wherever the player is
+  // actually standing/facing, rather than wherever they happened to be when
+  // the page loaded. Two call sites: once when Start is triggered (before
+  // GameDirectorSystem's own director.start() ever runs), and again on
+  // every native WebXR reference-space 'reset' event (see init()'s
+  // sessionstart listener) — a system-level recenter mid-game moves the
+  // physical reference frame out from under whatever offset this last
+  // computed, so it needs to be recomputed fresh, not just once at Start.
+  // Not itself a native WebXR reference-space reset — just this app's own
+  // world.player realignment. Works identically in NonImmersive browser
+  // mode too (harmless there — just re-zeroes whatever render.camera's
+  // initial framing left it at).
   private _recenterToHead(): void {
     const player = this.player;
     const camera = this.camera;

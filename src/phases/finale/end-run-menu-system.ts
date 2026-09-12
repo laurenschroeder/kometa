@@ -22,7 +22,9 @@ import { OrbitalLaunchSystem } from '../orbital-launch/orbital-launch-system.js'
 // before interrupting it with the end-of-run choice — long enough to
 // actually watch the comet settle into orbit or fly off, not an instant
 // pop-up the moment Finale's own entry blurb finishes.
-const END_RUN_DELAY_SECONDS = 10;
+// Trimmed by 4s from an original 10 — the finale meaning/name notification
+// this triggers was landing too late relative to the rest of the sequence.
+const END_RUN_DELAY_SECONDS = 6;
 
 // Phase-gated (see index.ts's Phase.Finale definePhase — play()/stop()'d
 // alongside FinaleSystem itself, which no longer carries a timeoutSeconds:

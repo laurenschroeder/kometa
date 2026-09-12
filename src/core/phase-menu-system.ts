@@ -18,21 +18,27 @@ import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
 
-// Toggles the menu by holding the left controller's physical Menu button
-// while the hand itself is flipped palm-up (like checking a watch) — was
-// five quick left-hand selects in a row before that (and a single 1.5s hold,
-// and a 3-tap gesture, before that) — all too easy to trigger by accident
-// during normal play, since select/pinch is also the primary comet-grab
-// input. Requiring BOTH the flip orientation AND a held Menu press reads as
-// much more deliberate, and frees up select/pinch entirely. Controller-only
-// — hand tracking has no equivalent physical Menu button, so the dev menu
-// simply isn't reachable that way (acceptable for a debug-only feature).
+// Two independent ways to toggle the menu, either one works: holding the
+// left controller's physical Menu button while the hand itself is flipped
+// palm-up (like checking a watch), OR five quick left-hand selects in a row
+// (the older gesture — restored as a reliable fallback since the flip+hold
+// one hasn't been landing consistently for every controller/grip
+// convention; see FLIP_UP_DOT_THRESHOLD's own "first-pass, expect to
+// retune" caveat). Controller-only either way — hand tracking has no
+// physical Menu button, and getSelectStart() only fires from an actual
+// pinch/trigger edge, so the dev menu simply isn't reachable via hand
+// tracking (acceptable for a debug-only feature).
 const FLIP_HOLD_SECONDS = 1.0;
 // Dot product of the grip's local "up" (back-of-hand) axis against world
 // up — near 1 when held naturally (thumb-up), flips toward -1 when the palm
 // rotates to face upward. First-pass number — expect to retune in-headset
 // against the actual controller/hand grip convention.
 const FLIP_UP_DOT_THRESHOLD = -0.5;
+
+// Tap-count fallback — TAP_WINDOW_SECONDS is how long the player has, after
+// each tap, to land the next one before the count resets back to 0.
+const TAP_WINDOW_SECONDS = 0.45;
+const TAPS_TO_TOGGLE = 5;
 
 // Kill switch for the whole open-on-tap gesture — flip to false to disable
 // it again without ripping the feature out. The panel/systems below are
@@ -51,7 +57,8 @@ const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
 ];
 
 // Dev/debug menu: holding the left controller's Menu button while flipping
-// that hand palm-up (see FLIP_HOLD_SECONDS/_isLeftHandFlipped) toggles a
+// that hand palm-up (see FLIP_HOLD_SECONDS/_isLeftHandFlipped), OR five
+// quick left-hand selects in a row (see TAPS_TO_TOGGLE), toggles a
 // wrist-height panel in front of the player with a button per phase,
 // jumping straight there via GameDirectorSystem.jumpToPhase() rather than
 // waiting on win conditions/timeouts.
@@ -69,6 +76,8 @@ export class PhaseMenuSystem extends createSystem({
   private _flipHoldElapsed = 0;
   private _scratchQuat!: Quaternion;
   private _scratchUp!: Vector3;
+  private _tapCount = 0;
+  private _tapWindowRemaining = 0;
 
   init(): void {
     // GameDirectorSystem must be registered before this system (see
@@ -169,6 +178,20 @@ export class PhaseMenuSystem extends createSystem({
         }
       } else {
         this._flipHoldElapsed = 0;
+      }
+
+      // Fallback gesture — see this file's own top comment.
+      if (this._tapCount > 0) {
+        this._tapWindowRemaining -= delta;
+        if (this._tapWindowRemaining <= 0) this._tapCount = 0;
+      }
+      if (this.input.xr.gamepads.left?.getSelectStart()) {
+        this._tapCount++;
+        this._tapWindowRemaining = TAP_WINDOW_SECONDS;
+        if (this._tapCount >= TAPS_TO_TOGGLE) {
+          this._tapCount = 0;
+          this._setOpen(!this._open);
+        }
       }
     }
 
