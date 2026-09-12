@@ -1,4 +1,4 @@
-import { Group, Mesh, Object3D } from '@iwsdk/core';
+import { BufferGeometry, Group, Mesh, Object3D } from '@iwsdk/core';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 // Box3 is a pure math class (no render/GL state, unlike Object3D/Material) —
 // @iwsdk/core doesn't re-export three's math utility classes, and there's
@@ -118,4 +118,87 @@ export function buildFbxField(
   });
 
   return container;
+}
+
+// Rescales `geo`'s vertices in place so its own bounding-sphere radius
+// becomes exactly 1 — baked directly into the geometry (not a separate
+// per-instance transform multiplier) so it drops straight into an
+// InstancedMesh setup whose per-instance scale already assumes ~unit-radius
+// geometry (see buildOrganicGeometry()'s own ~1-unit rocks, and
+// earth-situations-vfx-system.ts's OrganicScene.baseScale, a small 0.02-0.04
+// multiplier against exactly that assumption) — a raw model's native export
+// scale is otherwise unknown/arbitrary. No-ops (leaves geo untouched) for a
+// degenerate zero-size geometry rather than dividing by zero.
+export function normalizeGeometryToUnitRadius(geo: BufferGeometry): void {
+  geo.computeBoundingSphere();
+  const radius = geo.boundingSphere?.radius ?? 0;
+  if (radius < 1e-6) return;
+  const scale = 1 / radius;
+  const pos = geo.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, pos.getX(i) * scale, pos.getY(i) * scale, pos.getZ(i) * scale);
+  }
+  pos.needsUpdate = true;
+  geo.computeBoundingSphere();
+}
+
+// One cached load per (url, group name, count) — same reasoning as
+// obj-field-loader.ts's own caches: no reason to re-walk the same subtree if
+// two callers ask for the same thing.
+const groupChildMeshCache = new Map<string, Promise<BufferGeometry[]>>();
+
+// Loads `url`, finds the descendant named `groupName`, and returns the
+// geometry of each individual Mesh child found under it — UNLIKE
+// obj-field-loader.ts's loadObjLargestIslands, this does NOT split anything
+// via union-find: an FBX group can (and, per this project's own
+// desertPlants.fbx > Meshes > Layer_1, does) already contain several
+// separately-authored, individually-named meshes as direct children — e.g.
+// cactusTall/cactusBlob/plantSwirl/etc — so each one is already its own
+// usable shape with no extraction needed. Each returned geometry is a clone
+// (so mutating it, e.g. via normalizeGeometryToUnitRadius, never touches the
+// shared cached FBX template) rescaled to unit bounding-sphere radius so
+// callers can drop them straight into an InstancedMesh alongside procedural
+// geometry with no extra fit-scale math. Resolves to [] (never rejects, and
+// logs the names actually found in the file to help correct a wrong guess)
+// if the file fails to load or the named group doesn't exist — callers keep
+// whatever placeholder they already have. `maxCount` caps how many distinct
+// meshes are returned (in whatever order they appear in the file); pass a
+// generous number to get all of them.
+export function loadFbxNamedGroupChildMeshes(
+  url: string,
+  groupName: string,
+  maxCount: number,
+): Promise<BufferGeometry[]> {
+  const key = `${url}|${groupName}|${maxCount}`;
+  let promise = groupChildMeshCache.get(key);
+  if (!promise) {
+    promise = loadFbxTemplate(url).then((root) => {
+      if (!root) return [];
+      const found = root.getObjectByName(groupName);
+      if (!found) {
+        const names: string[] = [];
+        root.traverse((child) => {
+          if (child.name) names.push(child.name);
+        });
+        console.warn(
+          `[fbx-field-loader] group '${groupName}' not found in '${url}' — keeping the placeholder. ` +
+            `Names actually present in the file: ${names.slice(0, 40).join(', ') || '(none named)'}`,
+        );
+        return [];
+      }
+      const geos: BufferGeometry[] = [];
+      found.traverse((child) => {
+        if (child instanceof Mesh) geos.push(child.geometry as BufferGeometry);
+      });
+      if (geos.length === 0) {
+        console.warn(`[fbx-field-loader] '${groupName}' in '${url}' has no mesh children — keeping the placeholder.`);
+        return [];
+      }
+      const top = geos.slice(0, maxCount).map((geo) => geo.clone());
+      for (const geo of top) normalizeGeometryToUnitRadius(geo);
+      return top;
+    });
+    groupChildMeshCache.set(key, promise);
+  }
+  return promise;
 }
