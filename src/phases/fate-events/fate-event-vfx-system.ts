@@ -8,6 +8,9 @@ import {
   DoubleSide,
   Entity,
   Group,
+  InstancedBufferAttribute,
+  InstancedMesh,
+  Matrix4,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
@@ -27,6 +30,7 @@ import { buildIslandPerson, buildPlaceholderPerson, PERSON_HEIGHT } from '../../
 import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
+import { kSoulIslandMat } from '../../vfx/shaders/pebble-material.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
@@ -212,7 +216,12 @@ const FIRE_CANVAS_SIZE = 128;
 // COLLECTIBLE_PULSE below so the still-uncaptured ones visibly stand out
 // from the static scenery around them instead of just being bigger dots.
 const GHOST_SIZE = 0.045;
-const GHOST_COLOR: [number, number, number] = [0.75, 0.85, 1.0];
+// Ghost spheres render with kSoulIslandMat itself (see _buildGhostMeshes)
+// instead of their own flat color constant now — the exact same translucent
+// wiggly blue material real soul-dust pebbles use (pebble-material.ts's
+// SOUL_ISLAND_PALETTE), so Beat 4's collectibles read as literally made of
+// soul dust rather than a separately-tuned glow.
+const IDENTITY_MAT4 = new Matrix4();
 const SEED_SIZE = 0.035;
 const SEED_COLOR: [number, number, number] = [0.55, 0.4, 0.22];
 const COLLECTIBLE_PULSE_FREQ = 1.2; // Hz — "come find me" glow, Free/Attracting only
@@ -424,7 +433,7 @@ export class FateEventVfxSystem extends createSystem({
     this._buildBubbles();
     this._buildFire();
     this._buildSkulls();
-    this._buildCollectibleMeshes(this._ghostMeshes, GHOST_SIZE, GHOST_COLOR, this._fateEvents.getGraveyardField().count);
+    this._buildGhostMeshes(this._ghostMeshes, this._fateEvents.getGraveyardField().count);
     this._buildCollectibleMeshes(this._seedMeshes, SEED_SIZE, SEED_COLOR, this._fateEvents.getSeedField().count);
 
     // signal.subscribe() fires immediately, so state is correct before the
@@ -625,9 +634,36 @@ export class FateEventVfxSystem extends createSystem({
     }
   }
 
-  // Shared builder for Beat 4's Soul ghosts / Organic seeds — a handful of
-  // small glowing additive spheres, one per collectible slot (see this
-  // file's own top comment).
+  // Beat 4's Soul ghosts, one InstancedMesh (count=1) per slot rather than a
+  // real Mesh — kSoulIslandMat's shader is instanced-only (its vertex stage
+  // reads `instanceMatrix` directly and needs aBright/aTint/aTinted/
+  // aWigglePhase attributes, see toon-rim-material.ts), so a plain Mesh
+  // can't use it. Each instance's transform stays identity forever — this
+  // file's existing _updateCollectibles already drives per-ghost position/
+  // scale through the mesh's own Object3D transform (InstancedMesh extends
+  // Mesh), which composes on top of that identity instance untouched.
+  // aTinted stays 0 and aTint stays black, same as every real soul-dust
+  // pebble (see pebble-field-vfx-system.ts's own TYPE_SOUL branch) — no
+  // per-ghost recolor, just the material's own SOUL_ISLAND_PALETTE body/rim.
+  private _buildGhostMeshes(target: Mesh[], count: number): void {
+    for (let i = 0; i < count; i++) {
+      const geo = new SphereGeometry(GHOST_SIZE, 8, 6);
+      geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array([0.7]), 1));
+      geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(3), 3));
+      geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array([0]), 1));
+      geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array([Math.random()]), 1));
+      const mesh = new InstancedMesh(geo, kSoulIslandMat, 1);
+      mesh.setMatrixAt(0, IDENTITY_MAT4);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      target.push(mesh);
+      this.world.createTransformEntity(mesh);
+    }
+  }
+
+  // Shared builder for Organic's seeds — a handful of small glowing additive
+  // spheres, one per collectible slot (see this file's own top comment).
   private _buildCollectibleMeshes(target: Mesh[], size: number, color: [number, number, number], count: number): void {
     const material = new MeshBasicMaterial({
       color: new Color(color[0], color[1], color[2]),

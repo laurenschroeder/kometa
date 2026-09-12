@@ -214,7 +214,7 @@ export function celestialSymbolMessage(name: string): NotificationCopy {
 const FATE_EVENTS_INTRO_BY_TYPE: NotificationCopy[] = [
   // soul dust — the graveyard/ghost-gathering vignette.
   {
-    text: 'The souls you have gathered sense something interesting on this planet.',
+    text: 'The souls dust you gathered sense something interesting on this planet.',
     holdSeconds: 6,
   },
   // organic matter — the seed-gathering vignette.
