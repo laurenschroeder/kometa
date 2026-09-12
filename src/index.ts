@@ -60,6 +60,10 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     glitter2: { url: '/textures/glitter2.png', type: AssetType.Texture },
     dustLand: { url: '/audio/dust-land.wav', type: AssetType.Audio },
     backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
+    // Quill-authored, baked vertex-cache animation exported as glTF morph
+    // targets (no rig) — see EarthSituationsVfxSystem's own bee comment for
+    // why only a couple instances are used.
+    beeFlying: { url: '/gltf/beeFlying.glb', type: AssetType.GLTF },
   },
   xr: {
     sessionMode: SessionMode.ImmersiveVR,

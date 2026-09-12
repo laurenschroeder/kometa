@@ -1,4 +1,6 @@
 import {
+  AnimationMixer,
+  AssetManager,
   AudioListener,
   CanvasTexture,
   Color,
@@ -10,6 +12,7 @@ import {
   Group,
   InstancedBufferAttribute,
   InstancedMesh,
+  LoopRepeat,
   Matrix4,
   Mesh,
   MeshBasicMaterial,
@@ -111,6 +114,25 @@ const ORGANIC_SWAY_FREQ = 0.9; // Hz, plant variants
 const ORGANIC_SWAY_AMPLITUDE = 0.18; // radians
 const ORGANIC_BOB_FREQ = 1.6; // Hz, animal variants
 const ORGANIC_BOB_AMPLITUDE = 0.01; // meters, along the surface normal
+
+// A couple of real (Quill-authored) bee models hovering over the organic
+// scene — everything else in this file is placeholder procedural geometry,
+// but this asset was small enough (276 verts) to use directly. Deliberately
+// just a small fixed count, not scattered/instanced like ORGANIC_DECORATION_
+// COUNT above: each bee is its own Mesh with baked-morph-target wing-flap
+// animation (glTF export of Quill's vertex-cache bake, no skeleton), which
+// can't ride InstancedMesh the way the procedural decorations do — every
+// extra copy is a full extra draw call + its own per-vertex morph-blend
+// cost, so this stays a small flourish, not a swarm.
+const BEE_COUNT = 2;
+// The source model's raw bounding box is ~0.58 x 0.43 x 0.79 units (Quill's
+// own scene scale, unrelated to this game's meters) — this scales its
+// longest axis down to roughly 3cm, in line with the organic decorations'
+// own ORGANIC_MIN_SCALE/MAX_SCALE range.
+const BEE_MODEL_SCALE = 0.045;
+const BEE_ORBIT_RADIUS = 0.06;
+const BEE_ORBIT_SPEED = 0.8; // rad/s
+const BEE_HOVER_HEIGHT = 0.05; // above the organic decorations' own surface reach
 
 // Beat 5 (Payoff) — Organic's "seeds blossom into their plants" is a
 // staggered scale-overshoot pulse layered on top of the organic scene's own
@@ -224,6 +246,13 @@ export class EarthSituationsVfxSystem extends createSystem({
 
   private _dogs!: DecorationSet;
   private _organicScene!: OrganicScene;
+  // See BEE_COUNT's own comment — a couple of real animated models, not
+  // part of OrganicScene's InstancedMesh/procedural setup.
+  private _bees: { root: Group; mixer: AnimationMixer; angleOffset: number }[] = [];
+  // Orthonormal basis around CROWD_CAP_DIRECTION, computed once in
+  // _buildBees() — the plane the bees' small hover-circle is drawn in.
+  private _beeTangentA = new Vector3();
+  private _beeTangentB = new Vector3();
   private _machines!: DecorationSet;
   private _king!: DecorationSet;
   private _kingBody!: Group; // the king's own figure, hidden separately once he dies
@@ -276,6 +305,8 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _scratchOrganicPos = new Vector3();
   private _scratchOrganicScale = new Vector3();
   private _scratchOrganicQuat = new Quaternion();
+  private _scratchBeePos = new Vector3();
+  private _scratchBeeLookAt = new Vector3();
   private _scratchSwayQuat = new Quaternion();
   private _scratchMat4 = new Matrix4();
   private _scratchBannerPos = new Vector3();
@@ -293,6 +324,7 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     this._buildDogs();
     this._buildOrganicScene();
+    this._buildBees();
     this._buildMachines();
     this._buildKingTower();
     this._buildGraveyardScene();
@@ -398,6 +430,41 @@ export class EarthSituationsVfxSystem extends createSystem({
     for (const mesh of meshes) (mesh.geometry.getAttribute('aTint') as InstancedBufferAttribute).needsUpdate = true;
 
     this._organicScene = { meshes, variantOf, localOf, isAnimal, normals, baseScale, phase, scale: new Float32Array(n) };
+  }
+
+  // See BEE_COUNT's own comment. AssetManager.getGLTF() clones the Object3D
+  // graph fresh per call (geometry/materials/animations stay shared per its
+  // own doc comment), so each bee gets its own scene graph + AnimationMixer
+  // but no duplicated GPU buffer data between the two copies.
+  private _buildBees(): void {
+    // Orthonormal basis around CROWD_CAP_DIRECTION — picks whichever of
+    // world-up/world-right isn't nearly parallel to it as the seed for the
+    // cross products, so this stays correct even if CROWD_CAP_DIRECTION
+    // itself ever changes from its current (0,1,0).
+    const arbitrary = Math.abs(CROWD_CAP_DIRECTION.y) < 0.9 ? new Vector3(0, 1, 0) : new Vector3(1, 0, 0);
+    this._beeTangentA.crossVectors(CROWD_CAP_DIRECTION, arbitrary).normalize();
+    this._beeTangentB.crossVectors(CROWD_CAP_DIRECTION, this._beeTangentA).normalize();
+
+    for (let i = 0; i < BEE_COUNT; i++) {
+      const gltf = AssetManager.getGLTF('beeFlying');
+      if (!gltf) continue;
+      const root = gltf.scene as Group;
+      root.scale.setScalar(BEE_MODEL_SCALE);
+      root.visible = false;
+      this.world.createTransformEntity(root);
+
+      const mixer = new AnimationMixer(root);
+      const clip = gltf.animations[0];
+      if (clip) {
+        const action = mixer.clipAction(clip);
+        action.setLoop(LoopRepeat, Infinity);
+        // Offset each bee's own clip start time so a pair doesn't flap in
+        // lockstep.
+        action.time = Math.random() * clip.duration;
+        action.play();
+      }
+      this._bees.push({ root, mixer, angleOffset: (i / BEE_COUNT) * Math.PI * 2 + Math.random() * 0.5 });
+    }
   }
 
   private _buildMachines(): void {
@@ -544,6 +611,7 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     this._updateSet(this._dogs, showDogs, spinProgress, delta, this._scratchCenter, reach);
     this._updateOrganicScene(showOrganicScene, spinProgress, delta, this._scratchCenter, reach, time);
+    this._updateBees(showOrganicScene, this._scratchCenter, reach, delta, time);
     this._updateSet(this._machines, showMachines, spinProgress, delta, this._scratchCenter, reach);
     this._updateSet(this._king, showKing, spinProgress, delta, this._scratchCenter, reach);
     this._updateTowerHeight(showKing, delta);
@@ -665,6 +733,34 @@ export class EarthSituationsVfxSystem extends createSystem({
       group.position.set(center.x + nx * reach, center.y + ny * reach, center.z + nz * reach);
       this._scratchNormal.set(nx, ny, nz);
       group.quaternion.setFromUnitVectors(this._upAxis, this._scratchNormal);
+    }
+  }
+
+  // Small hover-circle above the organic decorations, in the plane
+  // perpendicular to CROWD_CAP_DIRECTION (see _buildBees' tangent basis).
+  // Mixer only advances while shown — frozen wings while hidden are never
+  // seen, and it saves the (tiny) per-frame update cost.
+  private _updateBees(show: boolean, center: Vector3, reach: number, delta: number, time: number): void {
+    for (const bee of this._bees) {
+      bee.root.visible = show;
+      if (!show) continue;
+      bee.mixer.update(delta);
+
+      const angle = time * BEE_ORBIT_SPEED + bee.angleOffset;
+      this._scratchBeePos
+        .copy(center)
+        .addScaledVector(CROWD_CAP_DIRECTION, reach + BEE_HOVER_HEIGHT)
+        .addScaledVector(this._beeTangentA, Math.cos(angle) * BEE_ORBIT_RADIUS)
+        .addScaledVector(this._beeTangentB, Math.sin(angle) * BEE_ORBIT_RADIUS);
+      bee.root.position.copy(this._scratchBeePos);
+
+      // Face the direction of travel around the circle (the orbit's own
+      // tangent) rather than leaving the model in its authored orientation.
+      this._scratchBeeLookAt
+        .copy(this._scratchBeePos)
+        .addScaledVector(this._beeTangentA, -Math.sin(angle))
+        .addScaledVector(this._beeTangentB, Math.cos(angle));
+      bee.root.lookAt(this._scratchBeeLookAt);
     }
   }
 
