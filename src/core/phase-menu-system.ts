@@ -3,10 +3,13 @@ import {
   Entity,
   Follower,
   FollowBehavior,
+  InputComponent,
   Object3D,
   PanelDocument,
   PanelUI,
+  Quaternion,
   RayInteractable,
+  Vector3,
 } from '@iwsdk/core';
 import type { UIKit, UIKitDocument } from '@iwsdk/core';
 import { resetAchievements } from './achievement-store.js';
@@ -15,15 +18,21 @@ import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
 
-// Left-hand select (trigger/pinch) toggles the menu on five quick presses
-// in a row — was a single press held for 1.5s, then a 3-tap gesture, both
-// too easy to trigger by accident during normal play. A tap-count gesture
-// (like quintuple-clicking) reads as much more deliberate: TAP_WINDOW_SECONDS
-// is how long the player has, after each tap, to land the next one before
-// the count resets back to 0 — tightened alongside the bump to 5 taps so
-// the whole gesture still reads as "very quickly," not just "eventually."
-const TAP_WINDOW_SECONDS = 0.45;
-const TAPS_TO_TOGGLE = 5;
+// Toggles the menu by holding the left controller's physical Menu button
+// while the hand itself is flipped palm-up (like checking a watch) — was
+// five quick left-hand selects in a row before that (and a single 1.5s hold,
+// and a 3-tap gesture, before that) — all too easy to trigger by accident
+// during normal play, since select/pinch is also the primary comet-grab
+// input. Requiring BOTH the flip orientation AND a held Menu press reads as
+// much more deliberate, and frees up select/pinch entirely. Controller-only
+// — hand tracking has no equivalent physical Menu button, so the dev menu
+// simply isn't reachable that way (acceptable for a debug-only feature).
+const FLIP_HOLD_SECONDS = 1.0;
+// Dot product of the grip's local "up" (back-of-hand) axis against world
+// up — near 1 when held naturally (thumb-up), flips toward -1 when the palm
+// rotates to face upward. First-pass number — expect to retune in-headset
+// against the actual controller/hand grip convention.
+const FLIP_UP_DOT_THRESHOLD = -0.5;
 
 // Kill switch for the whole open-on-tap gesture — flip to false to disable
 // it again without ripping the feature out. The panel/systems below are
@@ -41,12 +50,11 @@ const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-art-test', Phase.ArtTest],
 ];
 
-// Dev/debug menu: three quick left-hand selects (trigger on controllers,
-// pinch on hand tracking — unused by any other mechanic today, see the
-// "universal menu" discussion) toggle a wrist-height panel in front of the
-// player with a button per phase, jumping straight there via
-// GameDirectorSystem.jumpToPhase() rather than waiting on win conditions/
-// timeouts.
+// Dev/debug menu: holding the left controller's Menu button while flipping
+// that hand palm-up (see FLIP_HOLD_SECONDS/_isLeftHandFlipped) toggles a
+// wrist-height panel in front of the player with a button per phase,
+// jumping straight there via GameDirectorSystem.jumpToPhase() rather than
+// waiting on win conditions/timeouts.
 export class PhaseMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
 }) {
@@ -58,13 +66,16 @@ export class PhaseMenuSystem extends createSystem({
   private _avgSpeedEl: UIKit.Component<any> | null = null;
   private _speedSum = 0;
   private _speedSamples = 0;
-  private _tapCount = 0;
-  private _tapWindowRemaining = 0;
+  private _flipHoldElapsed = 0;
+  private _scratchQuat!: Quaternion;
+  private _scratchUp!: Vector3;
 
   init(): void {
     // GameDirectorSystem must be registered before this system (see
     // index.ts) so it already exists when this init() runs.
     this._director = this.world.getSystem(GameDirectorSystem)!;
+    this._scratchQuat = new Quaternion();
+    this._scratchUp = new Vector3();
 
     // Average speed is scoped to "this phase" — reset on every transition,
     // regardless of whether the debug panel is open at the time.
@@ -113,6 +124,12 @@ export class PhaseMenuSystem extends createSystem({
         for (const [buttonId, phase] of PHASE_BUTTONS) {
           const button = doc.getElementById(buttonId);
           button?.addEventListener('click', () => {
+            // Clear first — see clearQueue()'s own comment — so the jump's
+            // own phase-entry blurb (fired synchronously inside
+            // jumpToPhase(), which sets globals.gamePhase) starts showing
+            // immediately instead of queuing behind whatever was still
+            // on-screen/pending from the phase you jumped FROM.
+            this.world.getSystem(NotificationHudSystem)?.clearQueue();
             this._director.jumpToPhase(phase);
             this._setOpen(false);
           });
@@ -143,17 +160,15 @@ export class PhaseMenuSystem extends createSystem({
 
   update(delta: number): void {
     if (DEV_MENU_ENABLED) {
-      if (this._tapCount > 0) {
-        this._tapWindowRemaining -= delta;
-        if (this._tapWindowRemaining <= 0) this._tapCount = 0;
-      }
-      if (this.input.xr.gamepads.left?.getSelectStart()) {
-        this._tapCount++;
-        this._tapWindowRemaining = TAP_WINDOW_SECONDS;
-        if (this._tapCount >= TAPS_TO_TOGGLE) {
-          this._tapCount = 0;
+      const menuHeld = this.input.xr.gamepads.left?.getButtonPressed(InputComponent.Menu) ?? false;
+      if (menuHeld && this._isLeftHandFlipped()) {
+        this._flipHoldElapsed += delta;
+        if (this._flipHoldElapsed >= FLIP_HOLD_SECONDS) {
+          this._flipHoldElapsed = 0;
           this._setOpen(!this._open);
         }
+      } else {
+        this._flipHoldElapsed = 0;
       }
     }
 
@@ -172,6 +187,17 @@ export class PhaseMenuSystem extends createSystem({
         text: `Avg phase speed: ${avgSpeed.toFixed(2)} m/s`,
       } as Record<string, unknown>);
     }
+  }
+
+  // "Flipped" — the left hand/controller rotated palm-up, like checking a
+  // watch — read from the grip space's own local "up" axis in world space
+  // (near world-up when held naturally, flips toward world-down as the
+  // wrist rotates). See FLIP_UP_DOT_THRESHOLD's own comment.
+  private _isLeftHandFlipped(): boolean {
+    const grip = this.player.gripSpaces.left;
+    grip.getWorldQuaternion(this._scratchQuat);
+    this._scratchUp.set(0, 1, 0).applyQuaternion(this._scratchQuat);
+    return this._scratchUp.y < FLIP_UP_DOT_THRESHOLD;
   }
 
   private _setOpen(open: boolean): void {

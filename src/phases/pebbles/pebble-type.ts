@@ -1,8 +1,8 @@
 // Single source of truth for the three pebble types Chapter 2 can produce.
 // Each pebble is pre-assigned one of these when it spawns — see
-// pebble-layout.ts's assignPebbleSpawnPoint for the spatial layout (9
-// discrete groups, 3 per color, spread evenly around the full 360° circle
-// around the player).
+// pebble-layout.ts's assignPebbleSpawnPoint for the spatial layout (each
+// type winds through its own wavy "vein" around the player, braided with
+// the other two).
 export interface PebbleType {
   id: number;
   name: string;

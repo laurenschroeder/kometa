@@ -180,6 +180,23 @@ export class NotificationHudSystem extends createSystem({
     );
   }
 
+  // Immediately clears whatever's on screen/queued and returns the HUD to
+  // idle — called by PhaseMenuSystem right before a dev-menu phase jump, so
+  // landing on an arbitrary phase doesn't leave a stale message (or a whole
+  // backlog of still-queued ones) from wherever the player actually was
+  // hanging around on screen ahead of the phase you actually wanted to
+  // test. Whatever onComplete callbacks were attached to the abandoned
+  // messages are simply dropped, not fired — a dev-menu jump already
+  // bypasses whatever win-condition gating those existed for.
+  clearQueue(): void {
+    this._queue.length = 0;
+    this._pending = null;
+    this._current = null;
+    this._active = false;
+    this._state = FadeState.Idle;
+    if (this._boxEl) this._setBoxVisible(false, 0);
+  }
+
   // Called by EndRunMenuSystem's "Main Menu" choice, alongside
   // GameDirectorSystem.returnToMenu() — without this, _maybeTriggerBoot's
   // guard (meant to stop the very first boot's blurb from double-firing)

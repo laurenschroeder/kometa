@@ -37,24 +37,23 @@ export interface NotificationCopy {
 // fully fading out before the next fades in.
 export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Stardust]: [
-    { text: 'You are stardust unformed. Gather yourself into being.', holdSeconds: 5.4 },
-    { text: 'Move your hand around to collect stardust.', holdSeconds: 5.5 },
-    { text: 'The faster you swing, the further you go.', holdSeconds: 5.5 },
+    { text: 'You are stardust unformed. Move your hand around to gather yourself into being.', holdSeconds: .4 },
+    { text: 'The faster you swing, the further you go.', holdSeconds: 5.5, delaySeconds: 2 },
     {
-      text: 'If you want to control the comet with a different hand, simply pinch it with your other hand and it will move over.',
+      text: 'If you want to control the comet with a different hand, pinch it with the hand you want it to follow.',
       holdSeconds: 5,
-      delaySeconds: 10,
+      delaySeconds: 12,
     },
   ],
   [Phase.Pebbles]: [
     {
-      text: 'Three paths call to you\nthe blue dust of souls\nthe green pulse of living things\nthe red violence of raw gasses.',
+      text: 'Three paths call to you\nthe blue forms of souls\nthe green pulse of living things\nthe red spectacle of volatile gasses.',
       holdSeconds: 5.5,
       lineColors: [null, PEBBLE_TYPES[0].color, PEBBLE_TYPES[1].color, PEBBLE_TYPES[2].color],
     },
     {
       text: 'What you gather will not just change yourself, but affect other planets you come into contact with.',
-      holdSeconds: 5.5,
+      holdSeconds: 6.5,
     },
 
   ],
@@ -72,7 +71,7 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Constellations]: [
     { text: '*Many years later*', holdSeconds: 3.5 },
     {
-      text: 'A whole society has developed, thanks to the resources you seeded the planet with.',
+      text: 'A whole ecosystem has developed, thanks to the unique stardust you seeded the planet with.',
       holdSeconds: 5.5,
     },
     { text: "What a nice looking planet.", holdSeconds: 3 },
@@ -92,12 +91,14 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   // OrbitalLaunchSystem.play(), which also needs its holdSeconds to time
   // when the choice zones become active (see that system's own comment).
   [Phase.Launch]: [],
-  [Phase.Finale]: [
-    {
-      text: 'You have spent a lifetime gathering and delivering space dust. You now find your place among the stars.',
-      holdSeconds: 6.7,
-    },
-  ],
+  // Was one generic "you now find your place among the stars" line
+  // regardless of what the player actually chose at Launch — now empty;
+  // see finaleMessage(), fired directly by EndRunMenuSystem, which folds
+  // this same closing sentiment together with the comet-naming beat
+  // (formerly a separate cometNameMessage) and branches it by orbit-vs-
+  // launch choice, since "finds a place among the stars" only actually
+  // describes the orbit path.
+  [Phase.Finale]: [],
   // Dev-only sandbox — no phase-entry blurb; ArtTestSystem shows its own
   // per-variant label via notify() instead.
   [Phase.ArtTest]: [],
@@ -126,7 +127,7 @@ export const STARDUST_WIN_SEQUENCE: NotificationCopy[] = [
 // so it can't be a static table entry like the ones above.
 export function pebbleCompletionMessage(typeName: string): NotificationCopy {
   return {
-    text: `You've collected so many space pebbles, especially ${typeName}! Let's go out and show off your new form.`,
+    text: `You've collected so many pebbles, especially ${typeName}! Let's continue further into the universe.`,
     holdSeconds: 3.5,
   };
 }
@@ -195,12 +196,12 @@ export function celestialSymbolMessage(name: string): NotificationCopy {
 const FATE_EVENTS_INTRO_BY_TYPE: NotificationCopy[] = [
   // soul dust — the graveyard/ghost-gathering vignette.
   {
-    text: 'This planet has a graveyard full of stories no one visits anymore.',
+    text: 'The souls you have gathered sense something interesting on this planet.',
     holdSeconds: 6,
   },
   // organic matter — the seed-gathering vignette.
   {
-    text: 'Word of your arrival has already reached the roots of everything growing here.',
+    text: 'This planet has intelligent life, and they understand who you are. They have a job for you.',
     holdSeconds: 6.2,
   },
   // volatile gasses — the king's-death/blame vignette (was the old
@@ -261,7 +262,7 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
     ],
     pairedLine: 'I keep thinking about Luna',
     explainerLine:
-      "You've brought so many souls to visit. We have many lost souls here, too. May we join you on your travels?",
+      "You've brought so many souls to visit us! We have many detached souls here, too. Would you collect them so they can join you on your travels?",
   },
   // organic matter — VISIBLE_PEOPLE_BY_TYPE[1] = N_PEOPLE (10), so 8
   // ambient slots; this pool is sized to match.
@@ -278,7 +279,7 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
       ['Third new species this decade. We\'ve stopped trying to explain it.'],
     ],
     explainerLine:
-      'The beauty of the planet is all because of you. Take seeds from our best plants and spread them around this universe.',
+      'The beauty of the planet all started with your stardust. We want to return the favor. Take seeds from our best plants and spread them around this universe.',
   },
   // volatile gasses — VISIBLE_PEOPLE_BY_TYPE[2] = 6, so only 4 ambient
   // slots; this pool deliberately holds more than 4 entries, since
@@ -294,7 +295,8 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
       ["We're blaming the comet mostly so nobody blames the guy who poisoned the wine."],
     ],
     color: [1.0, 0.82, 0.15],
-    explainerLine: "You visit our planet and bring death to our king. We don't take this lightly.",
+    explainerLine:
+      "You visit our planet and bring death to our king. We don't take this lightly! Go to each of our people and hear what they think of this curse before you leave.",
   },
 };
 
@@ -394,15 +396,15 @@ export function farewellMessage(): NotificationCopy {
 // this point (ghosts/seeds/skulls) instead of one shared generic blurb.
 const LAUNCH_INTRO_BY_TYPE: NotificationCopy[] = [
   {
-    text: 'The souls you gathered are quiet now, riding with you. You can choose to orbit here, or carry them on forever.',
+    text: 'The souls you gathered are quiet now, riding with you. You can choose to orbit close to home, or carry them on forever.',
     holdSeconds: 7.5,
   },
   {
-    text: 'The seeds are packed in tight, waiting for new ground. Orbit and watch them take root, or scatter them further out.',
+    text: 'The seeds are packed in tight, waiting for new ground. Would you like to orbit this planet and keep and eye on things, or scatter them further out into the universe?',
     holdSeconds: 7.5,
   },
   {
-    text: "They've already started telling stories about the comet that took their king. Stay and become the legend, or vanish and let them finish it without you.",
+    text: "They've already started telling stories about the comet that took their king. Take on the role of curse-bringer orbiting this planet forever, or continue on into the universe?",
     holdSeconds: 8,
   },
 ];
@@ -414,13 +416,13 @@ export function launchIntroMessage(dominantType: number): NotificationCopy {
 // two choice zones — indexed by dominantPebbleType, same reasoning as
 // launchIntroMessage above (was static/generic before).
 const ORBIT_COMMIT_BY_TYPE: NotificationCopy[] = [
-  { text: 'You will stay as a light in their sky, over with the ones who followed.', holdSeconds: 5.5 },
+  { text: 'You will stay as a light in their sky, reminding the creatures of the ones who followed.', holdSeconds: 5.5 },
   { text: 'You will stay as a light in their sky, watching everything you started grow.', holdSeconds: 5.9 },
-  { text: 'You will stay as a light in their sky — the omen they can point to forever.', holdSeconds: 6 },
+  { text: 'You will stay as a light in their sky. The omen they can point to forever.', holdSeconds: 6 },
 ];
 const UNKNOWN_COMMIT_BY_TYPE: NotificationCopy[] = [
-  { text: 'You will carry them onward, and let this sky forget your name.', holdSeconds: 5.7 },
-  { text: 'You will leave to spread these interesting plants elsewhere.', holdSeconds: 5.2 },
+  { text: 'You will carry them onward, to new cosmic lands.', holdSeconds: 5.7 },
+  { text: 'You will leave to spread these unique plants elsewhere.', holdSeconds: 5.2 },
   { text: 'You will leave them with only the story, and no one left to blame.', holdSeconds: 5.9 },
 ];
 export function orbitCommitMessage(dominantType: number): NotificationCopy {
@@ -440,20 +442,49 @@ export function unknownCommitMessage(dominantType: number): NotificationCopy {
 // comment) — this sequence is meant to read as a quickening countdown, not
 // a leisurely one, but it still needed a little more room.
 export const LAUNCH_BUILDUP_SEQUENCE: NotificationCopy[] = [
-  { text: 'Swing your comet to build up speed.', holdSeconds: 3 },
+  { text: 'Get ready to go. Swing your comet to build up speed.', holdSeconds: 5 },
   { text: 'Faster!', holdSeconds: 2.5 },
   { text: 'Keep going!', holdSeconds: 2.5 },
 ];
 
+// A quiet, one-line real-world echo per dominant type — never spelled out
+// as literal exposition, just a narrator's aside a thoughtful player can
+// connect to something true: Gas gestures at how people reach for a story
+// (a curse, an omen) to explain what they don't understand rather than sit
+// with chance; Organic gestures at panspermia — comets/asteroids are a real
+// hypothesis for how early Earth got the organic building blocks for life;
+// Soul gestures at consciousness/the metaphysical still being genuinely
+// unexplained, not just unexplained-to-these-characters. Indexed by
+// dominantPebbleType, same convention as ORBIT_COMMIT_BY_TYPE above.
+const FINALE_MEANING_BY_TYPE: string[] = [
+  "Nobody ever told you what a soul actually is. Somehow you ended up with a whole pack of them anyway.",
+  'Long before you arrived, comets like you were already carrying the first ingredients of life from space to world.',
+  "They will remember you as an omen. It's easier than remembering there wasn't one.",
+];
+
 // Fired once by EndRunMenuSystem, right before the "time is done" message —
-// a closing name for the comet you shaped, tying its final identity back to
-// whichever constellation you became. celestialSymbol can be null on a
-// dev-menu skip that never traced one — falls back to the dominant pebble
-// type's own name instead.
-export function cometNameMessage(dominantType: number, celestialSymbol: string | null): NotificationCopy {
+// closes out the run in two staggered lines (see NotificationCopy's own
+// comment on '\n' + LINE_STAGGER_SECONDS): the quiet type-specific meaning
+// above, then what your final identity means given the choice made at
+// Launch (OrbitalLaunchSystem.getChoice()) — orbit settles permanently into
+// this world's sky under the name you earned (celestialSymbol, tying back
+// to whichever constellation you became — falls back to the dominant
+// pebble type's own name on a dev-menu skip that never traced one), launch
+// carries on past it into anonymity instead, so no name is named there.
+export function finaleMessage(
+  dominantType: number,
+  celestialSymbol: string | null,
+  choice: 'orbit' | 'launch',
+): NotificationCopy {
   const name = celestialSymbol ?? PEBBLE_TYPES[dominantType]?.name ?? 'the unnamed';
+  const meaning = FINALE_MEANING_BY_TYPE[dominantType] ?? FINALE_MEANING_BY_TYPE[0];
+  const closing =
+    choice === 'orbit'
+      ? `A lifetime spent gathering and delivering space dust ends here. You have found your place as ${name}.`
+      : 'A lifetime spent gathering and delivering space dust carries you onward still, for whatever comes next.';
   return {
-    text: `You leave as ${name}, remembered in the sky above the world you touched.`,
-    holdSeconds: 6.5,
+    text: `${meaning}\n${closing}`,
+    holdSeconds: 8.5,
+    lineColors: [null, PEBBLE_TYPES[dominantType]?.color ?? null, null],
   };
 }

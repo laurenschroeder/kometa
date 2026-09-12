@@ -1,61 +1,92 @@
 import { Vector3 } from '@iwsdk/core';
 import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
 
-// Anchor for the first group — "straight ahead" from the player origin,
-// same convention orbital-launch-system.ts's ORBIT_DIR already establishes
-// (no locomotion, so player origin never moves). The rest are spaced evenly
-// around it.
-const FIRST_GROUP_DIR: [number, number, number] = [0, 0, -1];
-
-const N_GROUPS = 9;
-const GROUP_SPACING_DEG = 360 / N_GROUPS; // 40°
-// Wider than half the spacing (20°) so neighboring groups' cones overlap a
-// little rather than leaving a hard-edged gap between them.
-const GROUP_HALF_ANGLE_DEG = 23;
-
 export interface PebbleSpawnPoint {
   dir: Vector3;
   radiusT: number;
   type: number;
 }
 
-function rotateAroundY(base: [number, number, number], degrees: number): Vector3 {
-  const rad = (degrees * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  return new Vector3(base[0] * cos + base[2] * sin, base[1], -base[0] * sin + base[2] * cos);
-}
+// Same spawn shell PebbleWeavingSystem builds its GatherableField against —
+// exported so both files share one source of truth. The vein curves below
+// are authored in terms of these two numbers (see VEIN_BASE_RADIUS's own
+// comment), so drifting them out of sync here vs. the field's own
+// spawnRadiusMin/Max would silently distort the intended shape (GatherableField
+// re-derives world radius from radiusT against ITS OWN min/max — see its own
+// comment on the spawnPoint contract).
+export const PEBBLE_SPAWN_RADIUS_MIN = 0.5;
+export const PEBBLE_SPAWN_RADIUS_MAX = 1.8;
+const PEBBLE_SPAWN_CENTER: [number, number, number] = [0, 1.2, 0];
 
-// Blue=0, Green=1, Red=2 — see pebble-type.ts's PEBBLE_TYPES. Cycling all
-// three colors across N_GROUPS=9 (a multiple of 3) puts 3 groups of each
-// color 120° apart from each other, interleaved with the other two colors
-// every 40° — no two adjacent groups share a color, and each color is
-// itself evenly spread around the full circle.
-const GROUP_COLOR_CYCLE = [0, 1, 2];
-const GROUP_DEFS: { center: Vector3; type: number }[] = Array.from({ length: N_GROUPS }, (_, i) => ({
-  center: rotateAroundY(FIRST_GROUP_DIR, i * GROUP_SPACING_DEG),
-  type: GROUP_COLOR_CYCLE[i % GROUP_COLOR_CYCLE.length],
-}));
+const N_VEIN_TYPES = 3; // matches PEBBLE_TYPES' blue/green/red ordering
 
-const GROUP_COS = Math.cos((GROUP_HALF_ANGLE_DEG * Math.PI) / 180);
+// Chapter 2's spatial layout: each pebble type winds through its own loose
+// "vein" — a wavy, spiraling path around the player (matching this phase's
+// own name, "Weaving") — rather than being scattered independently within
+// a shared cloud/cone. The three veins share the same vertical axis, each
+// offset AZIMUTH_OFFSET apart (120°) so they read as three distinct braided
+// strands, but their radius/height each ride their own out-of-phase wave
+// (see RADIUS_PHASE_MULT/HEIGHT_PHASE_MULT) so the strands visibly swell
+// toward and away from each other — twisting around one another — rather
+// than tracing three perfectly parallel rings. Chasing one color becomes
+// "follow this strand," not "avoid everything else in a mixed blob."
+// First-pass numbers — expect to retune in-headset.
+const VEIN_TURNS = 2.25; // full loops around the vertical axis over one vein's length
+// Middle of the spawn shell's own radius range (see PEBBLE_SPAWN_RADIUS_MIN/
+// MAX) — the wave amplitude below swings around this, not off some
+// unrelated baseline.
+const VEIN_BASE_RADIUS = (PEBBLE_SPAWN_RADIUS_MIN + PEBBLE_SPAWN_RADIUS_MAX) / 2;
+const VEIN_RADIUS_WAVE_AMPLITUDE = 0.35;
+const VEIN_RADIUS_WAVE_FREQ = 2; // wave cycles over one vein's length
+const VEIN_HEIGHT_AMPLITUDE = 0.45;
+const VEIN_HEIGHT_WAVE_FREQ = 1.5;
+// Small random offset around the exact curve point so a vein reads as a
+// loose tube of pebbles, not an infinitely thin line.
+const VEIN_THICKNESS = 0.13;
 
-function sampleGroupDirection(center: Vector3): Vector3 {
-  let dir: Vector3;
-  do {
-    dir = randomUnitVector3();
-  } while (dir.dot(center) < GROUP_COS);
-  return dir;
-}
+const AZIMUTH_OFFSET = (Math.PI * 2) / N_VEIN_TYPES; // 120° apart
+// Deliberately NOT matching AZIMUTH_OFFSET's own 120° spacing — keeps the
+// three veins' radius/height swells out of lockstep with their angular
+// spacing, so the braid reads as organic rather than a perfectly repeating
+// pattern.
+const RADIUS_PHASE_MULT = 2.1;
+const HEIGHT_PHASE_MULT = 1.7;
 
-// Chapter 2's spatial layout: red, green, and blue each form 3 discrete
-// groups, spread evenly around the full 360° circle around the player
-// (not clustered to any one side), with a bit of overlap between
-// neighboring groups' cones rather than a hard gap — see GROUP_HALF_ANGLE_DEG.
+const _scratchPoint = new Vector3();
+const _scratchJitter = new Vector3();
+
 // Called once per pebble (see GatherableFieldParams.spawnPoint) at
-// field-construction time; radius stays full-range/uniform-in-r for every
-// group, same as the field's default path — "group" describes the angular
-// shape, not a thin radius shell.
+// field-construction time. Picks a random type and a random position `s`
+// along that type's own vein (0=start, 1=end), evaluates the curve, adds a
+// small random jitter for thickness, then converts the resulting absolute
+// point back into the {dir, radiusT} shape GatherableField expects (a unit
+// direction + 0-1 radius fraction from spawnCenter) — the field itself is
+// never touched; any point in the shell can be expressed this way.
 export function assignPebbleSpawnPoint(): PebbleSpawnPoint {
-  const group = GROUP_DEFS[Math.floor(Math.random() * GROUP_DEFS.length)];
-  return { dir: sampleGroupDirection(group.center), radiusT: Math.random(), type: group.type };
+  const type = Math.floor(Math.random() * N_VEIN_TYPES);
+  const s = Math.random();
+
+  const azimuth = s * VEIN_TURNS * Math.PI * 2 + type * AZIMUTH_OFFSET;
+  const radius =
+    VEIN_BASE_RADIUS +
+    Math.sin(s * VEIN_RADIUS_WAVE_FREQ * Math.PI * 2 + type * RADIUS_PHASE_MULT) * VEIN_RADIUS_WAVE_AMPLITUDE;
+  const height =
+    Math.sin(s * VEIN_HEIGHT_WAVE_FREQ * Math.PI * 2 + type * HEIGHT_PHASE_MULT) * VEIN_HEIGHT_AMPLITUDE;
+
+  _scratchPoint.set(Math.cos(azimuth) * radius, height, Math.sin(azimuth) * radius);
+  _scratchJitter.copy(randomUnitVector3()).multiplyScalar(Math.random() * VEIN_THICKNESS);
+  _scratchPoint.add(_scratchJitter);
+
+  const dist = _scratchPoint.length();
+  const dir = dist > 1e-6 ? _scratchPoint.clone().multiplyScalar(1 / dist) : new Vector3(0, 1, 0);
+  const range = PEBBLE_SPAWN_RADIUS_MAX - PEBBLE_SPAWN_RADIUS_MIN;
+  const radiusT = Math.min(1, Math.max(0, (dist - PEBBLE_SPAWN_RADIUS_MIN) / range));
+
+  return { dir, radiusT, type };
+}
+
+// Exported for PebbleWeavingSystem's own GatherableField construction, so
+// its spawnCenter always matches what this file's vein math assumes.
+export function getPebbleSpawnCenter(): [number, number, number] {
+  return PEBBLE_SPAWN_CENTER;
 }

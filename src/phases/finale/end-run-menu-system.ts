@@ -11,10 +11,11 @@ import {
 import type { UIKitDocument } from '@iwsdk/core';
 import { GameDirectorSystem } from '../../core/game-director-system.js';
 import { getGlobals } from '../../core/globals.js';
-import { cometNameMessage } from '../../core/notification-copy.js';
+import { finaleMessage } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { Phase } from '../../core/phase.js';
 import { StartMenuSystem } from '../../core/start-menu-system.js';
+import { OrbitalLaunchSystem } from '../orbital-launch/orbital-launch-system.js';
 
 // How long to let Finale's own payoff (CometAutopilotSystem's orbit/launch,
 // still always-on and driving the comet through this whole phase) read
@@ -108,12 +109,18 @@ export class EndRunMenuSystem extends createSystem({
 
     this._shown = true;
     const notifications = this.world.getSystem(NotificationHudSystem);
-    // A closing name for the comet — see cometNameMessage's own comment.
-    // No separate "your time is done" notification anymore — the end-run
-    // panel appearing (right below) is itself that cue now, rather than
-    // saying it twice.
+    // A closing name for the comet, folded together with what that identity
+    // means given whichever path was actually chosen at Launch — see
+    // finaleMessage's own comment. No separate "your time is done"
+    // notification anymore — the end-run panel appearing (right below) is
+    // itself that cue now, rather than saying it twice.
     const globals = getGlobals(this.world);
-    const nameMsg = cometNameMessage(globals.dominantPebbleType.peek(), globals.celestialSymbol.peek());
+    // getChoice() can still be null on a dev-menu skip that jumped straight
+    // to Finale without ever passing through Launch — OrbitalLaunchSystem's
+    // own update() falls back to 'orbit' the same way once a choice is
+    // actually required, so mirror that default here too.
+    const choice = this.world.getSystem(OrbitalLaunchSystem)?.getChoice() ?? 'orbit';
+    const nameMsg = finaleMessage(globals.dominantPebbleType.peek(), globals.celestialSymbol.peek(), choice);
     notifications?.notify(nameMsg.text, nameMsg.holdSeconds);
     this._panelObject.visible = true;
     this._entity.addComponent(RayInteractable);
