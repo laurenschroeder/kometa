@@ -1,6 +1,7 @@
 import {
   CanvasTexture,
   Color,
+  type ColorRepresentation,
   createSystem,
   DoubleSide,
   Group,
@@ -12,10 +13,11 @@ import {
 } from '@iwsdk/core';
 import { buildNebulaCloud } from '../../vfx/geometry/nebula-cloud.js';
 import { buildOrbitalArrow } from '../../vfx/geometry/orbital-arrow.js';
+import { ORBIT, UNKNOWN, WHITE } from '../../vfx/color/color-scheme.js';
 import { OrbitalLaunchSystem, ZONE_RADIUS } from './orbital-launch-system.js';
 
-const ORBIT_COLOR = 0x4a9aff;
-const UNKNOWN_COLOR = 0x7a3aff;
+const ORBIT_COLOR = ORBIT;
+const UNKNOWN_COLOR = UNKNOWN;
 const UNKNOWN_COLOR_RGB: [number, number, number] = new Color(UNKNOWN_COLOR).toArray() as [number, number, number];
 // Slow self-rotation so the nebula reads as a drifting cloud rather than a
 // static prop — applied only to the Unknown choice's marker (see update()).
@@ -26,9 +28,6 @@ const LABEL_HEIGHT = 0.1;
 const LABEL_GAP = 0.15; // above the zone sphere
 const LABEL_CANVAS_W = 384;
 const LABEL_CANVAS_H = 128;
-
-const COUNTDOWN_PULSE_FREQ = 2.5;
-const COUNTDOWN_PULSE_AMOUNT = 0.12;
 
 // Charge-up cue while a zone is being held (see OrbitalLaunchSystem's
 // CHARGE_SECONDS/getOrbit/UnknownCharge01) — the zone visibly grows,
@@ -154,7 +153,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
   }
 
   private _buildChoice(
-    color: number,
+    color: ColorRepresentation,
     text: string,
     center: Vector3,
     liveDir: Vector3,
@@ -190,7 +189,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       liveDir,
       chargeVisual: 0,
       baseColor: zoneMat.color.clone(),
-      chargedColor: zoneMat.color.clone().lerp(new Color(1, 1, 1), 0.85),
+      chargedColor: zoneMat.color.clone().lerp(new Color(WHITE), 0.85),
     };
   }
 
@@ -234,10 +233,18 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     }
 
     if (state !== this._lastState && state === 'committed') {
+      // Both choices' zone/label hide immediately on commit — no more
+      // pulsing countdown on the winning zone while the buildup sequence
+      // plays out (see the removed 'committed' pulse block below); the
+      // losing choice's marker (arrow/nebula) hides too, same as before,
+      // but the winning marker stays up as the "you're headed there" cue
+      // through detach.
       const losing = this._orbitalLaunch.getChoice() === 'orbit' ? this._unknown : this._orbit;
       losing.marker.visible = false;
-      losing.zone.visible = false;
-      losing.label.visible = false;
+      for (const choice of [this._orbit, this._unknown]) {
+        choice.zone.visible = false;
+        choice.label.visible = false;
+      }
     }
     this._lastState = state;
 
@@ -282,10 +289,6 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
           CHARGE_BASE_OPACITY + choice.chargeVisual * (CHARGE_MAX_OPACITY - CHARGE_BASE_OPACITY);
         choice.zoneMaterial.color.copy(choice.baseColor).lerp(choice.chargedColor, choice.chargeVisual);
       }
-    } else if (state === 'committed') {
-      const winning = this._orbitalLaunch.getChoice() === 'orbit' ? this._orbit : this._unknown;
-      const pulse = 1 + Math.sin(time * COUNTDOWN_PULSE_FREQ * Math.PI * 2) * COUNTDOWN_PULSE_AMOUNT;
-      winning.zone.scale.setScalar(pulse);
     }
   }
 }

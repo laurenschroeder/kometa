@@ -1,4 +1,5 @@
 import { Phase } from './phase.js';
+import { FATE_CROWN_DIALOGUE, hexToRgb } from '../vfx/color/color-scheme.js';
 import { PEBBLE_TYPES } from '../phases/pebbles/pebble-type.js';
 
 // Single source of truth for ALL of this game's narrative text — both the
@@ -43,10 +44,10 @@ export const VISIT_STARS_TEXT = 'Why not visit those nearby stars? The people on
 // fully fading out before the next fades in.
 export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Stardust]: [
-    { text: 'You are stardust unformed. Move your hand around to gather yourself into being.', holdSeconds: .4 },
+    { text: 'You are stardust unformed. Move your hand around to gather yourself into being.', holdSeconds: 5.4 },
     { text: 'The faster you swing, the further you go.', holdSeconds: 5.5, delaySeconds: 2 },
     {
-      text: 'If you want to control the comet with a different hand, pinch it with the hand you want it to follow.',
+      text: 'If you want to control the comet with a different hand, pinch (or pull trigger) with the hand you want it to follow.',
       holdSeconds: 5,
       delaySeconds: 12,
     },
@@ -278,9 +279,9 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
       ["I've seen that dog steal three sandwiches this week. I don't trust its judgment."],
       ['He\'s been staring at the sky for twenty minutes. He does that for garbage trucks too.'],
     ],
-    pairedLine: 'I keep thinking about Luna',
+    pairedLine: "You've brought so many alien souls to visit us!",
     explainerLine:
-      "You've brought so many souls to visit us! We have many detached souls here, too. Would you collect them so they can join you on your travels?",
+      "We have many detached souls here, too. Collect them so they can join you on your travels.",
   },
   // organic matter — VISIBLE_PEOPLE_BY_TYPE[1] = N_PEOPLE (10), so 8
   // ambient slots; this pool is sized to match.
@@ -296,8 +297,9 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
       ["It's been doing that since before the comet showed up, but sure."],
       ['Third new species this decade. We\'ve stopped trying to explain it.'],
     ],
+    pairedLine: 'The beauty of the planet all started with your stardust. We want to return the favor.',
     explainerLine:
-      'The beauty of the planet all started with your stardust. We want to return the favor. Take seeds from our best plants and spread them around this universe.',
+      'Take seeds from our best plants and spread them around this universe.',
   },
   // volatile gasses — VISIBLE_PEOPLE_BY_TYPE[2] = 6, so only 4 ambient
   // slots; this pool deliberately holds more than 4 entries, since
@@ -309,12 +311,13 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
       ['The comet has brought death to our king!'],
       ['Time for an uprising!'],
       ['This is too much chaos for me'],
-      ["The king was already sick. The comet's just getting credit for good timing."],
+      ["The king was already sick. The comet's just getting credit."],
       ["We're blaming the comet mostly so nobody blames the guy who poisoned the wine."],
     ],
-    color: [1.0, 0.82, 0.15],
+    color: hexToRgb(FATE_CROWN_DIALOGUE),
+    pairedLine: 'You visit our planet and bring death to our king.',
     explainerLine:
-      "You visit our planet and bring death to our king. We don't take this lightly! Go to each of our people and hear what they think of this curse before you leave.",
+      "We don't take this lightly! Go to each of our people and hear what they think of this curse before you leave.",
   },
 };
 

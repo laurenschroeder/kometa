@@ -22,7 +22,7 @@ import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
-import { buildBlueGreenPalette } from '../../vfx/color/blue-green-palette.js';
+import { COMET_HEAD, HAZE, HAZE_GAS, hexToRgb, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
 import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
@@ -72,7 +72,6 @@ const SOUL_PACK_SIZE = 6;
 const SOUL_FLIGHT_SCALE_BOOST = 1.3;
 
 const N_ORGANIC_VARIANTS = 6;
-const ORGANIC_PALETTE = buildBlueGreenPalette();
 const kOrganicGeos: BufferGeometry[] = Array.from({ length: N_ORGANIC_VARIANTS }, () => buildOrganicGeometry());
 
 // A freshly constructed InstancedMesh's instanceMatrix buffer starts
@@ -109,16 +108,16 @@ const GAS_POINT_SIZE_FACTOR = 16;
 // for the head), so bodyColorLight is unused here — duplicated to satisfy
 // the shared palette shape rather than adding a second interface.
 const HEAD_PALETTE = {
-  bodyColorDark: [0.03, 0.05, 0.09] as [number, number, number],
-  bodyColorLight: [0.03, 0.05, 0.09] as [number, number, number],
-  rimColor: [1.0, 1.0, 1.0] as [number, number, number],
+  bodyColorDark: hexToRgb(COMET_HEAD),
+  bodyColorLight: hexToRgb(COMET_HEAD),
+  rimColor: hexToRgb(WHITE),
 };
-const HAZE_COLOR: [number, number, number] = [0.3, 0.55, 1.0];
+const HAZE_COLOR: [number, number, number] = hexToRgb(HAZE);
 // Warm red/orange, same family as GAS_CLOUD_COLOR — the trail reads as
 // visibly ominous for the whole rest of the playthrough once gas locks in
 // as dominant, not just during Fate Events (see the dominantPebbleType
 // subscribe below, mirroring the head's own retint-on-lock-in pattern).
-const HAZE_COLOR_GAS: [number, number, number] = [0.95, 0.35, 0.18];
+const HAZE_COLOR_GAS: [number, number, number] = hexToRgb(HAZE_GAS);
 
 // Precomputed once at module load — zero runtime cost, shared across every
 // PebbleCometPresentationSystem-managed comet.

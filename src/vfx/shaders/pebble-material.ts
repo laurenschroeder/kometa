@@ -5,6 +5,15 @@ import {
   ToonRimPalette,
 } from './toon-rim-material.js';
 import { makePointSpriteMaterial } from './point-sprite-material.js';
+import {
+  GAS_CLOUD,
+  hexToRgb,
+  ORGANIC_GLITTER_DARK,
+  ORGANIC_GLITTER_LIGHT,
+  SOUL_ISLAND_DARK,
+  SOUL_ISLAND_LIGHT,
+  WHITE,
+} from '../color/color-scheme.js';
 
 // The three pebble types (see pebble-type.ts) are drawn as three genuinely
 // different art styles, not just three tint colors on one shared rock mesh —
@@ -17,9 +26,9 @@ import { makePointSpriteMaterial } from './point-sprite-material.js';
 
 // ── Soul (type 0) — translucent wiggly OBJ islands ─────────────────────────
 export const SOUL_ISLAND_PALETTE: ToonRimPalette = {
-  bodyColorDark: [0.75, 0.88, 1.0],
-  bodyColorLight: [0.9, 0.97, 1.0],
-  rimColor: [1, 1, 1],
+  bodyColorDark: hexToRgb(SOUL_ISLAND_DARK),
+  bodyColorLight: hexToRgb(SOUL_ISLAND_LIGHT),
+  rimColor: hexToRgb(WHITE),
 };
 // amplitude 0.19 vs. the art-test wiggly-islands reference's bare default
 // (0.15) — "slightly stronger than the art level." opacity 0.55 for
@@ -45,10 +54,10 @@ export const PEBBLE_ISLAND_OBJ_MAX_COUNT = 8;
 // reference's neon yellow — the reference ties rim/sparkle to the same
 // fixed color, so "make the rim white" carries sparkle along with it.
 export const ORGANIC_GLITTER_PALETTE: ToonRimPalette = {
-  bodyColorDark: [0.018, 0.018, 0.022],
-  bodyColorLight: [0.045, 0.045, 0.055],
-  rimColor: [1, 1, 1],
-  sparkleColor: [1, 1, 1],
+  bodyColorDark: hexToRgb(ORGANIC_GLITTER_DARK),
+  bodyColorLight: hexToRgb(ORGANIC_GLITTER_LIGHT),
+  rimColor: hexToRgb(WHITE),
+  sparkleColor: hexToRgb(WHITE),
 };
 export const kOrganicGlitterMat = makeToonRimInstancedGrainyMaterial(ORGANIC_GLITTER_PALETTE);
 
@@ -59,7 +68,7 @@ export const kOrganicGlitterMat = makeToonRimInstancedGrainyMaterial(ORGANIC_GLI
 // backdrop whenever gas is dominant, so staying red/orange keeps this type's
 // identity color consistent across the rest of the game. Real emission
 // nebulae read naturally as red/orange anyway.
-export const GAS_CLOUD_COLOR: [number, number, number] = [0.95, 0.4, 0.22];
+export const GAS_CLOUD_COLOR: [number, number, number] = hexToRgb(GAS_CLOUD);
 export const kGasCloudMat = makePointSpriteMaterial({
   color: GAS_CLOUD_COLOR,
   blending: AdditiveBlending,

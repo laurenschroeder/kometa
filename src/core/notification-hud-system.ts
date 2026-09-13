@@ -1,9 +1,21 @@
 import { montserrat } from '@pmndrs/msdfonts';
-import { createSystem, Follower, FollowBehavior, PanelDocument, PanelUI, UIKit } from '@iwsdk/core';
+import {
+  AudioListener,
+  createSystem,
+  Follower,
+  FollowBehavior,
+  Object3D,
+  PanelDocument,
+  PanelUI,
+  UIKit,
+  Vector3,
+} from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { getGlobals } from './globals.js';
 import { NOTIFICATION_COPY } from './notification-copy.js';
 import { Phase } from './phase.js';
+import { hexToRgb, NOTIFICATION_TEXT_DEFAULT } from '../vfx/color/color-scheme.js';
+import { playNotificationChime } from '../vfx/audio/notification-chime.js';
 
 // Stand-in for the requested Carrois Gothic SC: this project's panels
 // render text via GPU bitmap-font (MSDF) atlases, which arbitrary web
@@ -74,7 +86,7 @@ const LINE_STAGGER_SECONDS = 1.8;
 // message's per-line tint (see NotificationCopy.lineColors) can't leak onto
 // a later untinted one, since these HudText elements are reused slots, not
 // rebuilt per message.
-const DEFAULT_TEXT_COLOR: readonly [number, number, number] = [1, 1, 1];
+const DEFAULT_TEXT_COLOR: readonly [number, number, number] = hexToRgb(NOTIFICATION_TEXT_DEFAULT);
 
 type QueueEntry = {
   text: string;
@@ -124,10 +136,23 @@ export class NotificationHudSystem extends createSystem({
   private _current: QueueEntry | null = null;
   private _bootTriggered = false;
 
+  // Soft "pop" played every time a message actually appears (see
+  // _beginShow) — positioned at the HUD panel's own live world position
+  // (it follows player.head via Follower, so this always reads as coming
+  // from "wherever the notification currently is," not a fixed world spot).
+  private _panelObject!: Object3D;
+  private _audioListener!: AudioListener;
+  private _scratchSoundPos!: Vector3;
+
   init(): void {
     const entity = this.world.createTransformEntity();
     const panelObject = entity.object3D!;
     panelObject.visible = true;
+    this._panelObject = panelObject;
+
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._scratchSoundPos = new Vector3();
 
     entity.addComponent(PanelUI, {
       config: '/ui/notification-hud.json',
@@ -332,6 +357,9 @@ export class NotificationHudSystem extends createSystem({
     this._state = FadeState.In;
     this._elapsed = 0;
     this._setBoxVisible(true, 0);
+
+    this._panelObject.getWorldPosition(this._scratchSoundPos);
+    playNotificationChime(this._audioListener, this.scene, this._scratchSoundPos);
   }
 
   // Total time the "In" phase takes for the current message — the last

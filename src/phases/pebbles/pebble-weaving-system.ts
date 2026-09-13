@@ -14,7 +14,7 @@ import { PEBBLE_TYPES } from './pebble-type.js';
 // overall difficulty — stays the same; the field is just denser and easier
 // to find pebbles in).
 const N_PEBBLES_FIELD = 210;
-const WIN_CAPTURE_COUNT = Math.ceil(N_PEBBLES_FIELD * 0.35);
+const WIN_CAPTURE_COUNT = Math.ceil(N_PEBBLES_FIELD * 0.25);
 
 // Fired via GatherableField's onCapture/onAttractStart callbacks, drained
 // each frame by PebbleFieldVfxSystem to trigger the catch/pickup pebble
@@ -218,6 +218,11 @@ export class PebbleWeavingSystem extends createSystem({
   // 0-1 grow-in progress for a pebble type — see TYPE_REVEAL_AT_SECONDS.
   getTypeRevealProgress(type: number): number {
     return smoothstep((this._elapsed - TYPE_REVEAL_AT_SECONDS[type]) / TYPE_REVEAL_GROW_SECONDS);
+  }
+  // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
+  // fraction of WIN_CAPTURE_COUNT gathered so far, not the raw field total.
+  getProgress01(): number {
+    return Math.min(1, this._field.totalCaptured / WIN_CAPTURE_COUNT);
   }
 
   // Returns this frame's capture events and clears the queue — see

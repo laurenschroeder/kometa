@@ -1,3 +1,5 @@
+import { hexToRgb, ORGANIC_MATTER, SOUL_DUST, VOLATILE_GASSES } from '../../vfx/color/color-scheme.js';
+
 // Single source of truth for the three pebble types Chapter 2 can produce.
 // Each pebble is pre-assigned one of these when it spawns — see
 // pebble-layout.ts's assignPebbleSpawnPoint for the spatial layout (discrete
@@ -10,7 +12,7 @@ export interface PebbleType {
 }
 
 export const PEBBLE_TYPES: PebbleType[] = [
-  { id: 0, name: 'soul dust', color: [0.35, 0.55, 1.0] }, // blue
-  { id: 1, name: 'organic matter', color: [0.35, 0.85, 0.4] }, // green
-  { id: 2, name: 'volatile gasses', color: [1.0, 0.32, 0.28] }, // red
+  { id: 0, name: 'soul dust', color: hexToRgb(SOUL_DUST) }, // blue
+  { id: 1, name: 'organic matter', color: hexToRgb(ORGANIC_MATTER) }, // green
+  { id: 2, name: 'volatile gasses', color: hexToRgb(VOLATILE_GASSES) }, // red
 ];

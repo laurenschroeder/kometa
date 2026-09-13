@@ -433,4 +433,12 @@ export class OrbitalLaunchSystem extends createSystem({
   getUnknownCharge01(): number {
     return Math.min(1, this._unknownCharge / CHARGE_SECONDS);
   }
+  // 0-1 "destiny chosen" progress for HandProgressHudSystem's wrist bar —
+  // mirrors whichever zone is actively charging (same value that drives that
+  // zone's own scale/color ramp, see OrbitalLaunchVfxSystem), or 1 once a
+  // choice has actually been committed to.
+  getDestinyProgress01(): number {
+    if (this._state !== 'choosing') return 1;
+    return Math.max(this._orbitCharge, this._unknownCharge) / CHARGE_SECONDS;
+  }
 }

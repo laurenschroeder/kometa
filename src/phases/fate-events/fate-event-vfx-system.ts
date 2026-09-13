@@ -1,6 +1,9 @@
 import {
   AdditiveBlending,
+  AnimationMixer,
+  AssetManager,
   AudioListener,
+  Bone,
   BufferGeometry,
   CanvasTexture,
   Color,
@@ -26,34 +29,60 @@ import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
-import { buildIslandPerson, buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
-import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
+import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
+import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
+import { buildAnimatedPerson, loadAnimatedPersonTemplate, PERSON_BODY_COLOR } from '../../vfx/geometry/animated-person.js';
+import {
+  convertZUpToYUp,
+  loadFbxMeshesByName,
+  normalizeGeometryToUnitRadiusFromOrigin,
+} from '../../vfx/geometry/fbx-field-loader.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { kSoulIslandMat } from '../../vfx/shaders/pebble-material.js';
-import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { makeToonRimFlatMaterial, makeToonRimSkinnedMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
-import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { EXPLAIN_FIGURE_INDEX, FateBeat, FateEventSystem, NAMED_FIGURE_COUNT } from './fate-event-system.js';
 
-const JUMP_FREQUENCY = 5; // Hz
-const JUMP_AMPLITUDE = 0.045; // scaled with PERSON_HEIGHT's 2.2x bump
-const BOB_EASE_RATE = 6; // 1/s exponential ease, same idiom as PlanetSeedingVfxSystem's coverage ease
+const JUMP_FREQUENCY = 5; // Hz — speed of the single hop, see _jumpElapsed
+const JUMP_AMPLITUDE = 0.135; // scaled with PERSON_HEIGHT's 2.2x then 3x bumps (0.045 -> 0.135)
 
 // Bumped from 0.14/0.07 (canvas 256x128) — long dialogue lines routinely
 // wrapped to more lines than the old canvas had height for, clipping the
 // bottom (or top) of the text. Canvas keeps the same aspect ratio as the
-// plane so text isn't stretched.
-const BUBBLE_WIDTH = 0.2;
-const BUBBLE_HEIGHT = 0.13;
-const BUBBLE_GAP = 0.03;
+// plane so text isn't stretched. Bumped again (0.2/0.13 -> 0.26/0.17, ~30%)
+// for easier reading at arm's-length VR distance — canvas resolution/font
+// size are untouched, so the same texture just renders larger.
+const BUBBLE_WIDTH = 0.26;
+const BUBBLE_HEIGHT = 0.17;
+// Doubled from 0.03 — sits noticeably higher above the person's head now,
+// per the same "easier to read" pass as the size bump above.
+const BUBBLE_GAP = 0.06;
 // Fast catch-up ease on top of FateEventSystem's own analytic fade-in/hold/
 // fade-out curve (see getBubbleOpacity()) — the curve already does the real
 // fading; this just smooths the snap-to-0 the instant a hand leaves.
 const BUBBLE_EASE_RATE = 8;
 const BUBBLE_CANVAS_W = 384;
 const BUBBLE_CANVAS_H = 250;
+
+// "Talk to me" markers for the two named figures (EXPLAIN_FIGURE_INDEX/
+// PAIRED_FIGURE_INDEX) — the only two people per scene with actual
+// individual narrative lines rather than shared ambient chatter, so they're
+// the ones worth calling out from across the crowd. Reuses the existing
+// starIllustration texture (already in the asset manifest, see index.ts)
+// rather than drawing a new glyph — quicker, and its bright four-point-star
+// shape already reads as "notice me" at a glance. Floats well above
+// PERSON_HEIGHT + BUBBLE_GAP's own bubble height so it's visible over the
+// whole crowd cap, not just up close, and disappears for good the instant
+// that figure's own dialogue actually shows (see _talkedTo/update()) — a
+// one-way "found them" signal, not a repeating reminder.
+const MARKER_TEXTURE_KEY = 'starIllustration';
+const MARKER_SIZE = 0.11;
+const MARKER_HEIGHT = PERSON_HEIGHT * 2.3;
+const MARKER_PULSE_FREQ = 0.8; // Hz — gentle, same "flash while inviting interaction" idiom as the start menu's own pinch hint
+const MARKER_PULSE_MIN_SCALE = 0.85;
 const BUBBLE_LINE_HEIGHT = 34;
 
 const SOUL_DUST_TYPE = 0;
@@ -98,31 +127,12 @@ const SPIN_ELIGIBLE_FROM = PLANET_ARRIVAL_ELIGIBLE_FROM;
 const STAGGER_WINDOW = 0.3;
 const PERSON_SURFACE_OFFSET = 0; // people sit exactly on the surface, no clearance needed
 
-// Real sculpted mesh fragments used as placeholder "characters" (standing
-// in for humans, plants, etc — final crowd art isn't ready yet) instead of
-// buildPlaceholderPerson's primitive box-person shapes. Same source OBJ/
-// island-extraction ArtTestVfxSystem's own "8 islands" variants use (see
-// that file's GHOST_OBJ_URL comment for why this one export has ~293
-// disconnected sculpted pieces merged into two untagged groups) — no
-// per-piece names/tags exist for a tool like Spatial Editor to hand-pick a
-// specific one ahead of time, so which island lands on each figure is
-// chosen from ISLAND_PRIORITY below (its facing is still randomized — see
-// buildIslandPerson's own comment).
-const PERSON_OBJ_URL = '/medium/virtualpebble_2026-09-03_13-09-21.obj';
-const PERSON_OBJ_GROUPS = ['Layer_1', 'Layer_2'];
-const PERSON_OBJ_MAX_COUNT = 8;
-const PERSON_BODY_RADIUS = PERSON_HEIGHT / 2;
-// Visually inspected once (see loadObjLargestIslands — this ranks the same
-// 8 islands the same way every time for this fixed source OBJ): index 1 is
-// the one distinctly dog-shaped island (a splayed four-limb silhouette),
-// 2 and 6 read as the most humanoid (a head-and-shoulders silhouette, and a
-// tapered standing silhouette, respectively), the rest are simple blobs.
-// Ordered so the crowd's early/named slots preferentially land on the
-// recognizable shapes rather than a blob, with blobs filling out the
-// remainder (also standing in for "plants" per this file's own comment
-// above) — cycles via `% islands.length` in _swapToIslandPeople for however
-// many people actually exist.
-const ISLAND_PRIORITY = [2, 6, 1, 0, 3, 4, 5, 7];
+// Every crowd figure now shares the one real animated rig (BreathingIdle.fbx
+// — see animated-person.ts's own comment) instead of the old primitive-box
+// or OBJ-island placeholders. Body is a fixed black (PERSON_BODY_COLOR,
+// shared with earth-situations-vfx-system.ts's King/bench figures — see
+// animated-person.ts) rather than retinted per dominant type — see
+// _buildPeople's own comment on what that replaced.
 
 // PebbleSynth.playPickup() normally scales its tone off swing speed — there's
 // no equivalent for a person activating, so every activation just gets a
@@ -145,10 +155,14 @@ function smoothstep(t: number): number {
 // it directly manipulates this system's own person arm meshes.
 const POINT_UP_DURATION = 4; // seconds organic matter's "point at the comet" pose holds
 const POINT_UP_EASE_RATE = 5;
-// A fixed "arm raised up and forward" pose rather than a true bearing-aimed
-// one — buildPlaceholderPerson's arms rotate around their own center (no
-// shoulder pivot), so aiming precisely at the comet would look like the arm
-// floating/clipping through the torso rather than a believable point.
+// These apply as an ADDITIVE rotation on the crowd's shared rig's own right-
+// arm bone (mixamorigRightArm), layered on top of whatever that frame's
+// idle-breathing animation already set — NOT an absolute pose like the old
+// primitive-figure code used (see _updateSituations' own comment on why that
+// distinction matters now that the arm is animated). Carried over unchanged
+// from the old primitive-figure tuning as a starting guess — the Mixamo
+// rig's own bone-local axes don't necessarily match the old cylinder-arm's
+// convention, so these may need re-tuning once actually seen in headset.
 const POINT_UP_ROTATION_X = -1.3;
 
 // Gas's Beat 2.5 (Ambient) crowd reaction — see earth-situations-vfx-
@@ -163,7 +177,6 @@ const GAS_WAVE_FREQ = 2; // Hz
 const GAS_WAVE_AMPLITUDE = 0.35; // radians, side-to-side
 const GAS_TURN_START = 8;
 const GAS_TURN_DURATION = 2;
-const GAS_TURN_ANGLE = Math.PI * 0.85; // most of a half-turn, world-space yaw
 
 // Beat 4 — Gas's "symbol added to your tail" flourish. A simpler, inline
 // version of the plan's own suggested standalone pooled class: with exactly
@@ -187,7 +200,7 @@ const enum SkullState {
 // Warm gold outline (vs. the crowd's default white rim) — the only visual
 // cue that a figure is one of the two named ones, alongside the name shown
 // in its speech bubble (see _drawBubbleText's caller).
-const NAMED_RIM_COLOR: [number, number, number] = [1, 0.85, 0.45];
+const NAMED_RIM_COLOR: [number, number, number] = hexToRgb(NAMED_RIM);
 
 const N_FIRE_QUADS = 8;
 const FIRE_RING_RADIUS = 0.4;
@@ -215,17 +228,43 @@ const FIRE_CANVAS_SIZE = 128;
 // Beat 4 quest read as invisible/broken rather than just small. Paired with
 // COLLECTIBLE_PULSE below so the still-uncaptured ones visibly stand out
 // from the static scenery around them instead of just being bigger dots.
-const GHOST_SIZE = 0.045;
+// 5x back up from 0.009 (that 1/5 cut read as way too small once actually
+// seen in headset), then 3x again alongside the crowd's own 3x bump — see
+// PERSON_HEIGHT. 0.045 -> 0.135.
+const GHOST_SIZE = 0.135;
 // Ghost spheres render with kSoulIslandMat itself (see _buildGhostMeshes)
 // instead of their own flat color constant now — the exact same translucent
 // wiggly blue material real soul-dust pebbles use (pebble-material.ts's
 // SOUL_ISLAND_PALETTE), so Beat 4's collectibles read as literally made of
 // soul dust rather than a separately-tuned glow.
 const IDENTITY_MAT4 = new Matrix4();
+// Real ghost shapes, swapped in over the placeholder sphere once loaded (see
+// _buildGhostMeshes) — one pack shared with fate-event-system.ts's crowd
+// (blobpeople.fbx also has several blob-person/person variants in it, not
+// used here), picked from by exact name since this file bundles many
+// unrelated shapes as siblings (see loadFbxMeshesByName's own comment).
+// Confirmed by directly parsing the file: all three are Z-up authored (same
+// convention as the plant packs — see convertZUpToYUp) with each mesh's own
+// local origin already placed at the base of its tail, so
+// normalizeGeometryToUnitRadiusFromOrigin (not the box-center-relative
+// normalizer) is the correct fit here — see that function's own comment.
+const BLOB_PEOPLE_URL = '/medium/blobpeople.fbx';
+const GHOST_MESH_NAMES = ['BlobGhost', 'ghost', 'simpleGhost'] as const;
+// Organic's own seed collectibles — same file, same "ground origin at the
+// base" authoring convention as the ghost shapes above (confirmed by
+// directly parsing the file), so normalizeGeometryToUnitRadiusFromOrigin is
+// the right fit here too (see _buildSeedMeshes).
+const SEED_MESH_NAMES = ['Blob1', 'Blob2', 'Blob3', 'Blob4'] as const;
 const SEED_SIZE = 0.035;
-const SEED_COLOR: [number, number, number] = [0.55, 0.4, 0.22];
 const COLLECTIBLE_PULSE_FREQ = 1.2; // Hz — "come find me" glow, Free/Attracting only
 const COLLECTIBLE_PULSE_AMPLITUDE = 0.2; // fractional size swing
+// Soul's ghosts float rather than sit on the ground — a gentle constant
+// vertical bob (world +Y, not camera-relative like DANCE below, since "up"
+// reads the same from any viewing angle) applies in every state (Free,
+// Attracting, AND Captured — "should all be bobbing", not just while
+// uncaptured), independent of and additive with Beat 5's own dance offset.
+const COLLECTIBLE_BOB_FREQ = 0.45; // Hz — slowed from 0.9 for a gentler ghost float
+const COLLECTIBLE_BOB_AMPLITUDE = 0.02; // meters
 const DANCE_FREQ = 1.4; // Hz
 const DANCE_AMPLITUDE = 0.025; // meters, in camera-right/up space
 
@@ -269,6 +308,19 @@ function buildFireTexture(): CanvasTexture {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, s, s);
   return new CanvasTexture(canvas);
+}
+
+// kSoulIslandMat's required per-instance attributes (see toon-rim-material.ts)
+// stamped onto a single-instance geometry — needed both on the initial
+// placeholder sphere and again on each real ghost geometry once swapped in
+// (a fresh clone has no instance attributes of its own). aTinted stays 0/
+// aTint stays black so the body reads as plain SOUL_ISLAND_PALETTE, same as
+// every real soul-dust pebble — no per-ghost recolor.
+function stampSoulIslandInstanceAttrs(geo: BufferGeometry): void {
+  geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array([0.7]), 1));
+  geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(3), 3));
+  geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array([0]), 1));
+  geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array([Math.random()]), 1));
 }
 
 function buildSkullTexture(): CanvasTexture {
@@ -324,18 +376,36 @@ export class FateEventVfxSystem extends createSystem({
   // below for that).
   private _planetArrived = false;
 
-  private _peopleMaterial!: ReturnType<typeof makeToonRimFlatMaterial>;
-  // Own material instances for the two named figures (gold rim instead of
-  // the crowd's default white) — makeToonRimFlatMaterial's uBodyColor is a
-  // live uniform, but rim color is baked in at construction, so they can't
-  // just share _peopleMaterial with a per-instance tint override.
-  private _namedMaterials: ReturnType<typeof makeToonRimFlatMaterial>[] = [];
+  // Fixed black body (see PERSON_BODY_COLOR) — no longer a live-retintable
+  // uniform per dominant type, so a plain makeToonRimSkinnedMaterial call
+  // rather than makeToonRimFlatMaterial's old per-figure uBodyColor pattern.
+  // Named figures still get their own instance purely for the gold rim (see
+  // NAMED_RIM_COLOR) — rim color is still baked in at construction.
+  private _peopleMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
+  private _namedMaterials: ReturnType<typeof makeToonRimSkinnedMaterial>[] = [];
   private _personGroups: Group[] = [];
   private _personEntities: Entity[] = [];
-  private _rightArms: Mesh[] = [];
-  private _armRestZ!: Float32Array;
-  private _bobPhase!: Float32Array;
-  private _bobAmp!: Float32Array;
+  // The crowd's shared animated rig (see animated-person.ts) — one
+  // AnimationMixer per figure (each clone has its own independent skeleton/
+  // playback state despite sharing one template+clip), and the rig's own
+  // right-arm bone for the point-up/wave overlays below (replaces the old
+  // primitive figure's raw `rightArm` Mesh).
+  private _mixers: (AnimationMixer | null)[] = [];
+  private _rightArmBones: (Bone | null)[] = [];
+  // Current EASED additive offset applied on top of the idle animation's own
+  // bone rotation each frame (see _updateSituations) — NOT an absolute pose
+  // like the old primitive-figure code's _armRestZ/rotation.set() approach,
+  // since the bone's base rotation is now animated, not static.
+  private _armOffsetX!: Float32Array;
+  private _armOffsetZ!: Float32Array;
+  // Seconds since THIS activation's single jump started; -1 = not currently
+  // jumping (either never activated, or the jump already finished). Set to
+  // 0 on the active[i] rising edge, counted up each frame, reset to -1 once
+  // the one-shot hop completes — see the main update() loop's own comment.
+  // Replaces the old continuous eased-bob-amplitude approach (every active
+  // person bobbed for as long as they stayed active); now it's a single hop
+  // followed by stillness, with the bubble gated on the hop being done.
+  private _jumpElapsed!: Float32Array;
   // Each person's own fixed surface-normal orientation, captured once at
   // build time — Gas's Beat 2.5 "turn to face the player" (see
   // _gasTurnAmount) yaws AWAY from this base each frame rather than
@@ -353,6 +423,11 @@ export class FateEventVfxSystem extends createSystem({
   private _bubbleOpacity!: Float32Array;
   private _lastLineIndex!: Int16Array;
   private _explainerDrawn = false;
+
+  // "Talk to me" markers, one per named figure (NAMED_FIGURE_COUNT) — see
+  // MARKER_* constants' own comment.
+  private _markerMeshes: Mesh[] = [];
+  private _talkedTo!: Uint8Array;
 
   private _fireMeshes: Mesh[] = [];
   private _fireEntities: Entity[] = [];
@@ -379,7 +454,17 @@ export class FateEventVfxSystem extends createSystem({
   private _normalVec!: Vector3;
   private _scratchPos!: Vector3;
   private _scratchLiveCenter!: Vector3;
-  private _scratchYawQuat!: Quaternion;
+  // Gas's Beat 2.5 "turn to face the player" (see _gasTurnAmount's caller) —
+  // computed live per-person each frame rather than baked as a fixed
+  // world-space yaw constant, since the correct amount depends on each
+  // person's own base orientation (itself derived from CROWD_CAP_DIRECTION,
+  // see fate-event-system.ts), which can change independently of this file.
+  private _scratchGasUp!: Vector3;
+  private _scratchGasForward!: Vector3;
+  private _scratchGasRight!: Vector3;
+  private _scratchGasToPlayer!: Vector3;
+  private _scratchGasMatrix!: Matrix4;
+  private _scratchGasTargetQuat!: Quaternion;
   private _camRight!: Vector3;
   private _camUp!: Vector3;
   private _camFwd!: Vector3;
@@ -392,6 +477,12 @@ export class FateEventVfxSystem extends createSystem({
   // Fate Events.
   private _audioListener!: AudioListener;
   private _voiceSynth!: PebbleSynth;
+  // Beat-4 "you picked one up" cue for the graveyard-ghost/seed collectibles
+  // — shares _audioListener (one extra gain node, not a second device, same
+  // idiom this file's own class comment on _audioListener already
+  // establishes) rather than building a dedicated listener just for this.
+  private _twinkleSynth!: TwinkleSynth;
+  private _scratchCollectSoundPos!: Vector3;
   private _wasActive!: Uint8Array;
   private _payoffChimePlayed = false;
 
@@ -410,7 +501,12 @@ export class FateEventVfxSystem extends createSystem({
     this._normalVec = new Vector3();
     this._scratchPos = new Vector3();
     this._scratchLiveCenter = new Vector3();
-    this._scratchYawQuat = new Quaternion();
+    this._scratchGasUp = new Vector3();
+    this._scratchGasForward = new Vector3();
+    this._scratchGasRight = new Vector3();
+    this._scratchGasToPlayer = new Vector3();
+    this._scratchGasMatrix = new Matrix4();
+    this._scratchGasTargetQuat = new Quaternion();
     this._camRight = new Vector3();
     this._camUp = new Vector3();
     this._camFwd = new Vector3();
@@ -421,6 +517,9 @@ export class FateEventVfxSystem extends createSystem({
     this.player.head.add(this._audioListener);
     this._voiceSynth = new PebbleSynth();
     this._voiceSynth.build(this._audioListener, this.scene);
+    this._twinkleSynth = new TwinkleSynth();
+    this._twinkleSynth.build(this._audioListener, this.scene);
+    this._scratchCollectSoundPos = new Vector3();
     this._wasActive = new Uint8Array(this._fateEvents.getPersonCount());
     this._wasVisited = new Uint8Array(this._fateEvents.getPersonCount());
     this._skullState = new Uint8Array(this._fateEvents.getPersonCount());
@@ -429,12 +528,15 @@ export class FateEventVfxSystem extends createSystem({
     this._skullFromY = new Float32Array(this._fateEvents.getPersonCount());
     this._skullFromZ = new Float32Array(this._fateEvents.getPersonCount());
 
+    this._talkedTo = new Uint8Array(NAMED_FIGURE_COUNT);
+
     this._buildPeople();
     this._buildBubbles();
+    this._buildTalkMarkers();
     this._buildFire();
     this._buildSkulls();
     this._buildGhostMeshes(this._ghostMeshes, this._fateEvents.getGraveyardField().count);
-    this._buildCollectibleMeshes(this._seedMeshes, SEED_SIZE, SEED_COLOR, this._fateEvents.getSeedField().count);
+    this._buildSeedMeshes(this._seedMeshes, this._fateEvents.getSeedField().count);
 
     // signal.subscribe() fires immediately, so state is correct before the
     // first frame renders (same idiom ConstellationsVfxSystem/
@@ -445,21 +547,10 @@ export class FateEventVfxSystem extends createSystem({
   }
 
   private _onPhaseChange(phase: Phase): void {
-    if (phase === Phase.Constellations) {
-      // The dialogue-specific mood color (if any) isn't resolved until a
-      // constellation is actually won — fall back to the dominant type's
-      // color for however long people are progressively appearing here.
-      const dominant = getGlobals(this.world).dominantPebbleType.peek();
-      const color = PEBBLE_TYPES[dominant].color;
-      (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
-      for (const mat of this._namedMaterials) (mat.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
-    } else if (phase === Phase.FateEvents) {
-      // celestialSymbol is resolved by now — pick up the real (possibly
-      // dialogue-overridden) color, and reveal bubbles: people are already
-      // visible from Constellations, this just adds the interactive layer.
-      const color = this._fateEvents.getPeopleColor();
-      (this._peopleMaterial.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
-      for (const mat of this._namedMaterials) (mat.uniforms.uBodyColor.value as Vector3).set(color[0], color[1], color[2]);
+    if (phase === Phase.FateEvents) {
+      // People are already visible from Constellations — this just adds the
+      // interactive bubble layer. Body color is fixed black now (see
+      // PERSON_BODY_COLOR) — no more per-phase dominant-type/mood retint.
       for (const mesh of this._bubbleMeshes) mesh.visible = true;
     } else if (phase === Phase.Stardust) {
       this._resetAll();
@@ -475,10 +566,11 @@ export class FateEventVfxSystem extends createSystem({
       group.rotation.z = 0;
       if (this._baseQuats[i]) group.quaternion.copy(this._baseQuats[i]);
     }
-    for (let i = 0; i < this._rightArms.length; i++) {
-      this._rightArms[i].rotation.set(0, 0, this._armRestZ[i]);
-    }
+    this._armOffsetX.fill(0);
+    this._armOffsetZ.fill(0);
     for (const mesh of this._bubbleMeshes) mesh.visible = false;
+    for (const mesh of this._markerMeshes) mesh.visible = false;
+    this._talkedTo.fill(0);
     for (const mesh of this._fireMeshes) mesh.visible = false;
     for (const mesh of this._skullMeshes) mesh.visible = false;
     for (const mesh of this._ghostMeshes) mesh.visible = false;
@@ -488,7 +580,7 @@ export class FateEventVfxSystem extends createSystem({
     this._skullState.fill(SkullState.Hidden);
     this._bubbleOpacity.fill(0);
     this._lastLineIndex.fill(-1);
-    this._bobAmp.fill(0);
+    this._jumpElapsed.fill(-1);
     this._pointUpTimer = 0;
     this._wasComplete = false;
     this._explainerDrawn = false;
@@ -500,49 +592,52 @@ export class FateEventVfxSystem extends createSystem({
     const positions = this._fateEvents.getSurfacePositions();
     const normals = this._fateEvents.getNormals();
 
-    // dominantPebbleType isn't known this early (world boot, well before
-    // Pebbles completes) either way — this is just a harmless placeholder
-    // until _onPhaseChange sets the real color on entering Constellations;
-    // people stay hidden until then regardless.
-    const initialDominant = getGlobals(this.world).dominantPebbleType.peek();
-    this._peopleMaterial = makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color);
+    // Fixed black body for every human figure now (PERSON_BODY_COLOR) — the
+    // old per-dominant-type retint is gone (see _onPhaseChange, which used
+    // to set this live each phase change). Named figures still get their
+    // own material instance purely for the gold rim — NAMED_RIM_COLOR is
+    // baked in at construction, unlike body color which used to be a live
+    // per-instance uniform override.
+    this._peopleMaterial = makeToonRimSkinnedMaterial(PERSON_BODY_COLOR);
     for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
-      this._namedMaterials.push(makeToonRimFlatMaterial(PEBBLE_TYPES[initialDominant].color, NAMED_RIM_COLOR));
+      this._namedMaterials.push(makeToonRimSkinnedMaterial(PERSON_BODY_COLOR, NAMED_RIM_COLOR));
     }
-    this._bobPhase = new Float32Array(count);
-    this._bobAmp = new Float32Array(count);
-    this._armRestZ = new Float32Array(count);
+    this._jumpElapsed = new Float32Array(count).fill(-1);
+    this._armOffsetX = new Float32Array(count);
+    this._armOffsetZ = new Float32Array(count);
 
     for (let i = 0; i < count; i++) {
-      this._bobPhase[i] = Math.random() * Math.PI * 2;
       const material = i < NAMED_FIGURE_COUNT ? this._namedMaterials[i] : this._peopleMaterial;
-      const { group, rightArm } = buildPlaceholderPerson(material);
+      // Non-animated primitive placeholder immediately (visible/functional
+      // right away, same graceful-degradation idiom every other FBX
+      // consumer in this codebase uses) — swapped for the real shared
+      // animated rig once BreathingIdle.fbx resolves (see
+      // _swapToAnimatedPeople). makeToonRimSkinnedMaterial works fine on
+      // this plain (non-skinned) geometry too — USE_SKINNING only compiles
+      // in for an actual SkinnedMesh (see the material's own comment), so
+      // the unused skinIndex/skinWeight attributes are simply inert here.
+      const { group } = buildPlaceholderPerson(material);
       group.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
       group.quaternion.setFromUnitVectors(this._upAxis, this._normalVec);
       group.visible = false;
       this._personGroups.push(group);
-      this._rightArms.push(rightArm);
-      this._armRestZ[i] = rightArm.rotation.z;
+      this._mixers.push(null); // no real rig/mixer until the swap below resolves
+      this._rightArmBones.push(null); // _updateSituations skips the arm overlay entirely until this is real
       this._baseQuats.push(group.quaternion.clone());
       this._personEntities.push(this.world.createTransformEntity(group));
     }
 
-    loadObjLargestIslands(PERSON_OBJ_URL, PERSON_OBJ_GROUPS, PERSON_OBJ_MAX_COUNT).then((islands) =>
-      this._swapToIslandPeople(islands),
-    );
+    loadAnimatedPersonTemplate().then((template) => this._swapToAnimatedPeople(template));
   }
 
   // Rebuilds every person's group in place (same Entity, same position/
-  // orientation logic already applied in _buildPeople) once the real mesh
-  // islands have loaded — until then the primitive placeholder figures built
-  // above keep showing, same "placeholder until real geometry resolves"
-  // idiom obj-field-loader.ts's own callers use.
-  private _swapToIslandPeople(islands: BufferGeometry[]): void {
-    if (islands.length === 0) {
-      console.warn(
-        `[FateEventVfxSystem] no mesh islands found under ${PERSON_OBJ_GROUPS.join('/')} in '${PERSON_OBJ_URL}' — keeping the primitive placeholder figures.`,
-      );
+  // orientation logic already applied in _buildPeople) once the shared
+  // BreathingIdle rig has loaded — until then the primitive placeholder
+  // figures built above keep showing.
+  private _swapToAnimatedPeople(template: Awaited<ReturnType<typeof loadAnimatedPersonTemplate>>): void {
+    if (!template) {
+      console.warn('[FateEventVfxSystem] BreathingIdle.fbx unavailable — keeping the primitive placeholder figures.');
       return;
     }
     for (let i = 0; i < this._personGroups.length; i++) {
@@ -550,17 +645,10 @@ export class FateEventVfxSystem extends createSystem({
       while (group.children.length > 0) group.remove(group.children[0]);
 
       const material = i < NAMED_FIGURE_COUNT ? this._namedMaterials[i] : this._peopleMaterial;
-      const islandIdx = ISLAND_PRIORITY[i % ISLAND_PRIORITY.length] % islands.length;
-      const bodyGeo = islands[islandIdx];
-      const { rightArm } = buildIslandPerson(material, bodyGeo, PERSON_BODY_RADIUS);
-      // buildIslandPerson returns its own fresh Group, but this system keeps
-      // one long-lived Group per person (its own Entity, already positioned/
-      // oriented above) — reparent its two meshes into that instead of
-      // swapping in a whole new Group/Entity.
-      const built = rightArm.parent!;
-      while (built.children.length > 0) group.add(built.children[0]);
-      this._rightArms[i] = rightArm;
-      this._armRestZ[i] = rightArm.rotation.z;
+      const animated = buildAnimatedPerson(template, material, PERSON_HEIGHT);
+      group.add(animated.group);
+      this._mixers[i] = animated.mixer;
+      this._rightArmBones[i] = animated.rightArmBone;
     }
   }
 
@@ -589,6 +677,25 @@ export class FateEventVfxSystem extends createSystem({
       this._bubbleTextures.push(texture);
       this._bubbleMeshes.push(mesh);
       this._bubbleEntities.push(this.world.createTransformEntity(mesh));
+    }
+  }
+
+  // See MARKER_* constants' own comment — one shared material (one texture,
+  // no per-instance tint needed) across both named figures' markers.
+  private _buildTalkMarkers(): void {
+    const material = new MeshBasicMaterial({
+      map: AssetManager.getTexture(MARKER_TEXTURE_KEY),
+      transparent: true,
+      depthWrite: false,
+      side: DoubleSide,
+      blending: AdditiveBlending,
+    });
+    const geo = new PlaneGeometry(MARKER_SIZE, MARKER_SIZE);
+    for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
+      const mesh = new Mesh(geo, material);
+      mesh.visible = false;
+      this._markerMeshes.push(mesh);
+      this.world.createTransformEntity(mesh);
     }
   }
 
@@ -645,13 +752,20 @@ export class FateEventVfxSystem extends createSystem({
   // aTinted stays 0 and aTint stays black, same as every real soul-dust
   // pebble (see pebble-field-vfx-system.ts's own TYPE_SOUL branch) — no
   // per-ghost recolor, just the material's own SOUL_ISLAND_PALETTE body/rim.
+  //
+  // Starts every slot with a placeholder sphere (visible/functional
+  // immediately, same graceful-degradation idiom every other FBX consumer in
+  // this codebase uses), then — once blobpeople.fbx resolves — swaps each
+  // slot's geometry to a clone of one of the three real ghost shapes, picked
+  // at random per slot (~1/3 each, same uniform-random-pick idiom
+  // PLANT_PALETTE/PEBBLE_COLORED_PALETTE already use elsewhere rather than a
+  // strict round-robin partition). Falls back to whichever of the three
+  // names actually resolved (or leaves the placeholder spheres alone if none
+  // did) rather than failing all-or-nothing on one bad name.
   private _buildGhostMeshes(target: Mesh[], count: number): void {
     for (let i = 0; i < count; i++) {
       const geo = new SphereGeometry(GHOST_SIZE, 8, 6);
-      geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array([0.7]), 1));
-      geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(3), 3));
-      geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array([0]), 1));
-      geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array([Math.random()]), 1));
+      stampSoulIslandInstanceAttrs(geo);
       const mesh = new InstancedMesh(geo, kSoulIslandMat, 1);
       mesh.setMatrixAt(0, IDENTITY_MAT4);
       mesh.instanceMatrix.needsUpdate = true;
@@ -660,30 +774,89 @@ export class FateEventVfxSystem extends createSystem({
       target.push(mesh);
       this.world.createTransformEntity(mesh);
     }
+
+    loadFbxMeshesByName(BLOB_PEOPLE_URL, GHOST_MESH_NAMES, normalizeGeometryToUnitRadiusFromOrigin).then((geos) => {
+      const variants = geos.filter((geo): geo is BufferGeometry => geo !== null);
+      if (variants.length === 0) return; // none resolved — keep the placeholder spheres
+      for (const geo of variants) convertZUpToYUp(geo);
+      for (const mesh of target) {
+        const picked = variants[Math.floor(Math.random() * variants.length)];
+        const geo = picked.clone();
+        // `picked` is unit-radius (normalizeGeometryToUnitRadiusFromOrigin) —
+        // bake GHOST_SIZE in directly, same "size lives in the geometry, not
+        // the instance scale" convention the placeholder sphere above already
+        // uses (SphereGeometry(GHOST_SIZE, ...)), so _updateCollectibles'
+        // pulse multiplier (~1) means the same thing for both.
+        const pos = geo.getAttribute('position');
+        for (let v = 0; v < pos.count; v++) {
+          pos.setXYZ(v, pos.getX(v) * GHOST_SIZE, pos.getY(v) * GHOST_SIZE, pos.getZ(v) * GHOST_SIZE);
+        }
+        pos.needsUpdate = true;
+        stampSoulIslandInstanceAttrs(geo);
+        (mesh.geometry as BufferGeometry).dispose();
+        mesh.geometry = geo;
+      }
+    });
   }
 
-  // Shared builder for Organic's seeds — a handful of small glowing additive
-  // spheres, one per collectible slot (see this file's own top comment).
-  private _buildCollectibleMeshes(target: Mesh[], size: number, color: [number, number, number], count: number): void {
-    const material = new MeshBasicMaterial({
-      color: new Color(color[0], color[1], color[2]),
-      transparent: true,
-      opacity: 0.85,
-      depthWrite: false,
-      blending: AdditiveBlending,
-    });
-    const geo = new SphereGeometry(size, 8, 6);
+  // Organic's own seed collectibles — starts every slot with a placeholder
+  // toon-rim sphere (same graceful-degradation idiom _buildGhostMeshes uses
+  // above), then swaps each slot's geometry to a clone of one of the real
+  // Blob1-4 shapes (see SEED_MESH_NAMES) once blobpeople.fbx resolves,
+  // picked at random per slot. Each slot also gets its own random body color
+  // off ORGANIC_PALETTE (color-scheme.ts — the same fixed 5-color set
+  // PlanetGrowthPool's plants and the pebble field's own organics draw from)
+  // instead of the old single flat SEED_COLOR — "multicolored
+  // organic" — picked once and kept for both the placeholder and the
+  // eventual real mesh so a slot's color never pops when the swap happens.
+  // Gold rim (NAMED_RIM_COLOR — the same identity color the two featured
+  // figures already use) rather than the old additive glow, matching the
+  // toon-rim silhouette look everything else in Fate Events uses.
+  private _buildSeedMeshes(target: Mesh[], count: number): void {
+    const palette = ORGANIC_PALETTE;
     for (let i = 0; i < count; i++) {
-      const mesh = new Mesh(geo, material);
+      const bodyColor = palette[Math.floor(Math.random() * palette.length)];
+      const material = makeToonRimFlatMaterial(bodyColor, NAMED_RIM_COLOR);
+      const mesh = new Mesh(new SphereGeometry(SEED_SIZE, 8, 6), material);
       mesh.visible = false;
       target.push(mesh);
       this.world.createTransformEntity(mesh);
     }
+
+    loadFbxMeshesByName(BLOB_PEOPLE_URL, SEED_MESH_NAMES, normalizeGeometryToUnitRadiusFromOrigin).then((geos) => {
+      const variants = geos.filter((geo): geo is BufferGeometry => geo !== null);
+      if (variants.length === 0) return; // none resolved — keep the placeholder spheres
+      for (const geo of variants) convertZUpToYUp(geo);
+      for (const mesh of target) {
+        const picked = variants[Math.floor(Math.random() * variants.length)];
+        const geo = picked.clone();
+        // `picked` is unit-radius (normalizeGeometryToUnitRadiusFromOrigin,
+        // origin at the shape's own ground/base point) — bake SEED_SIZE in
+        // directly, same "size lives in the geometry, not the instance
+        // scale" convention the placeholder sphere above uses.
+        const pos = geo.getAttribute('position');
+        for (let v = 0; v < pos.count; v++) {
+          pos.setXYZ(v, pos.getX(v) * SEED_SIZE, pos.getY(v) * SEED_SIZE, pos.getZ(v) * SEED_SIZE);
+        }
+        pos.needsUpdate = true;
+        (mesh.geometry as BufferGeometry).dispose();
+        mesh.geometry = geo;
+      }
+    });
   }
 
   update(delta: number, time: number): void {
     const phase = getGlobals(this.world).gamePhase.peek();
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
+
+    // Advances every figure's shared idle-breathing animation — null until
+    // BreathingIdle.fbx resolves and _swapToAnimatedPeople runs (see its own
+    // comment). Must run BEFORE _updateSituations below so that method's
+    // point-up/wave overlay composes on top of THIS frame's fresh idle pose
+    // rather than last frame's. Cheap at N_PEOPLE=10 — always safe to run
+    // regardless of visibility, same reasoning _updateLivePositions below
+    // already uses.
+    for (const mixer of this._mixers) mixer?.update(delta);
 
     if (this._constellations.isComplete() && !this._wasComplete) {
       this._wasComplete = true;
@@ -759,8 +932,25 @@ export class FateEventVfxSystem extends createSystem({
       group.scale.setScalar(formed * radiusScale);
 
       if (gasTurn > 0) {
-        this._scratchYawQuat.setFromAxisAngle(this._upAxis, gasTurn * GAS_TURN_ANGLE);
-        group.quaternion.multiplyQuaternions(this._scratchYawQuat, this._baseQuats[i]);
+        // Recover this person's own outward "up" straight from their base
+        // quaternion (it's exactly the normal that baseQuat's own
+        // setFromUnitVectors(worldUp, normal) was built from) rather than
+        // assuming a shared/fixed up axis — keeps them standing correctly on
+        // their own patch of the curved surface regardless of where
+        // CROWD_CAP_DIRECTION currently points. group.position is one frame
+        // stale here (this loop runs before the one that positions people
+        // this frame) — harmless given how slowly it actually moves.
+        this._scratchGasUp.set(0, 1, 0).applyQuaternion(this._baseQuats[i]);
+        this.camera.getWorldPosition(this._scratchGasToPlayer);
+        this._scratchGasToPlayer.sub(group.position);
+        const alongUp = this._scratchGasToPlayer.dot(this._scratchGasUp);
+        this._scratchGasForward.copy(this._scratchGasToPlayer).addScaledVector(this._scratchGasUp, -alongUp);
+        if (this._scratchGasForward.lengthSq() < 1e-6) this._scratchGasForward.set(0, 0, 1);
+        this._scratchGasForward.normalize();
+        this._scratchGasRight.crossVectors(this._scratchGasUp, this._scratchGasForward).normalize();
+        this._scratchGasMatrix.makeBasis(this._scratchGasRight, this._scratchGasUp, this._scratchGasForward);
+        this._scratchGasTargetQuat.setFromRotationMatrix(this._scratchGasMatrix);
+        group.quaternion.copy(this._baseQuats[i]).slerp(this._scratchGasTargetQuat, gasTurn);
       } else if (!group.quaternion.equals(this._baseQuats[i])) {
         group.quaternion.copy(this._baseQuats[i]);
       }
@@ -774,43 +964,59 @@ export class FateEventVfxSystem extends createSystem({
     const active = this._fateEvents.getActiveMask();
     const lineIndex = this._fateEvents.getLineIndex();
 
-    const bobPull = 1 - Math.exp(-BOB_EASE_RATE * delta);
     const bubblePull = 1 - Math.exp(-BUBBLE_EASE_RATE * delta);
     // Livelier idle bob for organics, sluggish for a gasses "ghost town" —
-    // see fate-event-system.ts's BOB_FREQUENCY_MULT_BY_TYPE.
+    // see fate-event-system.ts's BOB_FREQUENCY_MULT_BY_TYPE. Now the speed
+    // of the ONE hop (see _jumpElapsed) rather than a continuous bob's
+    // frequency, but the same "organics spring, gasses lumber" character
+    // still comes through in how snappy that single hop reads.
     const bobFrequency = JUMP_FREQUENCY * this._fateEvents.getBobFrequencyMultiplier();
     const jumpAmplitude = JUMP_AMPLITUDE;
     const isExplain = phase === Phase.FateEvents && beat === FateBeat.Explain;
 
     for (let i = 0; i < count; i++) {
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
-
-      const targetAmp = active[i] ? jumpAmplitude : 0;
-      this._bobAmp[i] += (targetAmp - this._bobAmp[i]) * bobPull;
-      const bobOffset =
-        this._bobAmp[i] * Math.max(0, Math.sin(time * bobFrequency * Math.PI * 2 + this._bobPhase[i]));
-
       this._scratchPos.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
-      const group = this._personGroups[i];
-      group.position.copy(this._scratchPos).addScaledVector(this._normalVec, bobOffset);
 
-      if (active[i]) {
-        if (!this._wasActive[i]) {
-          this._wasActive[i] = 1;
-          if (peopleEnabled) this._voiceSynth.playPickup(dominant, this._scratchPos, VOICE_BLIP_FIXED_SPEED);
-        }
-      } else {
+      if (active[i] && !this._wasActive[i]) {
+        this._wasActive[i] = 1;
+        this._jumpElapsed[i] = 0; // triggers the one-shot hop below
+        if (peopleEnabled) this._voiceSynth.playPickup(dominant, this._scratchPos, VOICE_BLIP_FIXED_SPEED);
+      } else if (!active[i]) {
         this._wasActive[i] = 0;
       }
 
+      // Math.sin over a single half-period (phase 0->PI is exactly one
+      // up-and-back-down hump) rather than the old Math.max(0, sin(...))
+      // repeating-hump approach — that read as continuous bobbing for as
+      // long as `active` stayed true. Once phase reaches PI the hop is
+      // over and _jumpElapsed resets to -1 (not currently jumping), which
+      // is also what un-gates the bubble just below.
+      let bobOffset = 0;
+      if (this._jumpElapsed[i] >= 0) {
+        this._jumpElapsed[i] += delta;
+        const jumpPhase = this._jumpElapsed[i] * bobFrequency * Math.PI * 2;
+        if (jumpPhase < Math.PI) {
+          bobOffset = jumpAmplitude * Math.sin(jumpPhase);
+        } else {
+          this._jumpElapsed[i] = -1;
+        }
+      }
+      const jumping = this._jumpElapsed[i] >= 0;
+
+      const group = this._personGroups[i];
+      group.position.copy(this._scratchPos).addScaledVector(this._normalVec, bobOffset);
+
       // Not gated on peopleEnabled — the explainer figure is the ONE person
       // Soul/Organic keep visible (see maxVisible above), specifically so
-      // this line still shows for them, not just Gas's full crowd.
+      // this line still shows for them, not just Gas's full crowd. Also not
+      // gated on `jumping` — the explainer's own reveal is scripted
+      // (Beat 3), not proximity-triggered, so it has no hop to wait out.
       const isExplainerFigure = isExplain && i === EXPLAIN_FIGURE_INDEX;
       const bubbleMesh = this._bubbleMeshes[i];
       const targetOpacity = isExplainerFigure
         ? this._fateEvents.getExplainerOpacity()
-        : peopleEnabled && active[i]
+        : peopleEnabled && active[i] && !jumping
           ? this._fateEvents.getBubbleOpacity(i)
           : 0;
       this._bubbleOpacity[i] += (targetOpacity - this._bubbleOpacity[i]) * bubblePull;
@@ -840,6 +1046,26 @@ export class FateEventVfxSystem extends createSystem({
       if (this._faceDir.lengthSq() > 0.0001) {
         bubbleMesh.quaternion.setFromUnitVectors(this._zAxis, this._faceDir);
       }
+
+      // Named figures only — see MARKER_* constants' own comment. targetOpacity
+      // > 0 means this exact frame is the one where that figure's own line
+      // actually starts showing (explainer reveal or ambient/paired dialogue),
+      // so that's the single moment "talked to" flips permanently true.
+      if (i < NAMED_FIGURE_COUNT) {
+        if (!this._talkedTo[i] && targetOpacity > 0) this._talkedTo[i] = 1;
+
+        const markerMesh = this._markerMeshes[i];
+        markerMesh.visible = phase === Phase.FateEvents && group.visible && !this._talkedTo[i];
+        if (markerMesh.visible) {
+          markerMesh.position.copy(this._scratchPos).addScaledVector(this._normalVec, MARKER_HEIGHT);
+          this._faceDir.copy(this._camWorldPos).sub(markerMesh.position).normalize();
+          if (this._faceDir.lengthSq() > 0.0001) {
+            markerMesh.quaternion.setFromUnitVectors(this._zAxis, this._faceDir);
+          }
+          const pulse = MARKER_PULSE_MIN_SCALE + (1 - MARKER_PULSE_MIN_SCALE) * (0.5 + 0.5 * Math.sin(time * MARKER_PULSE_FREQ * Math.PI * 2));
+          markerMesh.scale.setScalar(pulse);
+        }
+      }
     }
 
     this._updateSituations(count, dominant, delta, time, phase, beat);
@@ -863,6 +1089,7 @@ export class FateEventVfxSystem extends createSystem({
           samples,
           stride,
           dancing,
+          true, // bob — ghosts float, always bobbing regardless of state
           time,
         );
         this._updateCollectibles(
@@ -873,10 +1100,16 @@ export class FateEventVfxSystem extends createSystem({
           samples,
           stride,
           false,
+          false, // bob — seeds sit on the ground, no float
           time,
         );
       }
       break; // exactly one comet entity, see comet-handoff-system.ts
+    }
+
+    for (const ev of this._fateEvents.drainCollectCaptureEvents()) {
+      this._scratchCollectSoundPos.set(ev.x, ev.y, ev.z);
+      this._twinkleSynth.playCatch(this._scratchCollectSoundPos, ev.speed);
     }
 
     if (beat === FateBeat.Payoff && dominant === SOUL_DUST_TYPE && !this._payoffChimePlayed) {
@@ -902,6 +1135,16 @@ export class FateEventVfxSystem extends createSystem({
   // watching/waving pose (0-3s of Ambient — see GAS_WATCH_DURATION's own
   // comment). A separate pass over the crowd is simplest to reason about
   // here; N_PEOPLE=10 makes it negligible.
+  //
+  // Unlike the old primitive-figure code (which set the arm Mesh's rotation
+  // to an ABSOLUTE value each frame, safe when nothing else ever touched
+  // it), the right-arm bone now also has this frame's idle-breathing
+  // animation already applied to it (mixer.update() ran earlier in update()
+  // above) — setting an absolute rotation here would overwrite that instead
+  // of layering on top of it. So this eases a per-person OFFSET
+  // (_armOffsetX/_armOffsetZ, target 0 when neither pose is active) and
+  // applies it as an ADDITIVE rotation via rotateX/rotateZ, composing with
+  // whatever the animation already set this bone to.
   private _updateSituations(
     count: number,
     dominant: number,
@@ -920,20 +1163,30 @@ export class FateEventVfxSystem extends createSystem({
 
     const armPull = 1 - Math.exp(-POINT_UP_EASE_RATE * delta);
     for (let i = 0; i < count; i++) {
-      const arm = this._rightArms[i];
-      const rest = this._armRestZ[i];
+      const bone = this._rightArmBones[i];
+      if (!bone) continue; // still on the primitive placeholder — no real bone to pose yet
 
       let targetX = 0;
-      let targetZ = rest;
+      let targetZ = 0;
       if (pointUpActive) {
         targetX = POINT_UP_ROTATION_X;
-        targetZ = rest * 0.2;
       } else if (gasWatchActive) {
         targetX = GAS_WAVE_ROTATION_X;
-        targetZ = rest * 0.3 + Math.sin(time * GAS_WAVE_FREQ * Math.PI * 2 + i) * GAS_WAVE_AMPLITUDE;
+        targetZ = Math.sin(time * GAS_WAVE_FREQ * Math.PI * 2 + i) * GAS_WAVE_AMPLITUDE;
       }
-      arm.rotation.x += (targetX - arm.rotation.x) * armPull;
-      arm.rotation.z += (targetZ - arm.rotation.z) * armPull;
+      // Undo last frame's offset before easing toward + applying the new
+      // one — rotateX/rotateZ compose onto the bone's CURRENT rotation, so
+      // without this the old offset would never be removed, only added to.
+      // Rotation composition doesn't commute, so the undo must happen in
+      // exactly the REVERSE order it was originally applied in (Z was
+      // applied last below, so it's undone first here) — undoing X before Z
+      // would leave a small residual drift instead of exactly canceling.
+      bone.rotateZ(-this._armOffsetZ[i]);
+      bone.rotateX(-this._armOffsetX[i]);
+      this._armOffsetX[i] += (targetX - this._armOffsetX[i]) * armPull;
+      this._armOffsetZ[i] += (targetZ - this._armOffsetZ[i]) * armPull;
+      bone.rotateX(this._armOffsetX[i]);
+      bone.rotateZ(this._armOffsetZ[i]);
     }
   }
 
@@ -996,7 +1249,12 @@ export class FateEventVfxSystem extends createSystem({
   // every other gathered thing in this codebase (see trail-sampler.ts).
   // `dance`, when true (Soul's own Beat 5 payoff only), layers a small
   // per-ghost sinusoidal offset in camera-right/up space onto the captured
-  // position so they read as dancing together in the tail.
+  // position so they read as dancing together in the tail. `bob`, when true
+  // (Soul's ghosts only — they float rather than sit on the ground), adds a
+  // separate, always-on world-+Y sinusoidal offset in EVERY state (Free,
+  // Attracting, and Captured alike, additive with `dance`), since "up" reads
+  // the same regardless of viewing angle — unlike DANCE, this doesn't need
+  // camera-relative basis vectors.
   private _updateCollectibles(
     meshes: Mesh[],
     field: GatherableField,
@@ -1005,6 +1263,7 @@ export class FateEventVfxSystem extends createSystem({
     samples: number,
     stride: number,
     dance: boolean,
+    bob: boolean,
     time: number,
   ): void {
     if (!show) {
@@ -1015,6 +1274,9 @@ export class FateEventVfxSystem extends createSystem({
     for (let i = 0; i < meshes.length; i++) {
       const mesh = meshes[i];
       mesh.visible = true;
+      const bobOffset = bob
+        ? Math.sin(time * COLLECTIBLE_BOB_FREQ * Math.PI * 2 + i * 2.3) * COLLECTIBLE_BOB_AMPLITUDE
+        : 0;
       if (states[i] === GatherState.Captured) {
         sampleTrailOffset(
           trail,
@@ -1041,9 +1303,10 @@ export class FateEventVfxSystem extends createSystem({
           );
         }
         mesh.position.copy(this._scratchTrailPos);
+        mesh.position.y += bobOffset;
         mesh.scale.setScalar(1);
       } else {
-        mesh.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+        mesh.position.set(positions[i * 3], positions[i * 3 + 1] + bobOffset, positions[i * 3 + 2]);
         // Still out on the surface (Free/Attracting) — pulse so it reads as
         // an active collectible against the static decorations around it.
         mesh.scale.setScalar(1 + Math.sin(time * COLLECTIBLE_PULSE_FREQ * Math.PI * 2 + i * 0.7) * COLLECTIBLE_PULSE_AMPLITUDE);
@@ -1085,7 +1348,11 @@ export class FateEventVfxSystem extends createSystem({
     const ctx = this._bubbleCtxs[i];
     const w = BUBBLE_CANVAS_W;
     const h = BUBBLE_CANVAS_H;
-    const pad = 10;
+    // Doubled from 10 — this insets BOTH the box from the canvas edge AND
+    // (via wrapLines' own `w - pad * 4`) the text from the box's own border;
+    // text read as cramped right up against the bubble's edge at the old
+    // value.
+    const pad = 20;
     ctx.clearRect(0, 0, w, h);
 
     ctx.fillStyle = 'rgba(8, 8, 16, 0.82)';

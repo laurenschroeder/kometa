@@ -142,6 +142,70 @@ export function normalizeGeometryToUnitRadius(geo: BufferGeometry): void {
   geo.computeBoundingSphere();
 }
 
+// Origin-relative counterpart to normalizeGeometryToUnitRadius above — for a
+// pack whose artist has deliberately placed each mesh's local origin (0,0,0)
+// at its own ground-contact point in Blender (Set Origin > Origin to 3D
+// Cursor at the plant's base), rather than the older desertPlants.fbx/
+// flowers.fbx packs whose vertex data carries an arbitrary baked
+// scene-layout offset (see planet-growth-pool.ts's recenterAndGroundGeometry,
+// which those packs still need). Measures "radius" as the farthest vertex
+// distance FROM ORIGIN rather than computeBoundingSphere()'s own box-center —
+// a plant's base sits at one extreme of its shape, not its geometric center,
+// so box-center-relative scaling would size it inconsistently against its
+// own base. The scale itself is applied around the origin (pos * scale, no
+// recentering), so local (0,0,0) — the artist's chosen anchor — lands
+// exactly on the surface wherever the caller places it, with no further
+// recenter/reground step needed.
+export function normalizeGeometryToUnitRadiusFromOrigin(geo: BufferGeometry): void {
+  const pos = geo.getAttribute('position');
+  let maxDistSq = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const distSq = pos.getX(i) ** 2 + pos.getY(i) ** 2 + pos.getZ(i) ** 2;
+    if (distSq > maxDistSq) maxDistSq = distSq;
+  }
+  if (maxDistSq < 1e-12) return;
+  const scale = 1 / Math.sqrt(maxDistSq);
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, pos.getX(i) * scale, pos.getY(i) * scale, pos.getZ(i) * scale);
+  }
+  pos.needsUpdate = true;
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+}
+
+// Shared by every FBX pack authored Z-up (confirmed per-pack by directly
+// parsing the file with FBXLoader and checking bounding boxes: Z consistently
+// the tallest of a mesh's three axes, Y the thinnest) — three.js's own
+// FBXLoader does NOT apply any automatic up-axis conversion (checked its
+// source directly — it never reads GlobalSettings' UpAxis at all), so raw
+// positions/normals stay exactly as authored. Rotates -90° about X —
+// (x,y,z) -> (x,z,-y) — so "tall" ends up along local +Y, matching every
+// other Y-up assumption in this codebase (e.g. planet-growth-pool.ts's
+// trySpawn aligning local +Y with a surface normal). Originally private to
+// planet-growth-pool.ts's own two plant packs; moved here once
+// fate-event-vfx-system.ts's blobpeople.fbx needed the exact same conversion,
+// rather than duplicating it a second time.
+export function convertZUpToYUp(geo: BufferGeometry): void {
+  const pos = geo.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    pos.setY(i, z);
+    pos.setZ(i, -y);
+  }
+  pos.needsUpdate = true;
+  const normal = geo.getAttribute('normal');
+  if (normal) {
+    for (let i = 0; i < normal.count; i++) {
+      const ny = normal.getY(i);
+      const nz = normal.getZ(i);
+      normal.setY(i, nz);
+      normal.setZ(i, -ny);
+    }
+    normal.needsUpdate = true;
+  }
+}
+
 // One cached load per (url, group name, count) — same reasoning as
 // obj-field-loader.ts's own caches: no reason to re-walk the same subtree if
 // two callers ask for the same thing.
@@ -164,23 +228,33 @@ const groupChildMeshCache = new Map<string, Promise<BufferGeometry[]>>();
 // whatever placeholder they already have. `maxCount` caps how many distinct
 // meshes are returned (in whatever order they appear in the file); pass a
 // generous number to get all of them.
-function collectAndNormalizeMeshes(root: Object3D, maxCount: number): BufferGeometry[] {
+function collectAndNormalizeMeshes(
+  root: Object3D,
+  maxCount: number,
+  normalize: (geo: BufferGeometry) => void,
+): BufferGeometry[] {
   const geos: BufferGeometry[] = [];
   root.traverse((child) => {
     if (child instanceof Mesh) geos.push(child.geometry as BufferGeometry);
   });
   if (geos.length === 0) return [];
   const top = geos.slice(0, maxCount).map((geo) => geo.clone());
-  for (const geo of top) normalizeGeometryToUnitRadius(geo);
+  for (const geo of top) normalize(geo);
   return top;
 }
 
+// `normalize` defaults to the box-center-relative normalizeGeometryToUnitRadius
+// (existing behavior, unchanged for desertPlants.fbx/flowers.fbx) — pass
+// normalizeGeometryToUnitRadiusFromOrigin for a pack whose origins are
+// already correctly placed at each plant's own base, so callers can skip
+// planet-growth-pool.ts's recenterAndGroundGeometry entirely for it.
 export function loadFbxNamedGroupChildMeshes(
   url: string,
   groupName: string,
   maxCount: number,
+  normalize: (geo: BufferGeometry) => void = normalizeGeometryToUnitRadius,
 ): Promise<BufferGeometry[]> {
-  const key = `${url}|${groupName}|${maxCount}`;
+  const key = `${url}|${groupName}|${maxCount}|${normalize === normalizeGeometryToUnitRadius ? 'box' : 'origin'}`;
   let promise = groupChildMeshCache.get(key);
   if (!promise) {
     promise = loadFbxTemplate(url).then((root) => {
@@ -197,7 +271,7 @@ export function loadFbxNamedGroupChildMeshes(
         );
         return [];
       }
-      const top = collectAndNormalizeMeshes(found, maxCount);
+      const top = collectAndNormalizeMeshes(found, maxCount, normalize);
       if (top.length === 0) {
         console.warn(`[fbx-field-loader] '${groupName}' in '${url}' has no mesh children — keeping the placeholder.`);
       }
@@ -217,19 +291,81 @@ export function loadFbxNamedGroupChildMeshes(
 // own arbitrary name, not a grouping convention). Otherwise identical
 // behavior/caching/fallback to loadFbxNamedGroupChildMeshes.
 const allMeshCache = new Map<string, Promise<BufferGeometry[]>>();
-export function loadFbxAllMeshes(url: string, maxCount: number): Promise<BufferGeometry[]> {
-  const key = `${url}|${maxCount}`;
+// See loadFbxNamedGroupChildMeshes's own comment on `normalize`'s default/
+// origin-trusting alternative.
+export function loadFbxAllMeshes(
+  url: string,
+  maxCount: number,
+  normalize: (geo: BufferGeometry) => void = normalizeGeometryToUnitRadius,
+): Promise<BufferGeometry[]> {
+  const key = `${url}|${maxCount}|${normalize === normalizeGeometryToUnitRadius ? 'box' : 'origin'}`;
   let promise = allMeshCache.get(key);
   if (!promise) {
     promise = loadFbxTemplate(url).then((root) => {
       if (!root) return [];
-      const top = collectAndNormalizeMeshes(root, maxCount);
+      const top = collectAndNormalizeMeshes(root, maxCount, normalize);
       if (top.length === 0) {
         console.warn(`[fbx-field-loader] '${url}' has no mesh children at all — keeping the placeholder.`);
       }
       return top;
     });
     allMeshCache.set(key, promise);
+  }
+  return promise;
+}
+
+// Unlike loadFbxAllMeshes/loadFbxNamedGroupChildMeshes (which grab "however
+// many mesh children are present, in file order"), this picks out SPECIFIC
+// named meshes from anywhere in the file's hierarchy — for a pack like
+// blobpeople.fbx that bundles many unrelated shapes (several blob-people
+// variants, a handful of ghosts, a stray test pebble, ...) as siblings in one
+// file, where a caller wants only a few of them by name. Resolves one
+// geometry per entry in `names`, in the SAME order, with `null` for any name
+// not found (case-sensitive exact match first, falling back to a
+// case-insensitive match — artist-authored names and calling code routinely
+// only differ in casing) — never rejects, so a caller can keep whatever
+// placeholder it already has for just the missing slot(s) instead of losing
+// the whole set over one typo. Logs every name actually present in the file
+// once, the first time anything requested comes back missing.
+const namedMeshCache = new Map<string, Promise<(BufferGeometry | null)[]>>();
+export function loadFbxMeshesByName(
+  url: string,
+  names: readonly string[],
+  normalize: (geo: BufferGeometry) => void = normalizeGeometryToUnitRadius,
+): Promise<(BufferGeometry | null)[]> {
+  const key = `${url}|${names.join(',')}|${normalize === normalizeGeometryToUnitRadius ? 'box' : 'origin'}`;
+  let promise = namedMeshCache.get(key);
+  if (!promise) {
+    promise = loadFbxTemplate(url).then((root) => {
+      if (!root) return names.map(() => null);
+      const byName = new Map<string, Mesh>();
+      const byLowerName = new Map<string, Mesh>();
+      root.traverse((child) => {
+        if (child instanceof Mesh && child.name) {
+          byName.set(child.name, child);
+          byLowerName.set(child.name.toLowerCase(), child);
+        }
+      });
+      let anyMissing = false;
+      const result = names.map((name) => {
+        const mesh = byName.get(name) ?? byLowerName.get(name.toLowerCase());
+        if (!mesh) {
+          anyMissing = true;
+          return null;
+        }
+        const geo = (mesh.geometry as BufferGeometry).clone();
+        normalize(geo);
+        return geo;
+      });
+      if (anyMissing) {
+        console.warn(
+          `[fbx-field-loader] one or more of [${names.join(', ')}] not found in '${url}' — keeping the placeholder ` +
+            `for that slot. Names actually present in the file: ${Array.from(byName.keys()).slice(0, 60).join(', ') || '(none named)'}`,
+        );
+      }
+      return result;
+    });
+    namedMeshCache.set(key, promise);
   }
   return promise;
 }

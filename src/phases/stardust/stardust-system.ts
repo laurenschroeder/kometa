@@ -9,28 +9,42 @@ import { scatterDisc, scatterGalaxyArm } from '../../vfx/geometry/pixel-swirl.js
 
 const N_STARDUST = 500;
 
-// Two-stage finale, replacing the old single WIN_CAPTURE_COUNT (25%) instant
-// trigger. Stage A: once EITHER condition is met, a single gold pixel-CRT
-// "swirl" fades in front of the player (see StardustVfxSystem) and the
-// pickup/catch sound switches to the square-wave PixelTwinkleSynth —
-// gathering continues, this isn't the end of the phase. Stage B: the swirl
-// is itself a second collectible GatherableField (see _buildSwirlField) —
-// once EITHER its own capture fraction or the extra-time timeout is met, the
-// existing STARDUST_WIN_SEQUENCE notifications fire and the phase ends. See
-// index.ts's Phase.Stardust timeoutSeconds (bumped to 150) — both stages'
-// worst-case durations plus the notification sequence's own playback time
-// need to fit comfortably inside that safety-net timeout.
-const SWIRL_TRIGGER_FRACTION = 0.8;
-const SWIRL_TRIGGER_TIMEOUT_SECONDS = 60;
-const FINALE_TRIGGER_FRACTION = 0.9;
-const FINALE_EXTRA_SECONDS = 30;
+// Three-swirl finale, replacing the old single-swirl two-stage design.
+// Instead of one swirl appearing at a single 80%-gathered trigger, three
+// independent gold pixel-CRT swirls (see StardustVfxSystem) reveal
+// progressively as the main field fills — fanned left/center/right of
+// wherever the player was facing when the phase started (see
+// SWIRL_REVEAL_ANGLES_DEG/play()), rather than all stacked in the same
+// forward spot. Gathering continues throughout — this isn't the end of the
+// phase. Once all three have revealed, the finale proper begins: the
+// COMBINED capture fraction across all three (or the extra-time timeout) is
+// what fires STARDUST_WIN_SEQUENCE and ends the phase. See index.ts's
+// Phase.Stardust timeoutSeconds (150) — the worst-case reveal/finale
+// durations plus the notification sequence's own playback time need to fit
+// comfortably inside that safety-net timeout.
+const SWIRL_COUNT = 3;
+// Fraction of N_STARDUST captured that reveals each swirl — index-matched
+// against SWIRL_REVEAL_ANGLES_DEG below (center first, then left, then
+// right), so the very first swirl still appears dead ahead, same as the old
+// single-swirl behavior, before the fan opens up to the sides.
+const SWIRL_REVEAL_THRESHOLDS = [0.5, 0.7, 0.8];
+const SWIRL_REVEAL_ANGLES_DEG = [0, -45, 45];
+// Safety net: if the player stalls below the last threshold, force-reveal
+// every remaining swirl anyway rather than leaving the phase stuck at "2 of
+// 3" forever.
+const SWIRL_REVEAL_TIMEOUT_SECONDS = 60;
+// Combined (summed across all three swirls) capture-fraction target once the
+// last swirl has revealed — lower than the old single-swirl FINALE_TRIGGER_
+// FRACTION (0.9) since there's 3x the swirl content to sweep through now.
+const FINALE_TRIGGER_FRACTION = 0.7;
+const FINALE_EXTRA_SECONDS = 40;
 
-// The swirl's own shape/spawn tuning — a small spiral-galaxy layout (same
+// Each swirl's own shape/spawn tuning — a small spiral-galaxy layout (same
 // scatterGalaxyArm/scatterDisc math the old decorative swirl used, see
 // pixel-swirl.ts) reused as a live GatherableField's spawnPoint instead of a
 // static Points cloud, so its points can be attracted/captured exactly like
-// the ambient stardust motes are. 90 points total — sized for "a satisfying
-// sweep-through within Stage B's own timeout", not a dense decorative cloud.
+// the ambient stardust motes are. 90 points per swirl — sized for "a
+// satisfying sweep-through," not a dense decorative cloud.
 const SWIRL_ARM_COUNT = 5;
 const SWIRL_TURNS = 1.0;
 const SWIRL_ARM_RADIUS = 0.35;
@@ -40,10 +54,11 @@ const SWIRL_CORE_POINT_COUNT = 20;
 const SWIRL_POINT_COUNT = SWIRL_ARM_POINT_COUNT + SWIRL_CORE_POINT_COUNT;
 const SWIRL_SPREAD_FACTOR = 0.22;
 const SWIRL_DEPTH_JITTER = 0.03;
-// How far in front of the player's head the swirl appears — placed once, the
-// instant Stage A triggers, same "front and center" framing the old 3-swirl
-// version used for its own center swirl.
+// How far from the player's head each swirl appears, along its own fanned
+// angle off the shared reference forward captured at play() — see
+// SWIRL_REVEAL_ANGLES_DEG.
 const SWIRL_FORWARD_DISTANCE = 1.2;
+const UP_AXIS = new Vector3(0, 1, 0);
 
 // Fired via GatherableField's onCapture/onAttractStart callbacks, drained
 // each frame by StardustVfxSystem to trigger the catch/pickup twinkle
@@ -73,30 +88,36 @@ export class StardustSystem extends createSystem({
   private _field!: GatherableField;
   private _hasWon = false;
   // Total elapsed seconds since play() — this system's own timer, distinct
-  // from GameDirectorSystem's private phase-elapsed tracking, since the two
-  // stage thresholds below need to check it independently of any single
-  // director-level timeout.
+  // from GameDirectorSystem's private phase-elapsed tracking, since the
+  // reveal timeout/finale window below need to check it independently of
+  // any single director-level timeout.
   private _elapsed = 0;
-  // Stage A reached (swirl visible, sound switched) — see
-  // SWIRL_TRIGGER_FRACTION's own comment.
-  private _swirling = false;
-  // Seconds since Stage A triggered — gates Stage B's own timeout leg.
-  private _swirlElapsed = 0;
+  // Seconds since the LAST swirl revealed — gates the finale's own timeout
+  // leg (see FINALE_EXTRA_SECONDS). Only advances once every swirl exists.
+  private _finaleElapsed = 0;
   private _captureEvents: CaptureEvent[] = [];
   private _attractEvents: AttractEvent[] = [];
 
-  // Built lazily the instant Stage A triggers (see _buildSwirlField) — its
-  // spawnCenter needs the player's live head position/facing, only known at
-  // that moment, not at init() time. null until then, and reset to null on
-  // every play() so a fresh loop gets a freshly built swirl.
-  private _swirlField: GatherableField | null = null;
-  private _swirlCaptureEvents: CaptureEvent[] = [];
-  private _swirlAttractEvents: AttractEvent[] = [];
+  // Index-matched against SWIRL_REVEAL_THRESHOLDS/SWIRL_REVEAL_ANGLES_DEG.
+  // Each field is built lazily the instant its own threshold is crossed (see
+  // _buildSwirlField) — its spawnCenter needs the reference forward captured
+  // at play() time, only known once the phase actually starts. All null
+  // again on every fresh play().
+  private _swirlFields: (GatherableField | null)[] = [null, null, null];
+  private _swirlRevealed: boolean[] = [false, false, false];
+  private _swirlCaptureEvents: CaptureEvent[][] = [[], [], []];
+  private _swirlAttractEvents: AttractEvent[][] = [[], [], []];
 
   private _hand!: GatherHandInput;
   private _scratchVel!: Vector3;
   private _scratchSwirlCenter!: Vector3;
   private _scratchSwirlDir!: Vector3;
+  // Reference position/forward captured once at play() — every swirl's fan
+  // angle is measured off this SAME shared reference (not re-sampled at each
+  // swirl's own reveal moment), so all three read as one coherent left/
+  // center/right fan rather than three independently-aimed spots.
+  private _refPos!: Vector3;
+  private _refForward!: Vector3;
 
   init(): void {
     this._field = new GatherableField({
@@ -126,6 +147,8 @@ export class StardustSystem extends createSystem({
     this._scratchVel = new Vector3();
     this._scratchSwirlCenter = new Vector3();
     this._scratchSwirlDir = new Vector3();
+    this._refPos = new Vector3();
+    this._refForward = new Vector3();
   }
 
   // Converts one flat index (0..SWIRL_POINT_COUNT) into a spiral-galaxy
@@ -133,7 +156,8 @@ export class StardustSystem extends createSystem({
   // GatherableFieldParams.spawnPoint's {dir, radiusT, type} contract (see
   // pebble-layout.ts's assignPebbleSpawnPoint for the established precedent
   // of converting a raw scattered position into that shape). type is unused
-  // here (only one visual treatment), always 0.
+  // here (only one visual treatment), always 0. Shared by every swirl — the
+  // shape is identical, only spawnCenter (see _buildSwirlField) differs.
   private _swirlSpawnPoint(index: number): { dir: Vector3; radiusT: number; type: number } {
     const p =
       index < SWIRL_ARM_POINT_COUNT
@@ -153,18 +177,18 @@ export class StardustSystem extends createSystem({
     return { dir: new Vector3(p[0] / r, p[1] / r, p[2] / r), radiusT: r / SWIRL_ARM_RADIUS, type: 0 };
   }
 
-  // Builds the swirl as a second, independent GatherableField centered in
-  // front of wherever the player's head happens to be facing the instant
-  // Stage A triggers — same attract/capture tuning the main stardust field
-  // already uses, and the exact same capturedAgeDecay/spread tuning for a
-  // "just joined, still tight" trail look, so captured swirl points ride the
-  // comet's tail the same way captured stardust already does.
-  private _buildSwirlField(): void {
-    this.camera.getWorldPosition(this._scratchSwirlCenter);
-    this.camera.getWorldDirection(this._scratchSwirlDir);
-    this._scratchSwirlCenter.addScaledVector(this._scratchSwirlDir, SWIRL_FORWARD_DISTANCE);
+  // Builds swirl `slot` as its own independent GatherableField, centered
+  // along its fanned angle (SWIRL_REVEAL_ANGLES_DEG[slot]) off the shared
+  // reference forward captured at play() — same attract/capture tuning the
+  // main stardust field already uses, and the exact same capturedAgeDecay/
+  // spread tuning for a "just joined, still tight" trail look, so captured
+  // swirl points ride the comet's tail the same way captured stardust does.
+  private _buildSwirlField(slot: number): void {
+    const angleRad = (SWIRL_REVEAL_ANGLES_DEG[slot] * Math.PI) / 180;
+    this._scratchSwirlDir.copy(this._refForward).applyAxisAngle(UP_AXIS, angleRad);
+    this._scratchSwirlCenter.copy(this._refPos).addScaledVector(this._scratchSwirlDir, SWIRL_FORWARD_DISTANCE);
 
-    this._swirlField = new GatherableField({
+    this._swirlFields[slot] = new GatherableField({
       count: SWIRL_POINT_COUNT,
       spawnCenter: [this._scratchSwirlCenter.x, this._scratchSwirlCenter.y, this._scratchSwirlCenter.z],
       spawnRadiusMin: 0,
@@ -178,10 +202,10 @@ export class StardustSystem extends createSystem({
       capturedDepthRatio: 1.4,
       spawnPoint: (index) => this._swirlSpawnPoint(index),
       onCapture: (_index, x, y, z, speed) => {
-        this._swirlCaptureEvents.push({ x, y, z, speed });
+        this._swirlCaptureEvents[slot].push({ x, y, z, speed });
       },
       onAttractStart: (_index, x, y, z, speed) => {
-        this._swirlAttractEvents.push({ x, y, z, speed });
+        this._swirlAttractEvents[slot].push({ x, y, z, speed });
       },
     });
   }
@@ -194,13 +218,16 @@ export class StardustSystem extends createSystem({
     this._field.reset();
     this._hasWon = false;
     this._elapsed = 0;
-    this._swirling = false;
-    this._swirlElapsed = 0;
-    this._swirlField = null;
+    this._finaleElapsed = 0;
+    this._swirlFields = [null, null, null];
+    this._swirlRevealed = [false, false, false];
     this._captureEvents.length = 0;
     this._attractEvents.length = 0;
-    this._swirlCaptureEvents.length = 0;
-    this._swirlAttractEvents.length = 0;
+    for (const arr of this._swirlCaptureEvents) arr.length = 0;
+    for (const arr of this._swirlAttractEvents) arr.length = 0;
+
+    this.camera.getWorldPosition(this._refPos);
+    this.camera.getWorldDirection(this._refForward);
   }
 
   update(delta: number): void {
@@ -215,23 +242,29 @@ export class StardustSystem extends createSystem({
     }
 
     this._field.step(this._hand, delta);
-    if (this._swirlField) {
-      this._swirlField.step(this._hand, delta);
+    for (const field of this._swirlFields) {
+      field?.step(this._hand, delta);
     }
 
     this._elapsed += delta;
     const fraction = this._field.totalCaptured / N_STARDUST;
-
-    if (!this._swirling) {
-      if (fraction >= SWIRL_TRIGGER_FRACTION || this._elapsed >= SWIRL_TRIGGER_TIMEOUT_SECONDS) {
-        this._swirling = true;
-        this._swirlElapsed = 0;
-        this._buildSwirlField();
+    const forceReveal = this._elapsed >= SWIRL_REVEAL_TIMEOUT_SECONDS;
+    for (let slot = 0; slot < SWIRL_COUNT; slot++) {
+      if (!this._swirlRevealed[slot] && (fraction >= SWIRL_REVEAL_THRESHOLDS[slot] || forceReveal)) {
+        this._swirlRevealed[slot] = true;
+        this._buildSwirlField(slot);
       }
-    } else if (!this._hasWon) {
-      this._swirlElapsed += delta;
-      const swirlFraction = this._swirlField!.totalCaptured / SWIRL_POINT_COUNT;
-      if (swirlFraction >= FINALE_TRIGGER_FRACTION || this._swirlElapsed >= FINALE_EXTRA_SECONDS) {
+    }
+
+    const allRevealed = this._swirlRevealed.every(Boolean);
+    if (allRevealed && !this._hasWon) {
+      this._finaleElapsed += delta;
+      let totalCaptured = 0;
+      for (const field of this._swirlFields) {
+        totalCaptured += field?.totalCaptured ?? 0;
+      }
+      const combinedFraction = totalCaptured / (SWIRL_COUNT * SWIRL_POINT_COUNT);
+      if (combinedFraction >= FINALE_TRIGGER_FRACTION || this._finaleElapsed >= FINALE_EXTRA_SECONDS) {
         this._hasWon = true;
         const notifications = this.world.getSystem(NotificationHudSystem);
         const lastIndex = STARDUST_WIN_SEQUENCE.length - 1;
@@ -251,12 +284,36 @@ export class StardustSystem extends createSystem({
     }
   }
 
-  // Read by StardustVfxSystem to reveal the swirl finale visuals and swap
-  // the pickup/catch sound to the square-wave synth (see
-  // PixelTwinkleSynth) — level-triggered, no event needed since the VFX
+  // Read by StardustVfxSystem to swap the pickup/catch sound to the
+  // square-wave synth (see PixelTwinkleSynth) — true from the moment the
+  // FIRST swirl reveals, level-triggered, no event needed since the VFX
   // system already polls this every frame for other state.
   isSwirling(): boolean {
-    return this._swirling;
+    return this._swirlRevealed[0];
+  }
+  // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
+  // gathering toward the last swirl's own reveal threshold fills the first
+  // half, the finale (combined capture across all three swirls) fills the
+  // second, so the bar reads as one continuous gauge across both stretches
+  // instead of resetting/jumping as each swirl appears.
+  getProgress01(): number {
+    // Win is declared once the COMBINED swirl fraction crosses
+    // FINALE_TRIGGER_FRACTION (0.7) or the finale timeout fires — neither
+    // means every last point has actually been swept up, so without this
+    // the bar would read some partial value (and only creep slowly toward
+    // 100 as remaining points trickle in during the win-sequence
+    // notification) right as the player is told they're done. Snap to 100
+    // the instant that sequence starts instead.
+    if (this._hasWon) return 1;
+    const lastThreshold = SWIRL_REVEAL_THRESHOLDS[SWIRL_REVEAL_THRESHOLDS.length - 1];
+    const gatherProgress = Math.min(1, this._field.totalCaptured / N_STARDUST / lastThreshold);
+    if (!this._swirlRevealed.every(Boolean)) return gatherProgress * 0.5;
+    let totalCaptured = 0;
+    for (const field of this._swirlFields) {
+      totalCaptured += field?.totalCaptured ?? 0;
+    }
+    const finaleProgress = Math.min(1, totalCaptured / (SWIRL_COUNT * SWIRL_POINT_COUNT));
+    return 0.5 + finaleProgress * 0.5;
   }
 
   // Read-only accessors for StardustVfxSystem — no copying, callers must
@@ -299,27 +356,33 @@ export class StardustSystem extends createSystem({
     this._field.releaseCaptured(particleIndex);
   }
 
-  // Read by StardustVfxSystem to render the swirl once it exists — null
-  // until Stage A triggers (see _buildSwirlField), and again after every
-  // play() until the next loop reaches Stage A.
-  getSwirlField(): GatherableField | null {
-    return this._swirlField;
+  // How many swirls exist total — StardustVfxSystem iterates 0..this count
+  // rather than hardcoding SWIRL_COUNT itself.
+  getSwirlCount(): number {
+    return SWIRL_COUNT;
+  }
+  // Read by StardustVfxSystem to render swirl `slot` once it exists — null
+  // until that slot's own reveal threshold is crossed (see
+  // _buildSwirlField), and again after every play() until the next loop
+  // reaches it.
+  getSwirlField(slot: number): GatherableField | null {
+    return this._swirlFields[slot];
   }
   getSwirlPointCount(): number {
     return SWIRL_POINT_COUNT;
   }
   // Same drain-and-clear contract as drainCaptureEvents/drainAttractEvents
-  // above, for the swirl's own catch/pickup cues.
-  drainSwirlCaptureEvents(): readonly CaptureEvent[] {
-    if (this._swirlCaptureEvents.length === 0) return this._swirlCaptureEvents;
-    const events = this._swirlCaptureEvents;
-    this._swirlCaptureEvents = [];
+  // above, for swirl `slot`'s own catch/pickup cues.
+  drainSwirlCaptureEvents(slot: number): readonly CaptureEvent[] {
+    const events = this._swirlCaptureEvents[slot];
+    if (events.length === 0) return events;
+    this._swirlCaptureEvents[slot] = [];
     return events;
   }
-  drainSwirlAttractEvents(): readonly AttractEvent[] {
-    if (this._swirlAttractEvents.length === 0) return this._swirlAttractEvents;
-    const events = this._swirlAttractEvents;
-    this._swirlAttractEvents = [];
+  drainSwirlAttractEvents(slot: number): readonly AttractEvent[] {
+    const events = this._swirlAttractEvents[slot];
+    if (events.length === 0) return events;
+    this._swirlAttractEvents[slot] = [];
     return events;
   }
 }

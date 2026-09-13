@@ -38,8 +38,7 @@ const TOUCH_RADIUS = 0.1;
 // for crownLanded (see the _completed branch below). Deliberately not
 // imported from earth-situations-vfx-system.ts/ghost-rise.ts/crown-rise.ts
 // — this file only polls a globals signal, not the mechanic itself, so the
-// two stay decoupled (same reasoning as globals.pairedPersonIndex/
-// pairedPersonLine). index.ts's own Phase.Constellations timeoutSeconds
+// two stay decoupled. index.ts's own Phase.Constellations timeoutSeconds
 // (120) remains the safety net if the crown mechanic ever stalls.
 
 // Gameplay for Chapter 2.5, staged around the planet at its INTERMEDIATE
@@ -99,7 +98,15 @@ export class ConstellationsSystem extends createSystem({
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
     this._scratchHandPos = new Vector3();
 
-    const anchors = placeConstellationAnchorsAroundPlanet(3, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
+    // Every type's CONSTELLATION_SETS entry is exactly 1 def now (see its own
+    // comment) — passing count=1 here (not the old 3) makes this land on
+    // placeConstellationAnchorsAroundPlanet's own count===1 special case,
+    // which centers the anchor straight ahead of the player (0° azimuth)
+    // instead of the leftmost of 3 anchors (-30°). With 3, every type's
+    // slot-0 def always resolved to that same off-center anchor — the
+    // active constellation was ALWAYS placed to one side, requiring the
+    // player to turn to reach it, regardless of which type was active.
+    const anchors = placeConstellationAnchorsAroundPlanet(1, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
     // Away-from-planet unit direction per anchor — passed to
     // generateConstellationLayout so it can constrain every control point's
     // scatter to the outward hemisphere (see that function's own comment for

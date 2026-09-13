@@ -1,9 +1,10 @@
 import { AdditiveBlending, ShaderMaterial } from '@iwsdk/core';
+import { ATMOSPHERE, hexToGlsl } from '../color/color-scheme.js';
 
 // Fiery red/orange, independent of any planet's own STAIN_PALETTE hue — this
 // represents volatile-gasses ignition specifically, not the generic seeded
 // stain every class grows (see planet-stain-material.ts).
-const ATMOSPHERE_COLOR = 'vec3(1.0, 0.35, 0.12)';
+const ATMOSPHERE_COLOR = hexToGlsl(ATMOSPHERE);
 const FLICKER_FREQ = 2.2;
 
 // A thin, view-dependent glow shell wrapped around a planet — same ndotv

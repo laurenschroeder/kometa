@@ -1,4 +1,4 @@
-import { ShaderMaterial, Vector3 } from '@iwsdk/core';
+import { ShaderChunk, ShaderMaterial, Vector3 } from '@iwsdk/core';
 
 // Palette-parameterized toon rim-light shading, generalized from the
 // original comet-system.ts pebble/head shaders: a flat body color (mixed
@@ -33,6 +33,19 @@ const OUTLINE_GLSL = `
                + sin(vLocalPos.y * 5.0 - vLocalPos.z * 3.0 + 1.4) * 0.035;
   float edge    = (1.0 - ndotv) + wobble;
 `;
+
+// Ink-stipple dot density, tuned to read as pen-and-ink pointillism
+// (reference: dense/near-solid stippling in shadow, sparse flecks in light,
+// the surface's OWN base tone never darkened directly — only ever covered
+// by dots). MIN/MAX bound the dot coverage fraction so neither extreme goes
+// perfectly flat: even the brightest fragment keeps a few flecks and even
+// the darkest leaves a little of the base peeking through, matching the
+// reference's texture at both ends rather than solid flat regions.
+const INK_MIN_COVERAGE = 0.06;
+const INK_MAX_COVERAGE = 0.94;
+// Bumped 130 -> 480 for a much finer, dust-like grain (was reading as
+// distinct blobs at plant scale rather than fine speckle).
+const INK_DOT_FREQUENCY = 480.0;
 
 // Instanced + per-instance-tinted variant — for InstancedMesh (e.g. pebble
 // swarms), plus an aTint/aTinted attribute pair so individual instances can
@@ -93,6 +106,104 @@ export function makeToonRimInstancedTintedMaterial(palette: ToonRimPalette): Sha
       vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
       bodyCol      = mix(bodyCol, vTint, vTinted);
       vec3 col     = mix(bodyCol, ${vec3Glsl(palette.rimColor)}, outline);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  return new ShaderMaterial({ vertexShader, fragmentShader, depthWrite: true, transparent: false });
+}
+
+// Same instanced/tinted setup as makeToonRimInstancedTintedMaterial above,
+// but reworked from a smooth dark->light body ramp into fine colored-dust
+// stippling: the base is solid black, and grain flecked on top carries the
+// instance's own full tint — its DENSITY (not a flat lightening) carrying
+// the shading — dense/near-solid near the silhouette edge, sparse where the
+// surface faces the camera head-on, so it reads as dusty colored grain over
+// a dark body rather than a smooth toon ramp. (Originally the inverse — a
+// colored base flecked with black ink, per an early pen-and-ink reference —
+// flipped per later feedback to read as colored dust instead.) Same cheap
+// hash+floor+threshold idiom makeToonRimInstancedGrainyMaterial's own
+// sparkle flecks use (see its comment) rather than a real distance-field
+// halftone dot — good enough at this small a scale, and free of the
+// regular/grid-like look an ordered (Bayer) dither would give. The outline
+// itself stays a smooth smoothstep (undithered) — only the body shading
+// stipples.
+export function makeToonRimInstancedDitherMaterial(palette: ToonRimPalette): ShaderMaterial {
+  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
+  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+
+  const vertexShader = `
+    attribute float aBright;
+    attribute vec3  aTint;
+    attribute float aTinted;
+    varying   float vBright;
+    varying   vec3  vTint;
+    varying   float vTinted;
+    varying   vec3  vViewNormal;
+    varying   vec3  vViewDir;
+    varying   vec3  vLocalPos;
+
+    void main() {
+      vBright = aBright;
+      vTint = aTint;
+      vTinted = aTinted;
+      vLocalPos = position;
+      vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+
+      mat3 instanceNormalMatrix = mat3(instanceMatrix);
+      vViewNormal = normalize(normalMatrix * instanceNormalMatrix * normal);
+      vViewDir    = normalize(-mvPosition.xyz);
+
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    varying float vBright;
+    varying vec3  vTint;
+    varying float vTinted;
+    varying vec3  vViewNormal;
+    varying vec3  vViewDir;
+    varying vec3  vLocalPos;
+
+    // Same cheap 3D hash makeToonRimInstancedGrainyMaterial's own sparkle
+    // flecks use — see that function's own comment on why this (rather than
+    // a real noise texture) is enough at this scale.
+    float hash13(vec3 p) {
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
+
+      // Base stays the instance's own full-strength tint — no separate
+      // darkened tone; light areas are just "current color" (see this
+      // function's own top comment).
+      vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
+      bodyCol      = mix(bodyCol, vTint, vTinted);
+
+      // Ink dot coverage rises toward the silhouette edge (1.0 - ndotv) —
+      // the same shading term OUTLINE_GLSL's own edge already leans on —
+      // sampled per-cell off object-space position so the pattern stays
+      // glued to the surface (not swimming in screen space) and stereo-safe.
+      float grain    = hash13(floor(vLocalPos * ${INK_DOT_FREQUENCY.toFixed(1)}));
+      float shade    = 1.0 - ndotv;
+      float coverage = mix(${INK_MIN_COVERAGE.toFixed(4)}, ${INK_MAX_COVERAGE.toFixed(4)}, shade);
+      float ink      = step(1.0 - coverage, grain);
+
+      // Flipped from the original black-grain-on-color read: base is now
+      // black and the grain itself carries the color, so this reads as
+      // colored dust flecked over a dark body rather than dark ink flecked
+      // over a colored body.
+      vec3 col = mix(vec3(0.0), bodyCol, ink);
+      col      = mix(col, ${vec3Glsl(palette.rimColor)}, outline);
       gl_FragColor = vec4(col, 1.0);
     }
   `;
@@ -354,6 +465,91 @@ export function makeToonRimFlatMaterial(
     }
   `;
 
+  return new ShaderMaterial({
+    uniforms: {
+      uBodyColor: { value: new Vector3(...bodyColor) },
+      uRimColor: { value: new Vector3(...rimColor) },
+    },
+    vertexShader,
+    fragmentShader,
+    depthWrite: true,
+    transparent: false,
+  });
+}
+
+// Same flat black-body/white-rim look as makeToonRimFlatMaterial, but for a
+// real SkinnedMesh (the shared BreathingIdle rig every "human" figure in
+// Fate Events now uses — see animated-person.ts) — a plain ShaderMaterial's
+// custom vertexShader completely replaces three's own built-in one, so
+// nothing about skinning happens automatically just from `skinning: true`;
+// the actual bone-transform GLSL has to be spliced in by hand. Rather than
+// re-deriving that math, this pulls the exact same chunks three's own
+// built-in materials use (ShaderChunk.skinning_pars_vertex/skinbase_vertex/
+// skinning_vertex/skinnormal_vertex) — the standard boneTexture-based
+// technique, correct for whatever three.js version this project has
+// installed rather than a hand-copied (and potentially stale) GLSL literal.
+// `transformed`/`objectNormal` are three's own conventional local names for
+// "position/normal after skinning" — kept identical here so these chunks
+// (written expecting exactly those names) drop in unmodified.
+export function makeToonRimSkinnedMaterial(
+  bodyColor: [number, number, number],
+  rimColor: [number, number, number] = [1, 1, 1],
+): ShaderMaterial {
+  const vertexShader = `
+    ${ShaderChunk.skinning_pars_vertex}
+
+    // NO skinIndex/skinWeight declarations here on purpose — three.js
+    // injects both itself into every non-Raw ShaderMaterial's vertex prefix
+    // under '#ifdef USE_SKINNING' (see WebGLProgram.js), which it defines
+    // automatically for any SkinnedMesh. Re-declaring them here is a
+    // duplicate-declaration GLSL compile error, which silently renders
+    // nothing at all — the cause of an earlier "figures exist but are
+    // completely invisible" bug.
+
+    varying vec3 vViewNormal;
+    varying vec3 vViewDir;
+    varying vec3 vLocalPos;
+
+    void main() {
+      vec3 transformed = position;
+      vec3 objectNormal = normal;
+
+      ${ShaderChunk.skinbase_vertex}
+      ${ShaderChunk.skinning_vertex}
+      ${ShaderChunk.skinnormal_vertex}
+
+      vLocalPos = transformed;
+      vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
+      vViewNormal = normalize(normalMatrix * objectNormal);
+      vViewDir    = normalize(-mvPosition.xyz);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform vec3 uBodyColor;
+    uniform vec3 uRimColor;
+    varying vec3 vViewNormal;
+    varying vec3 vViewDir;
+    varying vec3 vLocalPos;
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${DEFAULT_OUTLINE_LOW.toFixed(4)}, ${DEFAULT_OUTLINE_HIGH.toFixed(4)}, edge);
+
+      vec3 col = mix(uBodyColor, uRimColor, outline);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  // No material.skinning flag to set — three.js (checked directly in this
+  // project's installed r181) derives USE_SKINNING purely from the rendered
+  // object being an actual SkinnedMesh (WebGLPrograms.js: `skinning:
+  // object.isSkinnedMesh === true`), not from any material-side property.
   return new ShaderMaterial({
     uniforms: {
       uBodyColor: { value: new Vector3(...bodyColor) },

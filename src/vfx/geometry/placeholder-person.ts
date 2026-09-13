@@ -3,19 +3,36 @@ import { BoxGeometry, BufferGeometry, CylinderGeometry, Group, Mesh, ShaderMater
 // 2.2x the original size — at 0.6-1.4m viewing distance against a 1.4m
 // planet, the original 9cm figures (with 5-7mm limbs) were only legible up
 // close; this reads clearly as a standing figure from across the planet.
-export const PERSON_HEIGHT = 0.2;
+// Then 3x again (0.2 -> 0.6) once the real animated rig replaced the
+// primitives — a recognizable character deserves to be read as one, not
+// squinted at.
+//
+// This is the single source of truth for how tall EVERY human figure is:
+// the animated rig is fitted to it (see animated-person.ts's own
+// targetHeight), the King/bench apply their own KING_SCALE/BENCH_SCALE on
+// top of it, and the primitive placeholder below is authored as fractions
+// of it. Changing this one number rescales all of them together.
+export const PERSON_HEIGHT = 0.6;
 
-const LEG_RADIUS = 0.015;
-const LEG_HEIGHT = 0.07;
-const LEG_SPACING = 0.022;
-const TORSO_WIDTH = 0.062;
-const TORSO_HEIGHT = 0.08;
-const TORSO_DEPTH = 0.035;
-const ARM_RADIUS = 0.011;
-const ARM_HEIGHT = 0.057;
-const ARM_SPACING = 0.044;
+// Proportions of the primitive placeholder figure, as fractions of
+// PERSON_HEIGHT rather than raw meters — these used to be hand-authored
+// absolute values that happened to sum to PERSON_HEIGHT, which meant
+// changing PERSON_HEIGHT silently desynced the placeholder from the real
+// animated rig it stands in for (the placeholder would keep its old size
+// while every animated figure resized). Expressed this way they track it
+// automatically. The leg/torso/head fractions sum to 1.0 by construction:
+// 0.35 + 0.4 + 2*0.13 (head diameter) = 1.01.
+const LEG_RADIUS = PERSON_HEIGHT * 0.075;
+const LEG_HEIGHT = PERSON_HEIGHT * 0.35;
+const LEG_SPACING = PERSON_HEIGHT * 0.11;
+const TORSO_WIDTH = PERSON_HEIGHT * 0.31;
+const TORSO_HEIGHT = PERSON_HEIGHT * 0.4;
+const TORSO_DEPTH = PERSON_HEIGHT * 0.175;
+const ARM_RADIUS = PERSON_HEIGHT * 0.055;
+const ARM_HEIGHT = PERSON_HEIGHT * 0.285;
+const ARM_SPACING = PERSON_HEIGHT * 0.22;
 const ARM_TILT = Math.PI / 12; // ~15 degrees, outward
-const HEAD_RADIUS = 0.026;
+const HEAD_RADIUS = PERSON_HEIGHT * 0.13;
 
 export interface PlaceholderPerson {
   group: Group;

@@ -14,12 +14,14 @@ import { AchievementSystem } from './core/achievement-system.js';
 import { BackgroundMusicSystem } from './core/background-music-system.js';
 import { bootstrapGlobals } from './core/globals.js';
 import { GameDirectorSystem } from './core/game-director-system.js';
+import { HandProgressHudSystem } from './core/hand-progress-hud-system.js';
 import { HudText, NotificationHudSystem } from './core/notification-hud-system.js';
 import { Phase } from './core/phase.js';
 import { PhaseMenuSystem } from './core/phase-menu-system.js';
 import { StarfieldSystem } from './core/starfield-system.js';
 import { SkyBackdropSystem } from './core/sky-backdrop-system.js';
 import { StartMenuSystem } from './core/start-menu-system.js';
+import { BLACK, DOME_EQUATOR, DOME_GROUND, DOME_SKY, hexToRgba } from './vfx/color/color-scheme.js';
 import { ConstellationsSystem } from './phases/constellations/constellations-system.js';
 import { ConstellationsVfxSystem } from './phases/constellations/constellations-vfx-system.js';
 import { EarthSituationsVfxSystem } from './phases/fate-events/earth-situations-vfx-system.js';
@@ -101,7 +103,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     });
   }
 
-  world.renderer.setClearColor(0x000000, 1.0);
+  world.renderer.setClearColor(BLACK, 1.0);
 
   // A faint navy->teal gradient instead of a pure void — subtle enough not
   // to read as "daytime sky" in a space setting, just enough haze that the
@@ -109,9 +111,9 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // SkyBackdropSystem's hero star render over the top of this.
   const root = world.activeLevel.value;
   const DOME_COLORS: Record<'sky' | 'equator' | 'ground', [number, number, number, number]> = {
-    sky: [0.01, 0.02, 0.05, 1],
-    equator: [0.02, 0.05, 0.07, 1],
-    ground: [0.01, 0.01, 0.02, 1],
+    sky: hexToRgba(DOME_SKY, 1),
+    equator: hexToRgba(DOME_EQUATOR, 1),
+    ground: hexToRgba(DOME_GROUND, 1),
   };
   for (const key of ['sky', 'equator', 'ground'] as const) {
     const v = root.getVectorView(DomeGradient, key) as Float32Array;
@@ -316,6 +318,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // sequence off mid-playback. 55 leaves real room to notice/aim/hold.
     timeoutSeconds: 55,
   });
+
+  // Wrist-worn progress bar, on whichever hand isn't holding the comet —
+  // always-on/self-gated (see its own class comment), not GameDirector-
+  // managed. Registered after Stardust/Pebbles/Seeding/FateEvents/Launch's
+  // own gameplay systems (all above), which it looks up via getSystem() in
+  // its own init(). See HAND_PROGRESS_HUD_ENABLED to disable this feature
+  // entirely without removing it.
+  world.registerSystem(HandProgressHudSystem, { priority: 34 });
 
   world
     .registerSystem(FinaleSystem, { priority: 30 })

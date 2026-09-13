@@ -40,10 +40,14 @@ const FLIP_UP_DOT_THRESHOLD = -0.5;
 const TAP_WINDOW_SECONDS = 0.45;
 const TAPS_TO_TOGGLE = 5;
 
-// Kill switch for the whole open-on-tap gesture — flip to false to disable
-// it again without ripping the feature out. The panel/systems below are
-// still fully built either way, just never opened while this is false.
-const DEV_MENU_ENABLED = true;
+// Kill switch for the whole open-on-tap gesture. Tied to Vite's own
+// dev/build distinction rather than a hand-maintained flag — `import.meta.
+// env.DEV` is true under `vite`/`npm run dev` and false in any `vite build`
+// output (what a Viverse/production build ships), so the menu is
+// automatically unreachable once pushed live without needing to remember to
+// flip anything by hand. The panel/systems below are still fully built
+// either way, just never opened while this is false.
+const DEV_MENU_ENABLED = import.meta.env.DEV;
 
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],

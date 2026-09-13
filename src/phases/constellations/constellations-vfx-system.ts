@@ -22,6 +22,7 @@ import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
 import { buildStreakRibbonGeometry } from '../../vfx/geometry/streak-path.js';
 import { makeSparkleMaterial, makeSparkleMaterialVertexColor } from '../../vfx/shaders/sparkle-material.js';
 import { makeStreakRibbonMaterial } from '../../vfx/shaders/streak-ribbon-material.js';
+import { FIELD_STAR, hexToRgb, UNTOUCHED_STAR } from '../../vfx/color/color-scheme.js';
 import {
   INTERMEDIATE_PLANET_CENTER,
   INTERMEDIATE_PLANET_RADIUS,
@@ -58,7 +59,7 @@ const LIGHT_UP_EASE_RATE = 4;
 // as its brightness/size) toward that constellation's actual pebble-type
 // color (see _updateStarState) — "gathering" it is what reveals its true
 // color.
-const UNTOUCHED_STAR_COLOR: [number, number, number] = [1.0, 0.85, 0.2];
+const UNTOUCHED_STAR_COLOR: [number, number, number] = hexToRgb(UNTOUCHED_STAR);
 
 // Non-interactive "other stars around" — pure background sky filler so the
 // active constellation reads as picked out of a real starfield instead of
@@ -72,7 +73,7 @@ const FIELD_STAR_COUNT = 70;
 const FIELD_STAR_SIZE = 0.022;
 const FIELD_STAR_MIN_RADIUS = 0.3; // leaves room near the anchor for the constellation itself
 const FIELD_STAR_MAX_RADIUS = 1.8;
-const FIELD_STAR_COLOR: [number, number, number] = [0.8, 0.85, 0.95];
+const FIELD_STAR_COLOR: [number, number, number] = hexToRgb(FIELD_STAR);
 
 // Ambient "shape traced out" line — the same continuous trace/fade/retrace
 // loop as the art-test magic-stardust-sweep variant (makeStreakRibbonMaterial,
@@ -208,9 +209,12 @@ export class ConstellationsVfxSystem extends createSystem({}) {
 
     // Same deterministic, pure function ConstellationsSystem.init() already
     // called to bake its own layouts against — recomputing it here (rather
-    // than plumbing an accessor across systems) gets us the 3 baked anchors
-    // needed to derive per-point offsets below.
-    const bakedAnchors = placeConstellationAnchorsAroundPlanet(3, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
+    // than plumbing an accessor across systems) gets us the same baked
+    // anchor(s) needed to derive per-point offsets below. count=1 (not the
+    // old 3) — see ConstellationsSystem's own matching comment; this MUST
+    // stay in sync with that call site since both need the exact same
+    // anchor position.
+    const bakedAnchors = placeConstellationAnchorsAroundPlanet(1, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
     const center = new Vector3(...INTERMEDIATE_PLANET_CENTER);
     this._anchorDir = bakedAnchors.map((a) => new Vector3(...a).sub(center).normalize());
     this._liveAnchor = bakedAnchors.map(() => new Vector3());

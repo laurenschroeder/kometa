@@ -430,6 +430,13 @@ export class PlanetSeedingSystem extends createSystem({
   getCoverageFraction(): number {
     return this._coloredCount / MAX_SPLATS;
   }
+  // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
+  // normalized against the actual win threshold (COVERAGE_WIN_FRACTION of
+  // MAX_SPLATS), unlike getCoverageFraction above, so this reaches exactly
+  // 1.0 right as the phase completes rather than plateauing at ~0.7.
+  getProgress01(): number {
+    return Math.min(1, this._coloredCount / Math.ceil(MAX_SPLATS * COVERAGE_WIN_FRACTION));
+  }
   // Returns this frame's accumulated launch events and clears the batch.
   drainLaunchEvents(): readonly LaunchEvent[] {
     if (this._launchBatch.length === 0) return this._launchBatch;

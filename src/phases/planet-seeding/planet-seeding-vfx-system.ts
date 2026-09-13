@@ -29,6 +29,7 @@ import { kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
 import { makePlanetStainMaterial, MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
+import { hexToRgb, MOON, PLANET_BASE } from '../../vfx/color/color-scheme.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { StardustSystem } from '../stardust/stardust-system.js';
 import { PlanetFateTransition } from './planet-fate-transition.js';
@@ -55,7 +56,7 @@ const FLIGHT_DURATION = 2.2;
 // capacity exceeded" fallback (instant-land, no visible fall) far too often.
 const MAX_INFLIGHT = 32;
 const COVERAGE_EASE_RATE = 2.5;
-const BASE_COLOR: [number, number, number] = [0.02, 0.03, 0.05];
+const BASE_COLOR: [number, number, number] = hexToRgb(PLANET_BASE);
 const ATMOSPHERE_SCALE = PLANET_RADIUS * 1.35;
 
 // The planet/moons are Chapter 3's own reveal — they shouldn't be visible
@@ -72,7 +73,7 @@ const MOON_FADE_EASE_RATE = 3; // 1/s, easing the fade-scale to 0 once the Fate 
 // entering Seeding (moons are decoration only, see MOON_BUMP_RADIUS's own
 // comment in planet-seeding-system.ts; a neutral color reads better against
 // the planet's own type-colored splats than matching them).
-const MOON_COLOR: [number, number, number] = [0.55, 0.62, 0.7];
+const MOON_COLOR: [number, number, number] = hexToRgb(MOON);
 
 // Weighted-random draw from the comet's own captured pebble-type mix (see
 // globals.pebbleTypeWeights, set by PebbleWeavingSystem's win condition) —
@@ -309,7 +310,32 @@ export class PlanetSeedingVfxSystem extends createSystem({
 
     // A fresh buildOrganicGeometry() call (not a shared instance) — same
     // technique the comet's pebbles/head use for their rocky look.
-    const geo = buildOrganicGeometry();
+    //
+    // icoDetail 4 instead of the default 2 — 5120 triangles rather than 320
+    // (each detail level quadruples: 20/80/320/1280/5120). The default is
+    // tuned for pebbles a few centimetres across, where 320 triangles reads
+    // as smooth; this same geometry is the PLANET, scaled up to
+    // PLANET_RADIUS and eventually filling the view during Fate Events, so
+    // at 320 its silhouette and the faceting across its terminator were
+    // clearly visible. Only this one mesh pays the cost (the moons, dust
+    // cloud, and growth-pool sprouts below all keep the cheap default), so
+    // it's ~5k extra triangles once, not per instance.
+    //
+    // ampMin/ampMax forced to 0 — a perfect sphere rather than the default
+    // sine-sum bump displacement (±4-10% of radius per term, several terms
+    // summed). Everything planted on this surface (growth-pool flowers/
+    // plants, Fate Events' crowd/graves/King/dogs/organic decorations) picks
+    // its position as center + normal*radius, which only lands exactly on
+    // the true surface if the surface really is that idealized sphere —
+    // against the old bumpy geometry, a direction that happened to dip or
+    // bulge relative to the sine-sum noise would plant something visibly
+    // floating or sunk in, which is what made some flowers read as not
+    // attached to the ground. PlanetSeedingSystem's own gameplay landing
+    // check (distToCenter - PLANET_RADIUS) already treated the planet as a
+    // perfect sphere regardless of this mesh's actual displaced shape, so
+    // flattening it here just brings the visual in line with logic that was
+    // already assuming it.
+    const geo = buildOrganicGeometry({ icoDetail: 4, ampMin: 0, ampMax: 0 });
     this._planetMaterial = makePlanetStainMaterial(BASE_COLOR);
     const mesh = new Mesh(geo, this._planetMaterial);
     mesh.position.set(positions[0], positions[1], positions[2]);

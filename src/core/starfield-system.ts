@@ -8,6 +8,7 @@ import {
 } from '@iwsdk/core';
 import { randomUnitVector3 } from '../vfx/geometry/mesh-utils.js';
 import { makeSparkleMaterialVertexColor } from '../vfx/shaders/sparkle-material.js';
+import { hexToRgb, STARFIELD_COOL_WHITE, STARFIELD_WARM_WHITE } from '../vfx/color/color-scheme.js';
 import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
 
@@ -25,8 +26,8 @@ const POINT_SIZE = 0.05;
 const POINT_SIZE_FACTOR = 3500;
 const FILL_EASE_RATE = 1.2; // 1/s, same exponential-pull idiom used elsewhere (e.g. _coverage)
 
-const COOL_WHITE: [number, number, number] = [0.75, 0.85, 1.0];
-const WARM_WHITE: [number, number, number] = [1.0, 0.92, 0.8];
+const COOL_WHITE: [number, number, number] = hexToRgb(STARFIELD_COOL_WHITE);
+const WARM_WHITE: [number, number, number] = hexToRgb(STARFIELD_WARM_WHITE);
 
 function randomStarColor(): [number, number, number] {
   const t = Math.random();

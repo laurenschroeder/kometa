@@ -110,7 +110,7 @@
 <div class="menu-root">
   <div id="page-main" class="page-main">
     <hudtext class="title">Kometa</hudtext>
-    <hudtext id="start-hint" class="start-hint">Pinch with both hands to start</hudtext>
+    <hudtext id="start-hint" class="start-hint">Pinch (or pull trigger) with both hands to start</hudtext>
     <div id="btn-achievements" class="dwell-button">
       <div id="fill-achievements" class="dwell-fill"></div>
       <hudtext class="dwell-label">Achievements</hudtext>

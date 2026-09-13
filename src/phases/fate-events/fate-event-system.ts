@@ -15,33 +15,43 @@ import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { scatterOnSphereCap } from '../../vfx/geometry/sphere-scatter.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
+import { CaptureEvent } from '../stardust/stardust-system.js';
 
 const ORIGIN = new Vector3(0, 0, 0);
 
-// Beat 2's "tabletop" framing: rather than a dome facing the player's chest
-// (the old PLANET_CENTER=[0,1.3,-2.6] + toward-player cap), the planet now
-// settles low and close, mostly out of sight below, with only its TOP
-// hemisphere cresting up within reach — the player looks down onto it like a
-// low round table/altar instead of staring straight at an approaching wall.
-// CROWD_CAP_DIRECTION (world up, not toward-player) is what actually
-// produces that — every populated cap (people here, decorations/graveyard/
-// king tower in earth-situations-vfx-system.ts, which imports this same
-// constant so every scattered element lands on the same near-top region)
-// scatters around +Y from PLANET_CENTER instead of +Z. First-pass numbers —
-// same as every other transition constant in this stretch, expect to retune
-// in-headset (see PlanetFateTransition, whose own _faceRef/dolly math
-// derives entirely from these two constants, no separate change needed
-// there).
+// Was a straight-up (0,1,0) "tabletop" framing — the planet settled low and
+// close with only its TOP hemisphere cresting up, player looking down onto
+// it like a low round table/altar. That put the whole populated cap out of
+// the player's forward view unless they tilted their head down, and (worse)
+// the King specifically — see earth-situations-vfx-system.ts's
+// _buildKingTower — landed at a RANDOM point inside that cap rather than a
+// fixed one, so he could end up anywhere within CAP_HALF_ANGLE of the
+// center, easily missed entirely. A first pass moved this all the way to
+// near-side (mostly +Z, toward the player, same convention
+// constellation-path.ts's ANCHOR_ELEVATION uses) — too far the other way,
+// reading as too close/off to the side. Split the difference: still tilted
+// toward the player, but with more elevation than depth now, landing
+// between the old straight-up and the too-far near-side attempt. Every
+// populated cap (people here, decorations/graveyard/king tower in
+// earth-situations-vfx-system.ts, which imports this same constant so every
+// scattered element lands on the same region) scatters around this same
+// direction from PLANET_CENTER.
 export const PLANET_CENTER: [number, number, number] = [0, -0.35, -1.9];
 export const PLANET_RADIUS = 1.4;
-export const CROWD_CAP_DIRECTION = new Vector3(0, 1, 0);
+export const CROWD_CAP_DIRECTION = new Vector3(0, 0.95, 0.2).normalize();
 export const N_PEOPLE = 10;
-// Bumped from 28 — the populated cap now faces straight up on a much closer
-// sphere (see CROWD_CAP_DIRECTION above) rather than a distant near-face;
-// a bit wider keeps the crowd from reading as one tight clump directly
-// overhead.
+// Bumped from 28 for the old straight-up cap on a much closer sphere; kept
+// as-is now that the cap points near-side instead — still wide enough to
+// avoid reading as one tight clump.
 const CAP_HALF_ANGLE = (34 * Math.PI) / 180;
-const PROXIMITY_RADIUS = 0.3;
+// Bumped from 0.3 — easier to trigger just by swinging/walking the comet
+// through the crowd instead of needing to land precisely on someone.
+const PROXIMITY_RADIUS = 0.45;
+// Keeps the ambient crowd off the exact center point earth-situations-vfx-
+// system.ts's _buildKingTower reserves for the King (see its own comment) —
+// an annulus around him rather than a filled cap, so "people behind/to the
+// side of him" holds structurally instead of by the luck of a random draw.
+const KING_EXCLUSION_HALF_ANGLE = (8 * Math.PI) / 180;
 // A person's speech bubble now runs its own fade-in -> hold (readable) ->
 // fade-out cycle per line, rather than the old instant swap every
 // LINE_CYCLE_SECONDS — the swap read as the bubble popping straight to new
@@ -89,6 +99,12 @@ export const NAMED_FIGURE_COUNT = 2;
 // (see getExplainerText/getExplainerOpacity) — bypassing proximity and the
 // ambient dialogue pool entirely for that one beat.
 export const EXPLAIN_FIGURE_INDEX = 0;
+// "The other standing person" — the second featured figure always carries
+// the current dialogue's own pairedLine (see getDialogueLinesFor) instead of
+// a scripted arc, so every path has a second reliably-findable talker
+// alongside EXPLAIN_FIGURE_INDEX (previously this was a random, often-missed
+// AMBIENT figure, and Dog-only — see git history).
+export const PAIRED_FIGURE_INDEX = NAMED_FIGURE_COUNT - 1;
 // Minimum accumulated near-time (see _namedDwell) before stop()'s farewell
 // message will name a figure at all — guards against firing for a player
 // who barely brushed past one on their way to somewhere else.
@@ -222,6 +238,13 @@ export class FateEventSystem extends createSystem({
   private _graveyardField!: GatherableField;
   private _seedField!: GatherableField;
   private _hand!: GatherHandInput;
+  // Fired via GatherableField's onCapture callback (both Beat-4 collectible
+  // fields feed the same queue — only one of the two is ever stepped in a
+  // given playthrough, see _updateCollect), drained each frame by
+  // FateEventVfxSystem to trigger the pickup twinkle sound. Same produce/
+  // drain shape StardustSystem's own CaptureEvent/drainCaptureEvents already
+  // establishes.
+  private _collectCaptureEvents: CaptureEvent[] = [];
 
   private _scratchHandPos!: Vector3;
   private _scratchHandVel!: Vector3;
@@ -236,6 +259,7 @@ export class FateEventSystem extends createSystem({
       PLANET_RADIUS,
       CROWD_CAP_DIRECTION,
       CAP_HALF_ANGLE,
+      KING_EXCLUSION_HALF_ANGLE,
     );
     this._surfacePositions = positions;
     this._normals = normals;
@@ -290,6 +314,9 @@ export class FateEventSystem extends createSystem({
         dir.set(normals[index * 3], normals[index * 3 + 1], normals[index * 3 + 2]);
         return { dir: dir.clone(), radiusT: Math.random(), type: 0 };
       },
+      onCapture: (_index, x, y, z, speed) => {
+        this._collectCaptureEvents.push({ x, y, z, speed });
+      },
     });
   }
 
@@ -324,6 +351,7 @@ export class FateEventSystem extends createSystem({
 
     this._graveyardField.reset();
     this._seedField.reset();
+    this._collectCaptureEvents.length = 0;
 
     this._beat = FateBeat.Zoom;
     this._beatTimer = 0;
@@ -544,6 +572,16 @@ export class FateEventSystem extends createSystem({
   getSeedField(): GatherableField {
     return this._seedField;
   }
+  // Drain-and-clear, same contract as StardustSystem's own
+  // drainCaptureEvents() — returns whatever's queued since the last call and
+  // empties the queue, so an idle frame with nothing captured returns the
+  // same empty array back out (no allocation) rather than a fresh one.
+  drainCollectCaptureEvents(): readonly CaptureEvent[] {
+    if (this._collectCaptureEvents.length === 0) return this._collectCaptureEvents;
+    const events = this._collectCaptureEvents;
+    this._collectCaptureEvents = [];
+    return events;
+  }
   // Drives both the jump animation and speech-bubble visibility.
   getActiveMask(): Uint8Array {
     return this._active;
@@ -558,26 +596,22 @@ export class FateEventSystem extends createSystem({
   getLineIndex(): Uint8Array {
     return this._lineIndex;
   }
-  // Per-person dialogue. The two featured figures (see NAMED_FIGURE_COUNT)
-  // always get their own NAMED_FIGURES_BY_TYPE arc. Every ambient crowd
-  // member gets ONE entry from this._dialogue.entries, unique to them for
-  // this playthrough — see _dialogueOffset's own comment — rather than
-  // everyone sharing/repeating the same shared lines. The one exception:
-  // whichever ambient person index EarthSituationsVfxSystem picked as
-  // "paired" (Dog only — see globals.pairedPersonIndex/pairedPersonLine, set
-  // on that constellation's completion edge) gets a fixed single-line
-  // override instead, replacing their assigned entry entirely. Routed
-  // through globals rather than a direct system reference so this file and
-  // earth-situations-vfx-system.ts don't need to import each other. Checked
-  // AFTER the named-figure check (not before) so a named figure's own arc
-  // always wins over a paired override.
+  // Per-person dialogue. EXPLAIN_FIGURE_INDEX gets its own NAMED_FIGURES_BY_
+  // TYPE arc (Beat 4, after Beat 3's separate explainerLine — see
+  // getExplainerText). PAIRED_FIGURE_INDEX — "the other standing person" —
+  // always gets this playthrough's own pairedLine instead, a fixed single
+  // line straight off this._dialogue (see notification-copy.ts's
+  // FATE_DIALOGUE) rather than a scripted arc, falling back to its own
+  // NAMED_FIGURES_BY_TYPE arc only if a dialogue entry is ever missing one.
+  // Every ambient crowd member (index >= NAMED_FIGURE_COUNT) gets ONE entry
+  // from this._dialogue.entries, unique to them for this playthrough — see
+  // _dialogueOffset's own comment — rather than everyone sharing/repeating
+  // the same shared lines.
   getDialogueLinesFor(personIndex: number): readonly string[] {
-    if (personIndex < NAMED_FIGURE_COUNT) return this._namedArcs[personIndex].lines;
-    const globals = getGlobals(this.world);
-    if (personIndex === globals.pairedPersonIndex.peek()) {
-      const line = globals.pairedPersonLine.peek();
-      if (line) return [line];
+    if (personIndex === PAIRED_FIGURE_INDEX && this._dialogue.pairedLine) {
+      return [this._dialogue.pairedLine];
     }
+    if (personIndex < NAMED_FIGURE_COUNT) return this._namedArcs[personIndex].lines;
     const entries = this._dialogue.entries;
     return entries[(this._dialogueOffset + (personIndex - NAMED_FIGURE_COUNT)) % entries.length];
   }
@@ -625,5 +659,19 @@ export class FateEventSystem extends createSystem({
   }
   getBobFrequencyMultiplier(): number {
     return BOB_FREQUENCY_MULT_BY_TYPE[getGlobals(this.world).dominantPebbleType.peek()];
+  }
+  // 0-1 overall Beat-4 "collect" progress for HandProgressHudSystem's wrist
+  // bar — same per-type win metric _updateCollect's own collectDone check
+  // uses (visited-fraction for Gas, capture-fraction for Soul/Organic).
+  // Naturally reads 0 before Beat 4 even starts, since _visited/the
+  // collectible fields are untouched until _updateCollect actually runs.
+  getCollectProgress01(): number {
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    if (dominant === VOLATILE_GASSES_TYPE) {
+      const visibleCount = this.getVisiblePeopleCount();
+      return visibleCount > 0 ? Math.min(1, this._visitedCount / visibleCount) : 0;
+    }
+    const field = dominant === SOUL_DUST_TYPE ? this._graveyardField : this._seedField;
+    return field.count > 0 ? Math.min(1, field.totalCaptured / field.count) : 0;
   }
 }

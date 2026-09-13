@@ -22,20 +22,21 @@ import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { makePixelCrtMaterial } from '../../vfx/shaders/pixel-crt-material.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
+import { hexToRgb, STARDUST, SWIRL_GOLD } from '../../vfx/color/color-scheme.js';
 import { StardustSystem } from './stardust-system.js';
 
 // The swirl finale's collectible gold gather-field (see
 // StardustSystem.getSwirlField()) — a warm gold, distinct from the cream
 // STARDUST_COLOR ambient motes, so captured swirl points read as a clear
 // "you gained this" accent riding the tail.
-const SWIRL_GOLD_COLOR: [number, number, number] = [1.0, 0.75, 0.25];
+const SWIRL_GOLD_COLOR: [number, number, number] = hexToRgb(SWIRL_GOLD);
 const SWIRL_POINT_SIZE = 0.022;
 const SWIRL_CAPTURED_SIZE = 0.03;
 const SWIRL_FADE_IN_RATE = 0.7; // 1/s exponential ease toward opacity 1
 
 // Exported so ArtTestVfxSystem's "current stardust field" variant renders
 // with the exact same color, not an eyeballed copy.
-export const STARDUST_COLOR: [number, number, number] = [1.0, 0.96, 0.82];
+export const STARDUST_COLOR: [number, number, number] = hexToRgb(STARDUST);
 const AMBIENT_SIZE = 0.05;
 const CAPTURED_SIZE = 0.035;
 
@@ -105,22 +106,24 @@ export class StardustVfxSystem extends createSystem({
   // — see pixel-twinkle-synth.ts's own class comment.
   private _pixelSynth!: PixelTwinkleSynth;
 
-  // Built lazily (see _buildSwirlRender) the first frame
-  // StardustSystem.getSwirlField() returns non-null — its point count and
-  // positions aren't known until then.
-  private _swirlBuilt = false;
-  private _swirlOpacity = 0;
-  private _swirlSize!: Float32Array;
-  private _swirlGeo!: BufferGeometry;
-  private _swirlMaterial!: ShaderMaterial;
-  private _swirlPoints!: Points;
-  private _swirlEntity!: Entity;
+  // One slot per StardustSystem swirl (see getSwirlCount()) — each built
+  // lazily (see _buildSwirlRender) the first frame that slot's
+  // StardustSystem.getSwirlField(slot) returns non-null, since its point
+  // count/positions aren't known until then.
+  private _swirlCount!: number;
+  private _swirlBuilt: boolean[] = [];
+  private _swirlOpacity: number[] = [];
+  private _swirlSize: Float32Array[] = [];
+  private _swirlGeo: BufferGeometry[] = [];
+  private _swirlMaterial: ShaderMaterial[] = [];
+  private _swirlPoints: Points[] = [];
+  private _swirlEntity: Entity[] = [];
 
-  private _swirlCapturedPositions!: Float32Array;
-  private _swirlCapturedGeo!: BufferGeometry;
-  private _swirlCapturedMaterial!: ShaderMaterial;
-  private _swirlCapturedPoints!: Points;
-  private _swirlCapturedEntity!: Entity;
+  private _swirlCapturedPositions: Float32Array[] = [];
+  private _swirlCapturedGeo: BufferGeometry[] = [];
+  private _swirlCapturedMaterial: ShaderMaterial[] = [];
+  private _swirlCapturedPoints: Points[] = [];
+  private _swirlCapturedEntity: Entity[] = [];
 
   init(): void {
     // StardustSystem/CometTrailSystem must be registered before this system
@@ -180,6 +183,20 @@ export class StardustVfxSystem extends createSystem({
     this._capturedPoints.frustumCulled = false;
     this._capturedEntity = this.world.createTransformEntity(this._capturedPoints);
 
+    this._swirlCount = this._stardust.getSwirlCount();
+    this._swirlBuilt = new Array(this._swirlCount).fill(false);
+    this._swirlOpacity = new Array(this._swirlCount).fill(0);
+    this._swirlSize = new Array(this._swirlCount);
+    this._swirlGeo = new Array(this._swirlCount);
+    this._swirlMaterial = new Array(this._swirlCount);
+    this._swirlPoints = new Array(this._swirlCount);
+    this._swirlEntity = new Array(this._swirlCount);
+    this._swirlCapturedPositions = new Array(this._swirlCount);
+    this._swirlCapturedGeo = new Array(this._swirlCount);
+    this._swirlCapturedMaterial = new Array(this._swirlCount);
+    this._swirlCapturedPoints = new Array(this._swirlCount);
+    this._swirlCapturedEntity = new Array(this._swirlCount);
+
     // signal.subscribe() fires immediately with the current value, so
     // visibility is correct before the first frame renders.
     this.cleanupFuncs.push(
@@ -192,14 +209,16 @@ export class StardustVfxSystem extends createSystem({
           // idiom PlanetSeedingVfxSystem uses, since this system isn't
           // GameDirector-managed (no play() to hook a reset into). Unlike
           // the ambient/captured stardust pools (which just get their state
-          // zeroed elsewhere), the swirl's geometry/material are rebuilt
+          // zeroed elsewhere), each swirl's geometry/material are rebuilt
           // from scratch each loop, so a full dispose is needed here rather
           // than a reset.
-          this._disposeSwirlRender();
+          for (let slot = 0; slot < this._swirlCount; slot++) this._disposeSwirlRender(slot);
         }
-        if (this._swirlBuilt) {
-          this._swirlPoints.visible = phase === Phase.Stardust;
-          this._swirlCapturedPoints.visible = CAPTURED_VISIBLE_DURING.has(phase);
+        for (let slot = 0; slot < this._swirlCount; slot++) {
+          if (this._swirlBuilt[slot]) {
+            this._swirlPoints[slot].visible = phase === Phase.Stardust;
+            this._swirlCapturedPoints[slot].visible = CAPTURED_VISIBLE_DURING.has(phase);
+          }
         }
       }),
     );
@@ -219,7 +238,7 @@ export class StardustVfxSystem extends createSystem({
     this._camUp.setFromMatrixColumn(this.camera.matrixWorld, 1);
     this._camFwd.setFromMatrixColumn(this.camera.matrixWorld, 2);
 
-    this._updateSwirl(delta, time);
+    for (let slot = 0; slot < this._swirlCount; slot++) this._updateSwirl(slot, delta, time);
 
     for (const entity of this.queries.comets.entities) {
       const trail = this._trailSystem.getBuffer(entity);
@@ -227,7 +246,9 @@ export class StardustVfxSystem extends createSystem({
       const samples = entity.getValue(CometTrail, 'samples') as number;
       const stride = entity.getValue(CometTrail, 'stride') as number;
       this._placeCapturedPool(trail, samples, stride);
-      this._placeSwirlCapturedPool(trail, samples, stride);
+      for (let slot = 0; slot < this._swirlCount; slot++) {
+        this._placeSwirlCapturedPool(slot, trail, samples, stride);
+      }
     }
 
     // Once the swirl finale begins, the pickup/catch cue switches to the
@@ -242,44 +263,47 @@ export class StardustVfxSystem extends createSystem({
       this._scratchCapturePos.set(ev.x, ev.y, ev.z);
       synth.playCatch(this._scratchCapturePos, ev.speed);
     }
-    // Collecting the swirl makes the same square-wave chime as collecting
+    // Collecting any swirl makes the same square-wave chime as collecting
     // stardust during the finale — reinforcing "this is the same kind of
     // gathering, on a new object."
-    for (const ev of this._stardust.drainSwirlAttractEvents()) {
-      this._scratchCapturePos.set(ev.x, ev.y, ev.z);
-      synth.playPickup(this._scratchCapturePos, ev.speed);
-    }
-    for (const ev of this._stardust.drainSwirlCaptureEvents()) {
-      this._scratchCapturePos.set(ev.x, ev.y, ev.z);
-      synth.playCatch(this._scratchCapturePos, ev.speed);
+    for (let slot = 0; slot < this._swirlCount; slot++) {
+      for (const ev of this._stardust.drainSwirlAttractEvents(slot)) {
+        this._scratchCapturePos.set(ev.x, ev.y, ev.z);
+        synth.playPickup(this._scratchCapturePos, ev.speed);
+      }
+      for (const ev of this._stardust.drainSwirlCaptureEvents(slot)) {
+        this._scratchCapturePos.set(ev.x, ev.y, ev.z);
+        synth.playCatch(this._scratchCapturePos, ev.speed);
+      }
     }
   }
 
-  // Lazily builds the swirl's rendering the first frame StardustSystem's
-  // swirl field exists (Stage A just triggered — see
-  // StardustSystem._buildSwirlField), then every frame after: keeps the
-  // ambient cloud's per-point size zeroed once captured (so it visibly
-  // thins out as points are swept up, same idiom as the main ambient
-  // stardust field) and eases its fade-in toward full opacity.
-  private _updateSwirl(delta: number, time: number): void {
-    const swirlField = this._stardust.getSwirlField();
+  // Lazily builds swirl `slot`'s rendering the first frame StardustSystem's
+  // swirl field for that slot exists (its own reveal threshold just
+  // crossed — see StardustSystem._buildSwirlField), then every frame after:
+  // keeps the ambient cloud's per-point size zeroed once captured (so it
+  // visibly thins out as points are swept up, same idiom as the main
+  // ambient stardust field) and eases its fade-in toward full opacity.
+  private _updateSwirl(slot: number, delta: number, time: number): void {
+    const swirlField = this._stardust.getSwirlField(slot);
     if (!swirlField) return;
-    if (!this._swirlBuilt) {
-      this._buildSwirlRender(swirlField);
+    if (!this._swirlBuilt[slot]) {
+      this._buildSwirlRender(slot, swirlField);
     }
 
     const states = swirlField.states;
+    const size = this._swirlSize[slot];
     for (let i = 0; i < states.length; i++) {
-      this._swirlSize[i] = states[i] === GatherState.Captured ? 0 : SWIRL_POINT_SIZE;
+      size[i] = states[i] === GatherState.Captured ? 0 : SWIRL_POINT_SIZE;
     }
-    (this._swirlGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
-    (this._swirlGeo.getAttribute('aSize') as BufferAttribute).needsUpdate = true;
+    (this._swirlGeo[slot].getAttribute('position') as BufferAttribute).needsUpdate = true;
+    (this._swirlGeo[slot].getAttribute('aSize') as BufferAttribute).needsUpdate = true;
 
     const pull = 1 - Math.exp(-SWIRL_FADE_IN_RATE * delta);
-    this._swirlOpacity += (1 - this._swirlOpacity) * pull;
-    this._swirlMaterial.uniforms.uOpacity.value = this._swirlOpacity;
-    this._swirlMaterial.uniforms.uTime.value = time;
-    this._swirlCapturedMaterial.uniforms.uTime.value = time;
+    this._swirlOpacity[slot] += (1 - this._swirlOpacity[slot]) * pull;
+    this._swirlMaterial[slot].uniforms.uOpacity.value = this._swirlOpacity[slot];
+    this._swirlMaterial[slot].uniforms.uTime.value = time;
+    this._swirlCapturedMaterial[slot].uniforms.uTime.value = time;
   }
 
   // Ambient cloud: a zero-copy Points over swirlField.positions (same
@@ -288,12 +312,13 @@ export class StardustVfxSystem extends createSystem({
   // same shape as _capturedGeo, own material intentionally left at
   // uOpacity 1 (never faded — points only appear here already-captured,
   // one at a time).
-  private _buildSwirlRender(swirlField: GatherableField): void {
-    this._swirlBuilt = true;
-    this._swirlOpacity = 0;
+  private _buildSwirlRender(slot: number, swirlField: GatherableField): void {
+    this._swirlBuilt[slot] = true;
+    this._swirlOpacity[slot] = 0;
     const n = this._stardust.getSwirlPointCount();
 
-    this._swirlSize = new Float32Array(n);
+    const size = new Float32Array(n);
+    this._swirlSize[slot] = size;
     const bright = new Float32Array(n);
     const phase = new Float32Array(n);
     for (let i = 0; i < n; i++) {
@@ -301,48 +326,56 @@ export class StardustVfxSystem extends createSystem({
       phase[i] = Math.random();
     }
 
-    this._swirlMaterial = makePixelCrtMaterial({ color: SWIRL_GOLD_COLOR, blending: AdditiveBlending });
-    this._swirlMaterial.uniforms.uOpacity.value = 0;
+    const material = makePixelCrtMaterial({ color: SWIRL_GOLD_COLOR, blending: AdditiveBlending });
+    material.uniforms.uOpacity.value = 0;
+    this._swirlMaterial[slot] = material;
 
-    this._swirlGeo = new BufferGeometry();
+    const geo = new BufferGeometry();
     const posAttr = new BufferAttribute(swirlField.positions, 3);
     posAttr.setUsage(DynamicDrawUsage);
-    this._swirlGeo.setAttribute('position', posAttr);
-    this._swirlGeo.setAttribute('aSize', new BufferAttribute(this._swirlSize, 1));
-    this._swirlGeo.setAttribute('aBright', new BufferAttribute(bright, 1));
-    this._swirlGeo.setAttribute('aPhase', new BufferAttribute(phase, 1));
-    this._swirlPoints = new Points(this._swirlGeo, this._swirlMaterial);
-    this._swirlPoints.frustumCulled = false;
-    this._swirlEntity = this.world.createTransformEntity(this._swirlPoints);
+    geo.setAttribute('position', posAttr);
+    geo.setAttribute('aSize', new BufferAttribute(size, 1));
+    geo.setAttribute('aBright', new BufferAttribute(bright, 1));
+    geo.setAttribute('aPhase', new BufferAttribute(phase, 1));
+    this._swirlGeo[slot] = geo;
+    const points = new Points(geo, material);
+    points.frustumCulled = false;
+    this._swirlPoints[slot] = points;
+    this._swirlEntity[slot] = this.world.createTransformEntity(points);
 
-    this._swirlCapturedMaterial = makePixelCrtMaterial({ color: SWIRL_GOLD_COLOR, blending: AdditiveBlending });
-    this._swirlCapturedPositions = new Float32Array(n * 3);
-    this._swirlCapturedGeo = new BufferGeometry();
-    const capPosAttr = new BufferAttribute(this._swirlCapturedPositions, 3);
+    const capturedMaterial = makePixelCrtMaterial({ color: SWIRL_GOLD_COLOR, blending: AdditiveBlending });
+    this._swirlCapturedMaterial[slot] = capturedMaterial;
+    const capturedPositions = new Float32Array(n * 3);
+    this._swirlCapturedPositions[slot] = capturedPositions;
+    const capturedGeo = new BufferGeometry();
+    const capPosAttr = new BufferAttribute(capturedPositions, 3);
     capPosAttr.setUsage(DynamicDrawUsage);
-    this._swirlCapturedGeo.setAttribute('position', capPosAttr);
-    this._swirlCapturedGeo.setAttribute('aSize', new BufferAttribute(new Float32Array(n).fill(SWIRL_CAPTURED_SIZE), 1));
-    this._swirlCapturedGeo.setAttribute('aBright', new BufferAttribute(bright, 1));
-    this._swirlCapturedGeo.setAttribute('aPhase', new BufferAttribute(phase, 1));
-    this._swirlCapturedGeo.setDrawRange(0, 0);
-    this._swirlCapturedPoints = new Points(this._swirlCapturedGeo, this._swirlCapturedMaterial);
-    this._swirlCapturedPoints.frustumCulled = false;
-    this._swirlCapturedEntity = this.world.createTransformEntity(this._swirlCapturedPoints);
+    capturedGeo.setAttribute('position', capPosAttr);
+    capturedGeo.setAttribute('aSize', new BufferAttribute(new Float32Array(n).fill(SWIRL_CAPTURED_SIZE), 1));
+    capturedGeo.setAttribute('aBright', new BufferAttribute(bright, 1));
+    capturedGeo.setAttribute('aPhase', new BufferAttribute(phase, 1));
+    capturedGeo.setDrawRange(0, 0);
+    this._swirlCapturedGeo[slot] = capturedGeo;
+    const capturedPoints = new Points(capturedGeo, capturedMaterial);
+    capturedPoints.frustumCulled = false;
+    this._swirlCapturedPoints[slot] = capturedPoints;
+    this._swirlCapturedEntity[slot] = this.world.createTransformEntity(capturedPoints);
 
     const currentPhase = getGlobals(this.world).gamePhase.peek();
-    this._swirlPoints.visible = currentPhase === Phase.Stardust;
-    this._swirlCapturedPoints.visible = CAPTURED_VISIBLE_DURING.has(currentPhase);
+    points.visible = currentPhase === Phase.Stardust;
+    capturedPoints.visible = CAPTURED_VISIBLE_DURING.has(currentPhase);
   }
 
-  private _placeSwirlCapturedPool(trail: Float32Array, samples: number, stride: number): void {
-    if (!this._swirlBuilt) return;
-    const swirlField = this._stardust.getSwirlField();
+  private _placeSwirlCapturedPool(slot: number, trail: Float32Array, samples: number, stride: number): void {
+    if (!this._swirlBuilt[slot]) return;
+    const swirlField = this._stardust.getSwirlField(slot);
     if (!swirlField) return;
     const indices = swirlField.captured;
     const field = swirlField.capturedField;
+    const positions = this._swirlCapturedPositions[slot];
 
-    for (let slot = 0; slot < indices.length; slot++) {
-      const i = indices[slot];
+    for (let i2 = 0; i2 < indices.length; i2++) {
+      const i = indices[i2];
       sampleTrailOffset(
         trail,
         samples,
@@ -356,25 +389,25 @@ export class StardustVfxSystem extends createSystem({
         this._camFwd,
         this._scratchOffset,
       );
-      this._swirlCapturedPositions[slot * 3] = this._scratchOffset.x;
-      this._swirlCapturedPositions[slot * 3 + 1] = this._scratchOffset.y;
-      this._swirlCapturedPositions[slot * 3 + 2] = this._scratchOffset.z;
+      positions[i2 * 3] = this._scratchOffset.x;
+      positions[i2 * 3 + 1] = this._scratchOffset.y;
+      positions[i2 * 3 + 2] = this._scratchOffset.z;
     }
 
-    this._swirlCapturedGeo.setDrawRange(0, indices.length);
-    (this._swirlCapturedGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
+    this._swirlCapturedGeo[slot].setDrawRange(0, indices.length);
+    (this._swirlCapturedGeo[slot].getAttribute('position') as BufferAttribute).needsUpdate = true;
   }
 
-  // Full teardown (not just a state reset) since the swirl's geometry/
-  // material are rebuilt from scratch on the next Stage A trigger — see the
+  // Full teardown (not just a state reset) since each swirl's geometry/
+  // material are rebuilt from scratch on that slot's next reveal — see the
   // gamePhase.subscribe callback's own comment for why this differs from
   // the ambient/captured stardust pools' plain reset.
-  private _disposeSwirlRender(): void {
-    if (!this._swirlBuilt) return;
-    this._swirlBuilt = false;
-    this._swirlOpacity = 0;
-    this._swirlEntity.dispose();
-    this._swirlCapturedEntity.dispose();
+  private _disposeSwirlRender(slot: number): void {
+    if (!this._swirlBuilt[slot]) return;
+    this._swirlBuilt[slot] = false;
+    this._swirlOpacity[slot] = 0;
+    this._swirlEntity[slot].dispose();
+    this._swirlCapturedEntity[slot].dispose();
   }
 
   private _placeCapturedPool(trail: Float32Array, samples: number, stride: number): void {

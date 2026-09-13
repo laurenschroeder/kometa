@@ -16,7 +16,7 @@ import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { GatherState } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
-import { buildBlueGreenPalette } from '../../vfx/color/blue-green-palette.js';
+import { ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
 import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { PEBBLE_MESH_SCALE } from '../../vfx/particles/pebble-size.js';
@@ -50,7 +50,6 @@ const N_ORGANIC_VARIANTS = 6;
 // Only organic-type pebbles use these now (previously shared by all three
 // types) — see kOrganicGlitterMat.
 const kOrganicGeos: BufferGeometry[] = Array.from({ length: N_ORGANIC_VARIANTS }, () => buildOrganicGeometry());
-const ORGANIC_PALETTE = buildBlueGreenPalette();
 
 // Most organic pebbles stay at their normal sampled size, but a minority
 // come out 2x or 3x — a few visibly bigger boulders scattered through the
