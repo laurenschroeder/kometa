@@ -28,6 +28,7 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
 import { playKingDeathTone } from '../../vfx/audio/king-death-tone.js';
+import { playKingHorn } from '../../vfx/audio/king-horn.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
@@ -319,6 +320,10 @@ export class EarthSituationsVfxSystem extends createSystem({
   // One-shot guard — Gas's death vignette fires once per play() the instant
   // FateEventSystem's Ambient beat crosses GAS_DEATH_START_SECONDS.
   private _gasVignetteTriggered = false;
+  // One-shot guard — the ominous warning horn (see _updateGasHorn) fires
+  // once per play() the instant the Ambient beat itself begins, GAS_DEATH_
+  // START_SECONDS before the actual death trigger above.
+  private _gasHornTriggered = false;
 
   // Universal payoff (see crown-rise.ts's own class comment) — plays on
   // EVERY constellation completion, in addition to whichever name-specific
@@ -757,11 +762,27 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     this._updatePendingCollapse(delta);
     if (phase === Phase.FateEvents && dominant === VOLATILE_GASSES_TYPE) {
+      this._updateGasHorn();
       this._updateGasVignette(delta);
     }
     if (phase === Phase.FateEvents || phase === Phase.Launch || phase === Phase.Finale) {
       this._updatePayoff(delta, dominant, reach, radiusScale);
     }
+  }
+
+  // Fires exactly once per play() the instant FateEventSystem's own Ambient
+  // beat begins (see this file's own top comment for the full 0-10s sub-beat
+  // breakdown) — an ominous horn blast from the king's own tower, GAS_DEATH_
+  // START_SECONDS before _updateGasVignette below actually triggers his
+  // death, so the player gets a "something bad is coming" warning cue during
+  // the crowd's 0-3s watching/waving pose rather than the death landing with
+  // no lead-up.
+  private _updateGasHorn(): void {
+    if (this._gasHornTriggered) return;
+    if (this._fateEvents.getBeat() !== FateBeat.Ambient) return;
+    this._gasHornTriggered = true;
+    this._king.groups[0]?.getWorldPosition(this._scratchDeathTonePos);
+    playKingHorn(this._audioListener, this.scene, this._scratchDeathTonePos);
   }
 
   // Fires exactly once per play() the instant FateEventSystem's own Ambient
@@ -1090,6 +1111,7 @@ export class EarthSituationsVfxSystem extends createSystem({
     this._kingBody.position.y = TOWER_HEIGHT * TOWER_MIN_HEIGHT_FRACTION;
     this._pendingCollapse = null;
     this._gasVignetteTriggered = false;
+    this._gasHornTriggered = false;
     // Undo _triggerKingDeath's animation swap so a fresh loop shows the king
     // alive/breathing again instead of frozen on DyingBackwards' last frame.
     if (this._kingDyingAction) {

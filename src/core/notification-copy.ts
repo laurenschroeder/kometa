@@ -187,7 +187,7 @@ export function kingRisingMessage(): NotificationCopy {
 const CELESTIAL_SYMBOL_LINES: Record<string, (name: string) => string> = {
   Dog: (name) => `The ${name} constellation means more to these creatures than you could realize.`,
   Tree: (name) => `There is a poetry to your attention to the ${name} constellation.`,
-  Crown: (name) => `Your fiery tail is unforgettable, weaving throughout the ${name} constellation.`,
+  Crown: (name) => `Your fiery tail has captured a lot of attention in the ${name} constellation.`,
 };
 
 export function celestialSymbolFlavorMessage(name: string): NotificationCopy | null {
@@ -215,7 +215,7 @@ export function celestialSymbolMessage(name: string): NotificationCopy {
 const FATE_EVENTS_INTRO_BY_TYPE: NotificationCopy[] = [
   // soul dust — the graveyard/ghost-gathering vignette.
   {
-    text: 'The souls dust you gathered sense something interesting on this planet.',
+    text: 'The soul dust you gathered sense something interesting on this planet.',
     holdSeconds: 6,
   },
   // organic matter — the seed-gathering vignette.

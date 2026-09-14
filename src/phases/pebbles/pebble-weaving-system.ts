@@ -99,7 +99,16 @@ export class PebbleWeavingSystem extends createSystem({
       // auto-vacuum whatever was nearby regardless of type, more than the
       // "get close to the type you want" feel this phase is going for.
       attractRadius: 0.22,
-      captureDistance: 0.05,
+      // Bumped from 0.05 — with attractRadius already tightened to 0.22
+      // (above) and attractRate's exponential pull only closing ~3%/frame,
+      // a pebble being reeled in often couldn't close the gap from the edge
+      // of attractRadius down to the old, much smaller captureDistance
+      // before a normal swinging/walking motion carried the hand back
+      // outside attractRadius first — reverting it to Free (a "drop") before
+      // it ever sealed. Widening just the capture target (not attractRadius
+      // itself, which stays at its deliberately tightened value) gives the
+      // pull enough slack to actually finish landing a catch.
+      captureDistance: 0.09,
       attractRate: 3.0,
       capturedAgeDecay: CAPTURED_AGE_DECAY,
       capturedSpreadBase: CAPTURED_SPREAD_BASE,

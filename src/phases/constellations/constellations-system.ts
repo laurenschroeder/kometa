@@ -2,6 +2,7 @@ import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
+import { Phase } from '../../core/phase.js';
 import {
   celestialSymbolFlavorMessage,
   celestialSymbolMessage,
@@ -137,6 +138,64 @@ export class ConstellationsSystem extends createSystem({
       this._tracedCount.push(counts);
       this._startedNotified.push(notified);
     }
+
+    // This system is phase-gated (play()/stop()'d only when the game
+    // director actually enters/exits Phase.Constellations — see
+    // game-director-system.ts), unlike the always-on VFX/situation systems
+    // that read isComplete()/getStarTraced() and already reset themselves
+    // the instant a fresh loop re-enters Phase.Stardust (see e.g.
+    // earth-situations-vfx-system.ts/constellations-vfx-system.ts's own
+    // gamePhase subscriptions). A jump straight from Finale back to Stardust
+    // (EndRunMenuSystem's "Make a New Comet") passes through several phases
+    // before this system's own play() would next run and clear last loop's
+    // _completed/_starTraced — leaving isComplete() stuck true and the just-
+    // finished constellation still reading as fully traced in the meantime,
+    // which made EarthSituationsVfxSystem's isComplete() edge (_wasComplete,
+    // reset already at Stardust) fire immediately, replaying the crown-rise
+    // cinematic before the player had done anything in the new loop. Clears
+    // progress the moment Stardust is (re-)entered — the same "fresh loop
+    // starting" signal every other reset-on-restart system already keys off
+    // — so downstream isComplete() reads are never stale. play() below still
+    // clears the same state again once this phase's own turn actually comes
+    // around; that's redundant, not conflicting.
+    this.cleanupFuncs.push(
+      getGlobals(this.world).gamePhase.subscribe((phase) => {
+        if (phase === Phase.Stardust) this._resetProgress();
+      }),
+    );
+
+    // Keeps _activeType/_activeSlot mirroring globals.dominantPebbleType at
+    // all times, not just from this system's own play() (which normally sets
+    // them the same way — see play() below — right before Constellations
+    // actually begins). In real play this is redundant: dominantPebbleType
+    // is already fixed by the time play() runs. It matters for a dev-menu
+    // jump straight to Phase.FateEvents (skipping Constellations' own play()
+    // entirely) with a class picked via the dev menu's colored buttons —
+    // without this, _activeType/_activeSlot stay stuck at their construction
+    // default (0, i.e. 'Dog'), so getActiveName() would report the wrong
+    // constellation regardless of which type was actually picked, breaking
+    // any name-gated Fate Events content (e.g. earth-situations-vfx-system.
+    // ts's showKing, which requires name === 'Crown'). _activeSlot is always
+    // 0 either way — every type has exactly one def, see CONSTELLATION_SETS.
+    this.cleanupFuncs.push(
+      getGlobals(this.world).dominantPebbleType.subscribe((type) => {
+        this._activeType = type;
+        this._activeSlot = 0;
+      }),
+    );
+  }
+
+  private _resetProgress(): void {
+    for (let type = 0; type < N_TYPES; type++) {
+      for (let slot = 0; slot < this._starTraced[type].length; slot++) {
+        this._starTraced[type][slot].fill(0);
+        this._tracedCount[type][slot] = 0;
+        this._startedNotified[type][slot] = false;
+      }
+    }
+    this._completed = false;
+    this._notifiedCompletion = false;
+    this._crownedMessageText = null;
   }
 
   // dominantPebbleType was already set when Chapter 2 completed, well

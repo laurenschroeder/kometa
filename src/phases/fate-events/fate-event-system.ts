@@ -253,7 +253,7 @@ export class FateEventSystem extends createSystem({
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
 
     const center = new Vector3(...PLANET_CENTER);
-    const { positions, normals } = scatterOnSphereCap(
+    const { positions: rawPositions, normals: rawNormals } = scatterOnSphereCap(
       N_PEOPLE,
       center,
       PLANET_RADIUS,
@@ -261,6 +261,37 @@ export class FateEventSystem extends createSystem({
       CAP_HALF_ANGLE,
       KING_EXCLUSION_HALF_ANGLE,
     );
+    // Re-sort the raw scatter by closeness to the player before assigning
+    // indices — CROWD_CAP_DIRECTION already points from PLANET_CENTER toward
+    // the player (see its own comment above), so the point whose normal has
+    // the highest dot product with it is the point on the sphere nearest the
+    // player, not just an arbitrary draw from within the cap. EXPLAIN_FIGURE_
+    // INDEX/PAIRED_FIGURE_INDEX (the only two figures with real dialogue) are
+    // the first two slots, so this puts them at the two closest points —
+    // always easy to walk straight up to instead of possibly landing buried
+    // at the back of the crowd. Bonus: since maxVisible in
+    // FateEventVfxSystem's update() also just takes the lowest indices, the
+    // whole visible crowd now skews toward whichever people are actually
+    // closest to the player too, not only the named two.
+    const order = Array.from({ length: N_PEOPLE }, (_, i) => i);
+    const scratchDir = new Vector3();
+    const dotToPlayer = (i: number): number => {
+      scratchDir.set(rawNormals[i * 3], rawNormals[i * 3 + 1], rawNormals[i * 3 + 2]);
+      return scratchDir.dot(CROWD_CAP_DIRECTION);
+    };
+    order.sort((a, b) => dotToPlayer(b) - dotToPlayer(a));
+
+    const positions = new Float32Array(N_PEOPLE * 3);
+    const normals = new Float32Array(N_PEOPLE * 3);
+    for (let i = 0; i < N_PEOPLE; i++) {
+      const src = order[i];
+      positions[i * 3] = rawPositions[src * 3];
+      positions[i * 3 + 1] = rawPositions[src * 3 + 1];
+      positions[i * 3 + 2] = rawPositions[src * 3 + 2];
+      normals[i * 3] = rawNormals[src * 3];
+      normals[i * 3 + 1] = rawNormals[src * 3 + 1];
+      normals[i * 3 + 2] = rawNormals[src * 3 + 2];
+    }
     this._surfacePositions = positions;
     this._normals = normals;
 
@@ -279,14 +310,28 @@ export class FateEventSystem extends createSystem({
     this._scratchHandVel = new Vector3();
     this._hand = { position: new Vector3(), speed: 0, seen: false };
 
+    // KING_EXCLUSION_HALF_ANGLE passed here too (previously omitted) — without
+    // it a graveyard ghost or organic seed could land dead in the crowd cap's
+    // exact center point, the one spot earth-situations-vfx-system.ts's own
+    // King tower reserves for itself (see that constant's own comment) —
+    // reading as a collectible stuck "in the center of the planet" rather
+    // than scattered across its populated surface like everything else.
     this._graveyardNormals = scatterOnSphereCap(
       COLLECTIBLE_COUNT,
       ORIGIN,
       1,
       CROWD_CAP_DIRECTION,
       CAP_HALF_ANGLE,
+      KING_EXCLUSION_HALF_ANGLE,
     ).normals;
-    this._seedNormals = scatterOnSphereCap(COLLECTIBLE_COUNT, ORIGIN, 1, CROWD_CAP_DIRECTION, CAP_HALF_ANGLE).normals;
+    this._seedNormals = scatterOnSphereCap(
+      COLLECTIBLE_COUNT,
+      ORIGIN,
+      1,
+      CROWD_CAP_DIRECTION,
+      CAP_HALF_ANGLE,
+      KING_EXCLUSION_HALF_ANGLE,
+    ).normals;
     this._graveyardField = this._buildCollectibleField(this._graveyardNormals);
     this._seedField = this._buildCollectibleField(this._seedNormals);
   }

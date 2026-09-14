@@ -418,6 +418,107 @@ export function makeToonRimInstancedWigglyMaterial(
   });
 }
 
+// Same instanced/wiggly look as makeToonRimInstancedWigglyMaterial above, but
+// with rim color as a live uRimColor uniform (initialized from palette.
+// rimColor) instead of a value baked into the fragment shader's own GLSL
+// text — for a caller that needs to animate ONE instance's rim at runtime
+// (e.g. Fate Events' Beat 4 collectibles blinking gold while uncaptured; see
+// fate-event-vfx-system.ts). Deliberately a separate function rather than
+// adding a "live rim" flag to the original: that one backs kSoulIslandMat, a
+// shared module-scope singleton reused by real soul-dust pebbles all over
+// the game (see pebble-material.ts) — mutating a shared material's rim
+// uniform at runtime would blink every pebble that shares it, not just the
+// caller's own instance. Callers needing a live rim must construct their own
+// instance of THIS function per object instead of sharing one.
+export function makeToonRimInstancedWigglyLiveRimMaterial(
+  palette: ToonRimPalette,
+  params: { amplitude?: number; speed?: number; opacity?: number } = {},
+): ShaderMaterial {
+  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
+  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+  const amplitude = params.amplitude ?? 0.15;
+  const speed = params.speed ?? 1.4;
+  const opacity = params.opacity ?? 1;
+
+  const vertexShader = `
+    uniform float uTime;
+    attribute float aBright;
+    attribute vec3  aTint;
+    attribute float aTinted;
+    attribute float aWigglePhase;
+    varying   float vBright;
+    varying   vec3  vTint;
+    varying   float vTinted;
+    varying   vec3  vViewNormal;
+    varying   vec3  vViewDir;
+    varying   vec3  vLocalPos;
+
+    void main() {
+      vBright = aBright;
+      vTint = aTint;
+      vTinted = aTinted;
+
+      vec3 dir = length(position) > 0.0001 ? normalize(position) : vec3(0.0, 1.0, 0.0);
+      float wiggle = sin(dir.x * 6.0 + dir.y * 4.5 - dir.z * 5.0 + uTime * ${speed.toFixed(4)} + aWigglePhase * 6.2831) * 0.5
+                   + sin(dir.y * 7.0 - dir.x * 3.0 + uTime * ${(speed * 0.8).toFixed(4)} + aWigglePhase * 3.1) * 0.3;
+      vec3 wiggled = position * (1.0 + wiggle * ${amplitude.toFixed(4)});
+
+      vLocalPos = wiggled;
+      vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(wiggled, 1.0);
+
+      mat3 instanceNormalMatrix = mat3(instanceMatrix);
+      vViewNormal = normalize(normalMatrix * instanceNormalMatrix * normal);
+      vViewDir    = normalize(-mvPosition.xyz);
+
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `;
+
+  const fragmentShader = `
+    uniform vec3 uRimColor;
+    varying float vBright;
+    varying vec3  vTint;
+    varying float vTinted;
+    varying vec3  vViewNormal;
+    varying vec3  vViewDir;
+    varying vec3  vLocalPos;
+
+    float hash13(vec3 p) {
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    void main() {
+      vec3  n     = normalize(vViewNormal);
+      vec3  v     = normalize(vViewDir);
+      float ndotv = max(0.0, dot(n, v));
+
+      ${OUTLINE_GLSL}
+      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
+
+      vec3 bodyCol = mix(${vec3Glsl(palette.bodyColorDark)}, ${vec3Glsl(palette.bodyColorLight)}, vBright);
+      bodyCol      = mix(bodyCol, vTint, vTinted);
+
+      float coarse  = hash13(floor(vLocalPos * 45.0));
+      float fine    = hash13(floor(vLocalPos * 120.0 + 7.0));
+      float texture = coarse * 0.6 + fine * 0.4;
+      bodyCol *= 0.55 + texture * 0.9;
+
+      vec3 col     = mix(bodyCol, uRimColor, outline);
+      gl_FragColor = vec4(col, ${opacity.toFixed(4)});
+    }
+  `;
+
+  return new ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uRimColor: { value: new Vector3(...palette.rimColor) } },
+    vertexShader,
+    fragmentShader,
+    depthWrite: opacity >= 1,
+    transparent: opacity < 1,
+  });
+}
+
 // Flat, non-instanced variant — for a single real Mesh (or several sharing
 // one material instance) with one solid body color and no per-vertex
 // brightness (e.g. a placeholder figure's limbs). Body/rim color are

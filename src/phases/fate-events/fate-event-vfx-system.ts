@@ -18,6 +18,7 @@ import {
   MeshBasicMaterial,
   PlaneGeometry,
   Quaternion,
+  ShaderMaterial,
   SphereGeometry,
   Vector3,
 } from '@iwsdk/core';
@@ -39,9 +40,13 @@ import {
 } from '../../vfx/geometry/fbx-field-loader.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
-import { kSoulIslandMat } from '../../vfx/shaders/pebble-material.js';
-import { makeToonRimFlatMaterial, makeToonRimSkinnedMaterial } from '../../vfx/shaders/toon-rim-material.js';
-import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
+import { SOUL_ISLAND_PALETTE } from '../../vfx/shaders/pebble-material.js';
+import {
+  makeToonRimFlatMaterial,
+  makeToonRimInstancedWigglyLiveRimMaterial,
+  makeToonRimSkinnedMaterial,
+} from '../../vfx/shaders/toon-rim-material.js';
+import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { EXPLAIN_FIGURE_INDEX, FateBeat, FateEventSystem, NAMED_FIGURE_COUNT } from './fate-event-system.js';
@@ -199,8 +204,25 @@ const enum SkullState {
 
 // Warm gold outline (vs. the crowd's default white rim) — the only visual
 // cue that a figure is one of the two named ones, alongside the name shown
-// in its speech bubble (see _drawBubbleText's caller).
+// in its speech bubble (see _drawBubbleText's caller). Blinks between a dim
+// and bright extreme using the exact same dim<->bright flash constellations-
+// vfx-system.ts's own untouched stars use (its FLASH_MIN/FLASH_MAX/
+// FLASH_FREQUENCY, reused verbatim rather than re-tuned) — "notice me" reads
+// the same way across both scenes. Per-figure random phase (_namedRimPhase,
+// same idiom as that file's own per-star flashPhase) keeps the two named
+// figures from blinking in lockstep. Also reused (same constants, same
+// blink) for Beat 4's graveyard-ghost/seed collectibles (see
+// _updateCollectibles) — one consistent "notice me, this is interactive"
+// language across every gold-rimmed thing in this file.
+const RIM_FLASH_MIN = 0.15;
+const RIM_FLASH_MAX = 1.0;
+const RIM_FLASH_FREQUENCY = 0.7; // Hz, full dim-to-bright-to-dim cycles per second
 const NAMED_RIM_COLOR: [number, number, number] = hexToRgb(NAMED_RIM);
+// Collectibles' rim settles back to this the instant they're captured — the
+// crowd's own ordinary/default rim color (see NAMED_RIM_COLOR's own comment),
+// same "gold means interactive, white means settled" language the rest of
+// this file already uses.
+const COLLECTIBLE_NORMAL_RIM_COLOR: [number, number, number] = hexToRgb(WHITE);
 
 const N_FIRE_QUADS = 8;
 const FIRE_RING_RADIUS = 0.4;
@@ -232,11 +254,12 @@ const FIRE_CANVAS_SIZE = 128;
 // seen in headset), then 3x again alongside the crowd's own 3x bump — see
 // PERSON_HEIGHT. 0.045 -> 0.135.
 const GHOST_SIZE = 0.135;
-// Ghost spheres render with kSoulIslandMat itself (see _buildGhostMeshes)
-// instead of their own flat color constant now — the exact same translucent
-// wiggly blue material real soul-dust pebbles use (pebble-material.ts's
-// SOUL_ISLAND_PALETTE), so Beat 4's collectibles read as literally made of
-// soul dust rather than a separately-tuned glow.
+// Ghost spheres render with the exact same translucent wiggly blue look real
+// soul-dust pebbles use (pebble-material.ts's SOUL_ISLAND_PALETTE, via a
+// per-slot makeToonRimInstancedWigglyLiveRimMaterial instance — see
+// _buildGhostMeshes' own comment on why each slot needs its own material
+// rather than sharing kSoulIslandMat), so Beat 4's collectibles read as
+// literally made of soul dust rather than a separately-tuned glow.
 const IDENTITY_MAT4 = new Matrix4();
 // Real ghost shapes, swapped in over the placeholder sphere once loaded (see
 // _buildGhostMeshes) — one pack shared with fate-event-system.ts's crowd
@@ -383,6 +406,9 @@ export class FateEventVfxSystem extends createSystem({
   // NAMED_RIM_COLOR) — rim color is still baked in at construction.
   private _peopleMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
   private _namedMaterials: ReturnType<typeof makeToonRimSkinnedMaterial>[] = [];
+  // Per-named-figure random offset (0-1) into the rim flash cycle — see
+  // RIM_FLASH_* constants' own comment.
+  private _namedRimPhase!: Float32Array;
   private _personGroups: Group[] = [];
   private _personEntities: Entity[] = [];
   // The crowd's shared animated rig (see animated-person.ts) — one
@@ -446,6 +472,13 @@ export class FateEventVfxSystem extends createSystem({
   // Beat 4 — Soul's ghosts / Organic's seeds (see GHOST_*/SEED_* constants).
   private _ghostMeshes: Mesh[] = [];
   private _seedMeshes: Mesh[] = [];
+  // Random per-slot phase offset into the RIM_FLASH_* blink cycle (same
+  // idiom as _namedRimPhase above) — read alongside each mesh's own material
+  // (mesh.material, cast to ShaderMaterial; one live-rim instance per ghost/
+  // seed, NOT a shared singleton — see _buildGhostMeshes' own comment) in
+  // _updateCollectibles.
+  private _ghostRimPhase!: Float32Array;
+  private _seedRimPhase!: Float32Array;
 
   private _camWorldPos!: Vector3;
   private _faceDir!: Vector3;
@@ -599,8 +632,10 @@ export class FateEventVfxSystem extends createSystem({
     // baked in at construction, unlike body color which used to be a live
     // per-instance uniform override.
     this._peopleMaterial = makeToonRimSkinnedMaterial(PERSON_BODY_COLOR);
+    this._namedRimPhase = new Float32Array(NAMED_FIGURE_COUNT);
     for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
       this._namedMaterials.push(makeToonRimSkinnedMaterial(PERSON_BODY_COLOR, NAMED_RIM_COLOR));
+      this._namedRimPhase[i] = Math.random();
     }
     this._jumpElapsed = new Float32Array(count).fill(-1);
     this._armOffsetX = new Float32Array(count);
@@ -742,8 +777,8 @@ export class FateEventVfxSystem extends createSystem({
   }
 
   // Beat 4's Soul ghosts, one InstancedMesh (count=1) per slot rather than a
-  // real Mesh — kSoulIslandMat's shader is instanced-only (its vertex stage
-  // reads `instanceMatrix` directly and needs aBright/aTint/aTinted/
+  // real Mesh — the wiggly toon-rim shader is instanced-only (its vertex
+  // stage reads `instanceMatrix` directly and needs aBright/aTint/aTinted/
   // aWigglePhase attributes, see toon-rim-material.ts), so a plain Mesh
   // can't use it. Each instance's transform stays identity forever — this
   // file's existing _updateCollectibles already drives per-ghost position/
@@ -751,7 +786,18 @@ export class FateEventVfxSystem extends createSystem({
   // Mesh), which composes on top of that identity instance untouched.
   // aTinted stays 0 and aTint stays black, same as every real soul-dust
   // pebble (see pebble-field-vfx-system.ts's own TYPE_SOUL branch) — no
-  // per-ghost recolor, just the material's own SOUL_ISLAND_PALETTE body/rim.
+  // per-ghost body recolor, just the material's own SOUL_ISLAND_PALETTE body.
+  //
+  // Each slot gets its OWN material (makeToonRimInstancedWigglyLiveRimMaterial,
+  // same SOUL_ISLAND_PALETTE/amplitude/opacity kSoulIslandMat itself uses)
+  // rather than sharing that module-scope singleton — kSoulIslandMat is
+  // reused by every real soul-dust pebble across the whole game (see
+  // pebble-material.ts), so mutating ITS rim uniform to blink gold would blink
+  // every pebble everywhere, not just Beat 4's own collectibles. Each ghost's
+  // own uTime must now be kept fresh here too (see _updateCollectibles) —
+  // previously free-riding on kSoulIslandMat's uTime being updated elsewhere
+  // (pebble-field-vfx-system.ts/pebble-comet-presentation-system.ts) now that
+  // it's no longer that shared instance.
   //
   // Starts every slot with a placeholder sphere (visible/functional
   // immediately, same graceful-degradation idiom every other FBX consumer in
@@ -763,10 +809,16 @@ export class FateEventVfxSystem extends createSystem({
   // names actually resolved (or leaves the placeholder spheres alone if none
   // did) rather than failing all-or-nothing on one bad name.
   private _buildGhostMeshes(target: Mesh[], count: number): void {
+    this._ghostRimPhase = new Float32Array(count);
     for (let i = 0; i < count; i++) {
       const geo = new SphereGeometry(GHOST_SIZE, 8, 6);
       stampSoulIslandInstanceAttrs(geo);
-      const mesh = new InstancedMesh(geo, kSoulIslandMat, 1);
+      const material = makeToonRimInstancedWigglyLiveRimMaterial(SOUL_ISLAND_PALETTE, {
+        amplitude: 0.19,
+        opacity: 0.55,
+      });
+      this._ghostRimPhase[i] = Math.random();
+      const mesh = new InstancedMesh(geo, material, 1);
       mesh.setMatrixAt(0, IDENTITY_MAT4);
       mesh.instanceMatrix.needsUpdate = true;
       mesh.frustumCulled = false;
@@ -811,12 +863,20 @@ export class FateEventVfxSystem extends createSystem({
   // eventual real mesh so a slot's color never pops when the swap happens.
   // Gold rim (NAMED_RIM_COLOR — the same identity color the two featured
   // figures already use) rather than the old additive glow, matching the
-  // toon-rim silhouette look everything else in Fate Events uses.
+  // toon-rim silhouette look everything else in Fate Events uses. Blinks the
+  // same RIM_FLASH_* cadence as the named figures' own gold rim (see
+  // _updateCollectibles) and settles to COLLECTIBLE_NORMAL_RIM_COLOR the
+  // instant it's captured — makeToonRimFlatMaterial's rimColor is already a
+  // live uRimColor uniform per its own per-owner instance (one material per
+  // seed here, never shared), so no material-factory changes were needed for
+  // this one, unlike the ghosts above.
   private _buildSeedMeshes(target: Mesh[], count: number): void {
     const palette = ORGANIC_PALETTE;
+    this._seedRimPhase = new Float32Array(count);
     for (let i = 0; i < count; i++) {
       const bodyColor = palette[Math.floor(Math.random() * palette.length)];
       const material = makeToonRimFlatMaterial(bodyColor, NAMED_RIM_COLOR);
+      this._seedRimPhase[i] = Math.random();
       const mesh = new Mesh(new SphereGeometry(SEED_SIZE, 8, 6), material);
       mesh.visible = false;
       target.push(mesh);
@@ -1065,6 +1125,24 @@ export class FateEventVfxSystem extends createSystem({
           const pulse = MARKER_PULSE_MIN_SCALE + (1 - MARKER_PULSE_MIN_SCALE) * (0.5 + 0.5 * Math.sin(time * MARKER_PULSE_FREQ * Math.PI * 2));
           markerMesh.scale.setScalar(pulse);
         }
+
+        // Gold rim blinks dim<->bright on the same cadence as constellations-
+        // vfx-system.ts's untouched-star flash (see RIM_FLASH_* constants'
+        // own comment) while nobody's listening — this._bubbleOpacity[i]
+        // (already eased toward targetOpacity just above) doubles as "how
+        // much this figure is currently being talked to," so the blink holds
+        // at a steady RIM_FLASH_MAX instead of continuing to flash "notice
+        // me" mid-conversation, then eases back into blinking as the bubble
+        // itself fades out. Mutates the material's existing uRimColor
+        // Vector3 in place rather than allocating a new one every frame.
+        const blinkT = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + this._namedRimPhase[i] * Math.PI * 2);
+        const blinkBrightness = RIM_FLASH_MIN + (RIM_FLASH_MAX - RIM_FLASH_MIN) * blinkT;
+        const rimBrightness = blinkBrightness + (RIM_FLASH_MAX - blinkBrightness) * this._bubbleOpacity[i];
+        (this._namedMaterials[i].uniforms.uRimColor.value as Vector3).set(
+          NAMED_RIM_COLOR[0] * rimBrightness,
+          NAMED_RIM_COLOR[1] * rimBrightness,
+          NAMED_RIM_COLOR[2] * rimBrightness,
+        );
       }
     }
 
@@ -1083,6 +1161,7 @@ export class FateEventVfxSystem extends createSystem({
         const dancing = beat === FateBeat.Payoff && dominant === SOUL_DUST_TYPE;
         this._updateCollectibles(
           this._ghostMeshes,
+          this._ghostRimPhase,
           this._fateEvents.getGraveyardField(),
           dominant === SOUL_DUST_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase),
           trail,
@@ -1094,6 +1173,7 @@ export class FateEventVfxSystem extends createSystem({
         );
         this._updateCollectibles(
           this._seedMeshes,
+          this._seedRimPhase,
           this._fateEvents.getSeedField(),
           dominant === ORGANIC_MATTER_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase),
           trail,
@@ -1257,6 +1337,7 @@ export class FateEventVfxSystem extends createSystem({
   // camera-relative basis vectors.
   private _updateCollectibles(
     meshes: Mesh[],
+    rimPhase: Float32Array,
     field: GatherableField,
     show: boolean,
     trail: Float32Array,
@@ -1274,6 +1355,13 @@ export class FateEventVfxSystem extends createSystem({
     for (let i = 0; i < meshes.length; i++) {
       const mesh = meshes[i];
       mesh.visible = true;
+
+      // uTime drives the ghost material's own wiggle vertex displacement
+      // (see makeToonRimInstancedWigglyLiveRimMaterial) — harmless/unused on
+      // the seeds' flat material, which has no uTime uniform at all.
+      const material = mesh.material as ShaderMaterial;
+      if (material.uniforms.uTime) material.uniforms.uTime.value = time;
+
       const bobOffset = bob
         ? Math.sin(time * COLLECTIBLE_BOB_FREQ * Math.PI * 2 + i * 2.3) * COLLECTIBLE_BOB_AMPLITUDE
         : 0;
@@ -1305,11 +1393,24 @@ export class FateEventVfxSystem extends createSystem({
         mesh.position.copy(this._scratchTrailPos);
         mesh.position.y += bobOffset;
         mesh.scale.setScalar(1);
+        // Captured — the "notice me" blink is done its job, settle for good
+        // on the ordinary rim color rather than continuing to flash gold
+        // while riding the tail (see COLLECTIBLE_NORMAL_RIM_COLOR's comment).
+        (material.uniforms.uRimColor.value as Vector3).set(...COLLECTIBLE_NORMAL_RIM_COLOR);
       } else {
         mesh.position.set(positions[i * 3], positions[i * 3 + 1] + bobOffset, positions[i * 3 + 2]);
         // Still out on the surface (Free/Attracting) — pulse so it reads as
         // an active collectible against the static decorations around it.
         mesh.scale.setScalar(1 + Math.sin(time * COLLECTIBLE_PULSE_FREQ * Math.PI * 2 + i * 0.7) * COLLECTIBLE_PULSE_AMPLITUDE);
+        // Not yet captured — blink gold, same RIM_FLASH_* cadence/idiom as
+        // the named figures' own rim (see that constant's own comment).
+        const t = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + rimPhase[i] * Math.PI * 2);
+        const brightness = RIM_FLASH_MIN + (RIM_FLASH_MAX - RIM_FLASH_MIN) * t;
+        (material.uniforms.uRimColor.value as Vector3).set(
+          NAMED_RIM_COLOR[0] * brightness,
+          NAMED_RIM_COLOR[1] * brightness,
+          NAMED_RIM_COLOR[2] * brightness,
+        );
       }
     }
   }
