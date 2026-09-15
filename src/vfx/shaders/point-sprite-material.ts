@@ -35,18 +35,22 @@ export function makePointSpriteMaterial(params: PointSpriteParams): ShaderMateri
   // driven haze retint, the one caller that actually needs this.
   const fragmentShader = `
     uniform vec3 uColor;
+    uniform float uOpacity;
     varying float vBright;
     void main() {
       vec2  uv = gl_PointCoord - 0.5;
       float dist = length(uv);
       if (dist > 0.5) discard;
-      float a = smoothstep(0.5, 0.0, dist) * vBright;
+      float a = smoothstep(0.5, 0.0, dist) * vBright * uOpacity;
       gl_FragColor = vec4(uColor, a);
     }
   `;
 
   return new ShaderMaterial({
-    uniforms: { uColor: { value: new Vector3(r, g, b) } },
+    // uOpacity defaults to 1 (a no-op) — existing callers are unaffected;
+    // orbital-launch-vfx-system.ts's nebula marker is the one caller that
+    // drives it down to fade the whole cloud out.
+    uniforms: { uColor: { value: new Vector3(r, g, b) }, uOpacity: { value: 1 } },
     vertexShader,
     fragmentShader,
     blending: params.blending ?? NormalBlending,

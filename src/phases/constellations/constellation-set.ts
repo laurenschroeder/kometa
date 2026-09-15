@@ -2,9 +2,15 @@
 // picked by ConstellationsSystem from globals.dominantPebbleType, reusing
 // pebble-type.ts's existing 0=soul dust/1=organic matter/2=volatile gasses
 // ordering as this table's keys. Each type has exactly one constellation
-// now (Dog/Tree/Crown), so ConstellationsSystem.play()'s random slot pick
-// always lands on index 0 — kept as a plain array (not a bare object) so a
-// type could grow back to multiple names later without restructuring.
+// now (Shepherd/Harvest/Throne), so ConstellationsSystem.play()'s random
+// slot pick always lands on index 0 — kept as a plain array (not a bare
+// object) so a type could grow back to multiple names later without
+// restructuring. Gas's own constellation was originally named 'Crown' —
+// renamed to 'Throne' since it read as the same thing as the game's own
+// universal CrownRise cinematic (every constellation's completion sends an
+// actual crown up to the comet — see earth-situations-vfx-system.ts's
+// _onCompletion), when it was really naming the King/tower/death vignette
+// specifically.
 // Each name's actual star SHAPE lives in constellation-shapes.ts
 // (CONSTELLATION_SHAPES) — starCount here must match that shape's own point
 // count exactly (constellation-path.ts warns if they drift out of sync).
@@ -27,7 +33,7 @@ export interface ConstellationDef {
 // anchor is active, so the chosen constellation reads as picked out of a
 // real sky instead of floating alone.
 export const CONSTELLATION_SETS: Record<number, ConstellationDef[]> = {
-  0: [{ name: 'Dog', spreadRadius: 0.9, starCount: 6 }], // soul dust
-  1: [{ name: 'Tree', spreadRadius: 1.3, starCount: 10 }], // organic matter
-  2: [{ name: 'Crown', spreadRadius: 0.9, starCount: 6 }], // volatile gasses
+  0: [{ name: 'Shepherd', spreadRadius: 0.9, starCount: 6 }], // soul dust
+  1: [{ name: 'Harvest', spreadRadius: 1.3, starCount: 10 }], // organic matter
+  2: [{ name: 'Throne', spreadRadius: 0.9, starCount: 8 }], // volatile gasses
 };

@@ -22,6 +22,7 @@ import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.j
 import { PEBBLE_MESH_SCALE } from '../../vfx/particles/pebble-size.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
+import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import {
   kGasCloudMat,
   kOrganicGlitterMat,
@@ -45,6 +46,17 @@ import { PebbleWeavingSystem } from './pebble-weaving-system.js';
 const TYPE_SOUL = 0;
 const TYPE_ORGANIC = 1;
 const TYPE_GAS = 2;
+
+// "Three paths call to you" intro beat — one positional chime per type, the
+// instant that type's own TYPE_REVEAL_AT_SECONDS growth begins (see
+// PebbleWeavingSystem.getTypeRevealProgress/getCallOrigin), placed at
+// whichever of that type's spawn groups sits closest to forward. Same one-
+// shot rig the swirl-arrival/Fate Events payoff cues reuse (see
+// payoff-chime.ts); rising per type (soul, then organic, then gas, matching
+// both TYPE_REVEAL_AT_SECONDS' order and the notification's own line order)
+// so the third call reads as building on the first two, not a repeat.
+const CALL_CHIME_BASE_FREQ = 300;
+const CALL_CHIME_FREQ_STEP = 90;
 
 const N_ORGANIC_VARIANTS = 6;
 // Only organic-type pebbles use these now (previously shared by all three
@@ -159,6 +171,10 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _audioListener!: AudioListener;
   private _pebbleSynth!: PebbleSynth;
   private _scratchCapturePos!: Vector3;
+  // Per-type, whether that type's call chime has already fired this loop —
+  // see CALL_CHIME_BASE_FREQ's own comment. Reset on play().
+  private _typeCalled!: boolean[];
+  private _scratchCallPos!: Vector3;
 
   init(): void {
     // PebbleWeavingSystem/CometTrailSystem must be registered before this
@@ -174,6 +190,8 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._pebbleSynth = new PebbleSynth();
     this._pebbleSynth.build(this._audioListener, this.scene);
     this._scratchCapturePos = new Vector3();
+    this._typeCalled = new Array(PEBBLE_TYPES.length).fill(false);
+    this._scratchCallPos = new Vector3();
 
     this._camRight = new Vector3();
     this._camUp = new Vector3();
@@ -402,6 +420,7 @@ export class PebbleFieldVfxSystem extends createSystem({
     for (const mesh of this._organicMeshes) mesh.visible = true;
     for (const mesh of this._soulMeshes) mesh.visible = true;
     this._gasPoints.visible = true;
+    this._typeCalled.fill(false);
   }
 
   stop(): void {
@@ -423,6 +442,16 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._states = this._pebbles.getStates();
     for (let t = 0; t < this._typeReveal.length; t++) {
       this._typeReveal[t] = this._pebbles.getTypeRevealProgress(t);
+      if (!this._typeCalled[t] && this._typeReveal[t] > 0) {
+        this._typeCalled[t] = true;
+        this._pebbles.getCallOrigin(t, this._scratchCallPos);
+        playPayoffChime(
+          this._audioListener,
+          this.scene,
+          this._scratchCallPos,
+          CALL_CHIME_BASE_FREQ + t * CALL_CHIME_FREQ_STEP,
+        );
+      }
     }
     const states = this._states;
     const n = this._pebbles.getParticleCount();

@@ -46,8 +46,8 @@ interface StarCloud {
 }
 
 // Distant, always-present background starfield — visible from world boot
-// (the start menu's sky is already pure black, see index.ts's DomeGradient
-// zeroing) straight through every phase, never GameDirector-managed. Two
+// (the start menu's sky is already rendered by VirtualSkySystem, see its own
+// class comment) straight through every phase, never GameDirector-managed. Two
 // point clouds share one big spherical shell, re-centered on world.player
 // every frame (see update()) rather than built once and left fixed in world
 // space — StartMenuSystem's _recenterToHead() (fired both on Start and on
@@ -79,6 +79,22 @@ export class StarfieldSystem extends createSystem({}) {
         this._fillTarget = phase === Phase.Constellations ? 1 : 0;
       }),
     );
+
+    // Hidden while passthrough is on — the point of passthrough is almost
+    // certainly "let me see the real room clearly" (this experience is
+    // handed between strangers at a festival, so there's practical/safety
+    // value too, not just aesthetics), and a field of floating stars over
+    // someone's living room undercuts that. Both clouds toggle together
+    // (unlike SkyBackdropSystem's hero star, neither has its own independent
+    // visibility state machine to preserve, so a direct .visible set on each
+    // is simplest here).
+    const globals = getGlobals(this.world);
+    const applyPassthrough = (enabled: boolean) => {
+      this._base.points.visible = !enabled;
+      this._fill.points.visible = !enabled;
+    };
+    applyPassthrough(globals.passthroughEnabled.peek());
+    this.cleanupFuncs.push(globals.passthroughEnabled.subscribe(applyPassthrough));
   }
 
   private _buildCloud(count: number, brightMin: number, brightMax: number, startAtZero: boolean): StarCloud {

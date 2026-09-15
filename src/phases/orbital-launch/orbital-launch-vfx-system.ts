@@ -1,5 +1,4 @@
 import {
-  CanvasTexture,
   Color,
   type ColorRepresentation,
   createSystem,
@@ -8,12 +7,14 @@ import {
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
+  Points,
+  ShaderMaterial,
   SphereGeometry,
   Vector3,
 } from '@iwsdk/core';
 import { buildNebulaCloud } from '../../vfx/geometry/nebula-cloud.js';
-import { buildOrbitalArrow } from '../../vfx/geometry/orbital-arrow.js';
 import { ORBIT, UNKNOWN, WHITE } from '../../vfx/color/color-scheme.js';
+import { drawLabel } from '../../vfx/textures/canvas-label.js';
 import { OrbitalLaunchSystem, ZONE_RADIUS } from './orbital-launch-system.js';
 
 const ORBIT_COLOR = ORBIT;
@@ -22,12 +23,15 @@ const UNKNOWN_COLOR_RGB: [number, number, number] = new Color(UNKNOWN_COLOR).toA
 // Slow self-rotation so the nebula reads as a drifting cloud rather than a
 // static prop — applied only to the Unknown choice's marker (see update()).
 const NEBULA_SPIN_SPEED = 0.15; // rad/s
+// Fades the nebula's own point-sprite opacity out once a fate path is
+// chosen (see update()'s state==='choosing' check) — regardless of whether
+// Unknown won or lost, so it never lingers fully solid once the player has
+// actually committed to a path. 1/s exponential ease.
+const NEBULA_FADE_EASE_RATE = 1.2;
 
 const LABEL_WIDTH = 0.28;
 const LABEL_HEIGHT = 0.1;
 const LABEL_GAP = 0.15; // above the zone sphere
-const LABEL_CANVAS_W = 384;
-const LABEL_CANVAS_H = 128;
 
 // Charge-up cue while a zone is being held (see OrbitalLaunchSystem's
 // CHARGE_SECONDS/getOrbit/UnknownCharge01) — the zone visibly grows,
@@ -43,42 +47,14 @@ const CHARGE_MAX_OPACITY = 1.0;
 // value — charge itself still resets to 0 the instant a hand leaves the
 // zone (see _updateCharge), this just keeps the *visual* from snapping.
 const CHARGE_VISUAL_EASE_RATE = 6;
-
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-function drawLabel(text: string): CanvasTexture {
-  const w = LABEL_CANVAS_W;
-  const h = LABEL_CANVAS_H;
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d')!;
-  const pad = 12;
-
-  ctx.fillStyle = 'rgba(8, 8, 16, 0.82)';
-  roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 20);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
-  ctx.lineWidth = 3;
-  roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 20);
-  ctx.stroke();
-
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 42px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, w / 2, h / 2);
-
-  return new CanvasTexture(canvas);
-}
+// 1/s exponential ease rate for both choices' grow-in once revealed (see
+// _revealVisual) — reaches ~95% of full scale/opacity in about half a
+// second. Both choices used to snap straight to .visible=true at full
+// scale the instant isReadyToChoose() flipped, which read as an abrupt pop
+// — same complaint as the planet's old instant recenter into Fate Events
+// (see fate-event-system.ts's own history), just a scale/visibility pop
+// here instead of a camera teleport.
+const REVEAL_EASE_RATE = 5;
 
 const LABEL_OFFSET_Y = ZONE_RADIUS + LABEL_GAP;
 
@@ -122,10 +98,21 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
   private _zAxis!: Vector3;
   private _upAxis!: Vector3;
   private _lastState: string | null = null;
+  // The nebula's own Points material — grabbed once in init() so its
+  // uOpacity can be driven directly (see NEBULA_FADE_EASE_RATE) rather than
+  // toggling the whole marker's .visible, which would just pop it away
+  // instead of fading.
+  private _nebulaMaterial!: ShaderMaterial;
+  private _nebulaOpacity = 1;
   // Set true the first frame OrbitalLaunchSystem.isReadyToChoose() reports
   // ready — both zones stay fully hidden (arrow/zone/label) until then, see
   // play()/update() below.
   private _revealed = false;
+  // Eases 0->1 once _revealed flips true (see REVEAL_EASE_RATE) — both
+  // choices grow in together over that window instead of popping instantly
+  // to full scale/opacity. Reset to 0 in play(); only ever climbs toward 1
+  // once _revealed is true, so it's a harmless no-op once fully settled.
+  private _revealVisual = 0;
 
   init(): void {
     this._orbitalLaunch = this.world.getSystem(OrbitalLaunchSystem)!;
@@ -139,7 +126,13 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       'Orbit',
       this._orbitalLaunch.getOrbitZoneCenter(),
       this._orbitalLaunch.getOrbitDirLive(),
-      () => buildOrbitalArrow(new MeshBasicMaterial({ color: ORBIT_COLOR })),
+      // No directional arrow anymore — it read as an odd blue marker
+      // floating in the zone; the wireframe zone sphere + label already
+      // mark this choice on their own. Marker stays as an empty Group
+      // (rather than restructuring Choice/_buildChoice) so the existing
+      // per-frame position/orientation code above has something harmless
+      // to keep pointing at.
+      () => new Group(),
       false,
     );
     this._unknown = this._buildChoice(
@@ -150,6 +143,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       () => buildNebulaCloud(UNKNOWN_COLOR_RGB),
       true,
     );
+    this._nebulaMaterial = (this._unknown.marker.children[0] as Points).material as ShaderMaterial;
   }
 
   private _buildChoice(
@@ -197,6 +191,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     super.play();
     this._lastState = null;
     this._revealed = false;
+    this._revealVisual = 0;
     for (const choice of [this._orbit, this._unknown]) {
       // Hidden until _revealed flips true in update() below (see
       // isReadyToChoose()'s own comment) — not shown immediately on phase
@@ -209,6 +204,8 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       choice.zoneMaterial.color.copy(choice.baseColor);
       choice.chargeVisual = 0;
     }
+    this._nebulaOpacity = 1;
+    this._nebulaMaterial.uniforms.uOpacity.value = 1;
   }
 
   stop(): void {
@@ -232,21 +229,42 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       }
     }
 
+    // Grows both choices in together over REVEAL_EASE_RATE's own window
+    // once revealed, rather than the flip above leaving them at full scale/
+    // opacity the instant they become visible — see REVEAL_EASE_RATE's own
+    // comment. Applied below to marker/label scale directly, and folded
+    // into the zone's existing charge-based scale/opacity formula.
+    if (this._revealed) {
+      const revealPull = 1 - Math.exp(-REVEAL_EASE_RATE * delta);
+      this._revealVisual += (1 - this._revealVisual) * revealPull;
+    }
+
     if (state !== this._lastState && state === 'committed') {
       // Both choices' zone/label hide immediately on commit — no more
       // pulsing countdown on the winning zone while the buildup sequence
-      // plays out (see the removed 'committed' pulse block below); the
-      // losing choice's marker (arrow/nebula) hides too, same as before,
-      // but the winning marker stays up as the "you're headed there" cue
-      // through detach.
+      // plays out (see the removed 'committed' pulse block below). Orbit's
+      // own marker is an empty Group either way (no arrow anymore — see
+      // _buildChoice's own comment), so hiding it here is harmless; the
+      // nebula instead fades out via _nebulaOpacity below (see
+      // NEBULA_FADE_EASE_RATE) rather than popping away, whether it won or
+      // lost.
       const losing = this._orbitalLaunch.getChoice() === 'orbit' ? this._unknown : this._orbit;
-      losing.marker.visible = false;
+      if (losing !== this._unknown) losing.marker.visible = false;
       for (const choice of [this._orbit, this._unknown]) {
         choice.zone.visible = false;
         choice.label.visible = false;
       }
     }
     this._lastState = state;
+
+    // Fades out the instant any fate path is chosen (state leaves
+    // 'choosing') and stays faded through 'committed'/'detached' — driven
+    // continuously rather than only on the state-change edge above so it
+    // keeps easing smoothly frame to frame.
+    const nebulaFadeTarget = state === 'choosing' ? 1 : 0;
+    const nebulaPull = 1 - Math.exp(-NEBULA_FADE_EASE_RATE * delta);
+    this._nebulaOpacity += (nebulaFadeTarget - this._nebulaOpacity) * nebulaPull;
+    this._nebulaMaterial.uniforms.uOpacity.value = this._nebulaOpacity;
 
     // center/liveDir are live references into OrbitalLaunchSystem's own
     // fields, which _placeZones() sets ONCE when the phase begins (not
@@ -256,6 +274,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     // and is otherwise a harmless no-op once they've settled.
     for (const choice of [this._orbit, this._unknown]) {
       choice.marker.position.copy(choice.center);
+      choice.marker.scale.setScalar(this._revealVisual);
       if (choice.spin) {
         // Directionless — a slow continuous drift instead of tracking
         // liveDir every frame like Orbit's arrow does below.
@@ -265,6 +284,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       }
       choice.zone.position.copy(choice.center);
       choice.label.position.set(choice.center.x, choice.center.y + LABEL_OFFSET_Y, choice.center.z);
+      choice.label.scale.setScalar(this._revealVisual);
     }
 
     this.camera.getWorldPosition(this._camWorldPos);
@@ -284,9 +304,12 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
       ];
       for (const [choice, target] of targets) {
         choice.chargeVisual += (target - choice.chargeVisual) * pull;
-        choice.zone.scale.setScalar(1 + choice.chargeVisual * (CHARGE_MAX_SCALE - 1));
+        // _revealVisual multiplies in here (rather than only gating
+        // .visible) so the zone grows FROM nothing rather than appearing
+        // instantly at its base charge-less size.
+        choice.zone.scale.setScalar(this._revealVisual * (1 + choice.chargeVisual * (CHARGE_MAX_SCALE - 1)));
         choice.zoneMaterial.opacity =
-          CHARGE_BASE_OPACITY + choice.chargeVisual * (CHARGE_MAX_OPACITY - CHARGE_BASE_OPACITY);
+          this._revealVisual * (CHARGE_BASE_OPACITY + choice.chargeVisual * (CHARGE_MAX_OPACITY - CHARGE_BASE_OPACITY));
         choice.zoneMaterial.color.copy(choice.baseColor).lerp(choice.chargedColor, choice.chargeVisual);
       }
     }

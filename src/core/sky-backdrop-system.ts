@@ -2,6 +2,7 @@ import {
   AdditiveBlending,
   createSystem,
   DoubleSide,
+  Group,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
@@ -31,6 +32,12 @@ export class SkyBackdropSystem extends createSystem({}) {
   private _constellations!: ConstellationsSystem;
 
   private _heroMesh!: Mesh;
+  // Wraps _heroMesh purely so passthrough can hide it without touching the
+  // mesh's own independent reveal-state .visible toggles below (Three.js
+  // requires both parent AND self .visible true to render, so this composes
+  // cleanly with _resetHeroStar()/_tryRevealHeroStar() rather than requiring
+  // them to know about passthrough too).
+  private _heroGroup!: Group;
   private _heroMaterial!: MeshBasicMaterial;
   private _heroRevealed = false;
   private _heroScale = 0;
@@ -60,6 +67,15 @@ export class SkyBackdropSystem extends createSystem({}) {
         if (phase === Phase.FateEvents) this._tryRevealHeroStar();
       }),
     );
+
+    // Hidden while passthrough is on — same reasoning as StarfieldSystem's
+    // own stars.
+    const globals = getGlobals(this.world);
+    const applyPassthrough = (enabled: boolean) => {
+      this._heroGroup.visible = !enabled;
+    };
+    applyPassthrough(globals.passthroughEnabled.peek());
+    this.cleanupFuncs.push(globals.passthroughEnabled.subscribe(applyPassthrough));
   }
 
   private _buildHeroStar(): void {
@@ -77,7 +93,10 @@ export class SkyBackdropSystem extends createSystem({}) {
     mesh.visible = false;
     mesh.frustumCulled = false;
     this._heroMesh = mesh;
-    this.world.createTransformEntity(mesh);
+    const group = new Group();
+    group.add(mesh);
+    this._heroGroup = group;
+    this.world.createTransformEntity(group);
   }
 
   private _resetHeroStar(): void {

@@ -92,12 +92,28 @@ export class CometPhysicsSystem extends createSystem({
     // the user accepts the XR session, so the first real frame snaps
     // position/prevHand directly to the hand instead of springing up from
     // the origin default (see comet-system.ts history for the "flies in
-    // from below" bug this avoids).
+    // from below" bug this avoids). `this.world.session` alone isn't enough
+    // of a guard for a RE-anchor mid-session though (CometAutopilotSystem
+    // resets `initialized` back to false on every non-Finale phase entry,
+    // e.g. Finale -> Stardust on a fresh loop) — the session has already
+    // been active for a while by then, but there's no guarantee THIS
+    // specific hand's gamepad/pose has actually resolved yet on this exact
+    // frame (grip.getWorldPosition() can still read a stale or default
+    // transform for a frame or two). Snapping to that not-yet-trustworthy
+    // position, then catching up once real tracking data arrives, is what
+    // reads as the comet "flying in from afar" — so the snap now also waits
+    // for this hand's gamepad to actually be present, holding position at
+    // whatever the grip currently reports (harmless either way) until then.
     const initialized = entity.getValue(CometBody, 'initialized');
-    if (!initialized && this.world.session) {
+    if (!initialized) {
       this._pos.copy(this._handPos);
       this._prevHand.copy(this._handPos);
-      entity.setValue(CometBody, 'initialized', true);
+      this._vel.set(0, 0, 0);
+      if (this.world.session && gamepad !== undefined) {
+        entity.setValue(CometBody, 'initialized', true);
+      }
+      this._writeBack(posView, velView, prevHandView);
+      return 0;
     }
 
     const snapThreshold = entity.getValue(CometBody, 'snapThreshold') as number;

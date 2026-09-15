@@ -8,7 +8,6 @@ import {
   PanelDocument,
   PanelUI,
   Quaternion,
-  RayInteractable,
   UIKit,
   Vector3,
 } from '@iwsdk/core';
@@ -17,52 +16,85 @@ import { ACHIEVEMENTS } from './achievement-list.js';
 import { isUnlocked } from './achievement-store.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
-
-// "A few seconds" of continuous hover before a dwell button fires — one
-// easy constant to retune.
-const DWELL_SECONDS = 1.8;
+import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, PokeCubeButton } from '../vfx/ui/poke-button.js';
 
 // Start no longer uses a dwell button — pinching with BOTH hands at once
 // (select on controllers, pinch on hand tracking — same gesture
 // CometHandoffSystem/PhaseMenuSystem already rely on, see their own
 // comments) starts the game. Held briefly rather than firing instantly so a
 // single-frame overlap between two otherwise-unrelated pinches can't
-// false-trigger it.
+// false-trigger it. Kept as a parallel fast-path alongside the Start cube
+// below, not replaced by it.
 const DOUBLE_PINCH_HOLD_SECONDS = 0.35;
 // Gentle pulse on the hint text while waiting — same "flash while inviting
 // interaction" idiom as ConstellationsVfxSystem's untouched-star flash.
 const START_HINT_PULSE_FREQ = 0.6; // Hz
 const START_HINT_MIN_OPACITY = 0.45;
 
-interface DwellButtonEntry {
-  fillEl: UIKit.Component<any>;
-  action: () => void;
+// A fresh XR session (headset just donned, hand often still near the face)
+// ignores all poke-hold accumulation for this long before any cube can
+// start filling — not reset by showAgain(), since a player already
+// mid-session choosing "Main Menu" doesn't need re-guarding. Shared across
+// every cube row in this system (main/achievements/settings).
+const IGNORE_POKE_SECONDS = 1.5;
+
+type MenuPage = 'main' | 'achievements' | 'settings';
+
+interface CubeRow {
+  rootEntity: Entity;
+  rootObject: Object3D;
+  buttons: PokeCubeButton[];
 }
 
-// Gates the whole game behind starting the experience: the Achievements
-// button normally uses a dwell-select interaction (hold your hand/
-// controller ray over it, no trigger press, and its fill bar grows over
-// DWELL_SECONDS; reaching full fires the action) — currently disabled (see
-// the qualify callback below), still wired for Back/page navigation. Start
-// is now a two-handed pinch gesture instead of a button (see
-// DOUBLE_PINCH_HOLD_SECONDS) — hands off to
-// GameDirectorSystem.start() and flips globals.gameStarted (so
-// NotificationHudSystem's phase blurbs can begin — see its own comments).
+// Gates the whole game behind starting the experience. Every player-facing
+// button in this menu (Start/Achievements/Settings, Settings' own two
+// toggles, Achievements'/Settings' Back) is a floating poke-and-hold cube
+// (see poke-button.ts) rather than a ray-hover/click UI element —
+// raycasting is no longer used anywhere in this project's player-facing UI,
+// since this experience gets handed between strangers at a festival and a
+// physical touch is a much stronger accidental-trigger filter than a
+// controller ray or hover ever was. Start is also reachable via the
+// pre-existing two-handed pinch gesture (DOUBLE_PINCH_HOLD_SECONDS), kept
+// working unchanged as a parallel path. The flat UIKit panel remains only
+// for READ-ONLY text (title, pinch-hint, the achievement list) — nothing on
+// it is clickable anymore. Starting hands off to GameDirectorSystem.start()
+// and flips globals.gameStarted (so NotificationHudSystem's phase blurbs
+// can begin — see its own comments).
 export class StartMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
 }) {
   private _director!: GameDirectorSystem;
   private _entity!: Entity;
   private _panelObject!: Object3D;
-  private _buttons = new Map<string, DwellButtonEntry>();
-  private _hoveredId: string | null = null;
-  private _dwellElapsed = 0;
-  private _triggered = false;
+  private _page: MenuPage = 'main';
+
+  private _mainRow!: CubeRow;
+  private _achievementsRow!: CubeRow;
+  private _settingsRow!: CubeRow;
+  private _startButton!: PokeCubeButton;
+  private _achievementsButton!: PokeCubeButton;
+  private _settingsButton!: PokeCubeButton;
+  private _passthroughButton!: PokeCubeButton;
+  private _notificationsButton!: PokeCubeButton;
 
   private _startHintEl: UIKit.Component<any> | null = null;
   private _startAction: (() => void) | null = null;
   private _pinchHoldSeconds = 0;
   private _startTriggered = false;
+  // Set once inside the panel's own qualify callback below — stored rather
+  // than re-fetched via entity.getValue(PanelDocument, 'document') on every
+  // _openPage() call, since the panel's JSON loads asynchronously and the
+  // main row's cubes are poke-active from construction (before that load
+  // necessarily finishes), so a re-fetch could race a PanelDocument
+  // component that isn't attached yet.
+  private _docRef: UIKitDocument | null = null;
+
+  // See IGNORE_POKE_SECONDS — starts counting immediately at init() (so
+  // browser/dev testing without a real XR session isn't permanently locked
+  // out), and re-arms on every real 'sessionstart' (so a freshly-donned
+  // headset always gets the settling window, including re-entries).
+  private _pokeGateActive = true;
+  private _pokeGateElapsed = 0;
 
   private _scratchQuat = new Quaternion();
   private _scratchEuler = new Euler();
@@ -89,6 +121,8 @@ export class StartMenuSystem extends createSystem({
     // rather than trying to grab it once up front.
     this.xrManager.addEventListener('sessionstart', () => {
       this.xrManager.getReferenceSpace()?.addEventListener('reset', () => this._recenterToHead());
+      this._pokeGateActive = true;
+      this._pokeGateElapsed = 0;
     });
 
     const entity = this.world.createTransformEntity();
@@ -107,9 +141,23 @@ export class StartMenuSystem extends createSystem({
       speed: 6,
       maxAngle: 10,
     });
-    // Required for controller-ray/canvas-pointer hit-testing (see
-    // PhaseMenuSystem for the same requirement).
-    entity.addComponent(RayInteractable);
+
+    this._mainRow = this._buildCubeRow(['Achievements', 'Start', 'Settings']);
+    [this._achievementsButton, this._startButton, this._settingsButton] = this._mainRow.buttons;
+
+    this._achievementsRow = this._buildCubeRow(['Back']);
+    this._achievementsRow.rootObject.visible = false;
+    for (const button of this._achievementsRow.buttons) button.setEnabled(false);
+
+    const globals = getGlobals(this.world);
+    this._settingsRow = this._buildCubeRow([
+      this._passthroughLabel(globals.passthroughEnabled.peek()),
+      this._notificationsLabel(globals.notificationsEnabled.peek()),
+      'Back',
+    ]);
+    this._settingsRow.rootObject.visible = false;
+    [this._passthroughButton, this._notificationsButton] = this._settingsRow.buttons;
+    for (const button of this._settingsRow.buttons) button.setEnabled(false);
 
     this.queries.panel.subscribe(
       'qualify',
@@ -120,6 +168,7 @@ export class StartMenuSystem extends createSystem({
         // system's own entity.
         if (panelEntity.index !== entity.index) return;
         const doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
+        this._docRef = doc;
 
         this._startHintEl = doc.getElementById('start-hint');
         this._startAction = () => {
@@ -127,46 +176,88 @@ export class StartMenuSystem extends createSystem({
           this._director.start();
           getGlobals(this.world).gameStarted.value = true;
           this._panelObject.visible = false;
-          entity.removeComponent(RayInteractable);
+          for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
+            row.rootObject.visible = false;
+            for (const button of row.buttons) button.setEnabled(false);
+          }
         };
-
-        // Disabled for now (not deleted — see class comment): no hover/dwell
-        // listeners registered, so it just sits there inert; dimmed so it
-        // visibly reads as inactive instead of looking clickable and
-        // silently doing nothing. Re-enable by restoring the
-        // _registerButton(doc, 'btn-achievements', ...) call this replaced.
-        doc.getElementById('btn-achievements')?.setProperties({ opacity: 0.35 });
-
-        this._registerButton(doc, 'btn-back', 'fill-back', () => {
-          this._setPage(doc, 'page-main');
-        });
       },
       true,
     );
   }
 
-  update(delta: number, time: number): void {
-    if (this._hoveredId && !this._triggered) {
-      const entry = this._buttons.get(this._hoveredId);
-      if (entry) {
-        this._dwellElapsed += delta;
-        const t = Math.min(1, this._dwellElapsed / DWELL_SECONDS);
-        entry.fillEl.setProperties({ width: `${t * 100}%` });
+  // Builds one Follower-driven row of poke-cubes, centered around local
+  // x=0 (see cubeRowOffsets) — the same shared layout every screen in this
+  // menu uses (main/achievements/settings), just with a different button
+  // count/labels each time.
+  private _buildCubeRow(labels: string[]): CubeRow {
+    const rootEntity = this.world.createTransformEntity();
+    const rootObject = rootEntity.object3D!;
+    rootEntity.addComponent(Follower, {
+      target: this.player.head,
+      offsetPosition: [0, CUBE_HEIGHT, -CUBE_DISTANCE],
+      behavior: FollowBehavior.FaceTarget,
+      tolerance: 0.02,
+      speed: 6,
+      maxAngle: 10,
+    });
 
-        if (t >= 1) {
-          this._triggered = true;
-          entry.action();
-        }
+    const offsets = cubeRowOffsets(labels.length);
+    const buttons = labels.map(
+      (label, i) => new PokeCubeButton(this.world, rootEntity, label, [offsets[i], 0, 0]),
+    );
+
+    return { rootEntity, rootObject, buttons };
+  }
+
+  update(delta: number, time: number): void {
+    if (this._pokeGateActive) this._pokeGateElapsed += delta;
+    const pokeReady = this._pokeGateElapsed >= IGNORE_POKE_SECONDS;
+
+    // Only the active page's row needs update() — inactive rows are already
+    // hidden/disabled/reset by _openPage()'s own setEnabled(false), which
+    // snaps their fill to 0 synchronously, so there's nothing left for a
+    // hidden button's own update() to do.
+    if (this._page === 'main') {
+      if (this._startAction && this._startButton.update(delta, pokeReady)) this._startAction();
+      if (this._achievementsButton.update(delta, pokeReady)) this._openPage('achievements');
+      if (this._settingsButton.update(delta, pokeReady)) this._openPage('settings');
+    } else if (this._page === 'achievements') {
+      if (this._achievementsRow.buttons[0].update(delta, pokeReady)) this._openPage('main');
+    } else if (this._page === 'settings') {
+      if (this._passthroughButton.update(delta, pokeReady)) {
+        const globals = getGlobals(this.world);
+        globals.passthroughEnabled.value = !globals.passthroughEnabled.value;
+        this._passthroughButton.setLabel(this._passthroughLabel(globals.passthroughEnabled.value));
       }
+      if (this._notificationsButton.update(delta, pokeReady)) {
+        const globals = getGlobals(this.world);
+        globals.notificationsEnabled.value = !globals.notificationsEnabled.value;
+        this._notificationsButton.setLabel(this._notificationsLabel(globals.notificationsEnabled.value));
+      }
+      if (this._settingsRow.buttons[2].update(delta, pokeReady)) this._openPage('main');
     }
 
     this._updateStartPinch(delta, time);
   }
 
+  private _activeRow(): CubeRow {
+    if (this._page === 'achievements') return this._achievementsRow;
+    if (this._page === 'settings') return this._settingsRow;
+    return this._mainRow;
+  }
+
+  private _passthroughLabel(enabled: boolean): string {
+    return `Passthrough: ${enabled ? 'On' : 'Off'}`;
+  }
+  private _notificationsLabel(enabled: boolean): string {
+    return `Notifications: ${enabled ? 'On' : 'Off'}`;
+  }
+
   // Both hands pinching (select) at once, held briefly, starts the game —
   // see DOUBLE_PINCH_HOLD_SECONDS's own comment.
   private _updateStartPinch(delta: number, time: number): void {
-    if (this._startTriggered || !this._startAction) return;
+    if (this._startTriggered || !this._startAction || this._page !== 'main') return;
 
     if (this._startHintEl) {
       const pulse = 0.5 + 0.5 * Math.sin(time * START_HINT_PULSE_FREQ * Math.PI * 2);
@@ -220,63 +311,43 @@ export class StartMenuSystem extends createSystem({
     player.updateMatrixWorld(true);
   }
 
-  private _registerButton(
-    doc: UIKitDocument,
-    buttonId: string,
-    fillId: string,
-    action: () => void,
-  ): void {
-    const button = doc.getElementById(buttonId);
-    const fill = doc.getElementById(fillId);
-    if (!button || !fill) return;
+  // Three-way page switch — swaps both the flat panel's active <div> (text
+  // only: title/hint on main, title+list on achievements, title on
+  // settings) and which cube row is visible/pokeable.
+  private _openPage(page: MenuPage): void {
+    this._page = page;
+    const doc = this._doc();
+    doc?.getElementById('page-main')?.setProperties({ display: page === 'main' ? 'flex' : 'none' });
+    doc?.getElementById('page-achievements')?.setProperties({ display: page === 'achievements' ? 'flex' : 'none' });
+    doc?.getElementById('page-settings')?.setProperties({ display: page === 'settings' ? 'flex' : 'none' });
 
-    this._buttons.set(buttonId, { fillEl: fill, action });
+    for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
+      const active = row === this._activeRow();
+      row.rootObject.visible = active;
+      for (const button of row.buttons) {
+        button.setEnabled(active);
+        if (active) button.reset();
+      }
+    }
 
-    button.addEventListener('pointerenter', () => {
-      if (this._hoveredId === buttonId) return;
-      this._resetFill(this._hoveredId);
-      this._hoveredId = buttonId;
-      this._dwellElapsed = 0;
-      this._triggered = false;
-    });
-    button.addEventListener('pointerleave', () => {
-      if (this._hoveredId !== buttonId) return;
-      this._resetFill(buttonId);
-      this._hoveredId = null;
-      this._dwellElapsed = 0;
-      this._triggered = false;
-    });
+    if (page === 'achievements' && doc) this._refreshAchievementRows(doc);
   }
 
-  private _resetFill(buttonId: string | null): void {
-    if (!buttonId) return;
-    this._buttons.get(buttonId)?.fillEl.setProperties({ width: '0%' });
-  }
-
-  private _setPage(doc: UIKitDocument, visibleId: 'page-main' | 'page-achievements'): void {
-    doc
-      .getElementById('page-main')
-      ?.setProperties({ display: visibleId === 'page-main' ? 'flex' : 'none' });
-    doc.getElementById('page-achievements')?.setProperties({
-      display: visibleId === 'page-achievements' ? 'flex' : 'none',
-    });
+  private _doc(): UIKitDocument | null {
+    return this._docRef;
   }
 
   // Re-shows this panel after GameDirectorSystem.returnToMenu() — called by
   // EndRunMenuSystem's "Main Menu" choice, the only path that reaches this
   // screen a second time (a fresh page load already starts with the panel
-  // visible). The panel is only ever hidden by btn-start, which lives on
-  // page-main, so it's always already showing that page when this runs.
-  // Resets the dwell state too, so a hover left over from before the panel
-  // was hidden can't insta-trigger the moment it reappears.
+  // visible). Resets pinch/page state, not the poke-settling gate (see
+  // IGNORE_POKE_SECONDS's own comment) — a player already mid-session
+  // choosing this doesn't need re-guarding.
   showAgain(): void {
-    this._hoveredId = null;
-    this._dwellElapsed = 0;
-    this._triggered = false;
     this._pinchHoldSeconds = 0;
     this._startTriggered = false;
     this._panelObject.visible = true;
-    this._entity.addComponent(RayInteractable);
+    this._openPage('main');
   }
 
   private _refreshAchievementRows(doc: UIKitDocument): void {

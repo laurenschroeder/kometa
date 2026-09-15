@@ -1,6 +1,8 @@
 import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { AchievementSystem } from '../../core/achievement-system.js';
+import { hasAllCombos, recordCombo } from '../../core/achievement-store.js';
 import {
   FINAL_CHOICE_MESSAGE,
   LAUNCH_BUILDUP_SEQUENCE,
@@ -25,6 +27,11 @@ import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-sys
 export const ORBIT_DIR: [number, number, number] = [-Math.SQRT1_2, 0, -Math.SQRT1_2];
 export const UNKNOWN_DIR: [number, number, number] = [Math.SQRT1_2, 0, -Math.SQRT1_2];
 const CHOICE_ANGLE_RAD = Math.PI / 4; // 45°
+// Volatile gasses' index in PEBBLE_TYPES/dominantPebbleType — same local-copy
+// convention every other file needing it keeps (see e.g. planet-growth-
+// pool.ts's own comment). Only used to gate _commit()'s Gas-only repeat of
+// the orbit-choice line.
+const VOLATILE_GASSES_TYPE = 2;
 const UP_AXIS = new Vector3(0, 1, 0);
 
 // Zone-center distance from the player — reach-scale (comparable to
@@ -81,9 +88,11 @@ type LaunchState = 'choosing' | 'committed' | 'detached';
 // behaving completely normally (still hand-tracked, still springs/snaps/
 // throws) while the player is coached to swing it faster — detach is
 // gated on BOTH the commit message AND the full LAUNCH_BUILDUP_SEQUENCE
-// notification queue finishing playing out on the HUD (see notifyDuration/
-// _commit, which sums every one of those messages' own on-screen time into
-// _detachAtSeconds) AND the comet being somewhere in front of the player
+// notification queue actually finishing playing out on the HUD (see _commit,
+// which wires its onComplete callback to _buildupComplete — NOT a hand-timed
+// guess, since unrelated content already queued ahead of these messages, e.g.
+// a just-unlocked achievement popup, would make a timed guess finish before
+// the messages have really been shown) AND the comet being somewhere in front of the player
 // (IN_VIEW_COS) — regardless of how fast the comet actually ends up moving.
 // Whatever the comet's raw swing velocity happened to be at that instant is
 // NOT trusted for direction (a mid-swing sample can easily point sideways
@@ -103,8 +112,10 @@ export class OrbitalLaunchSystem extends createSystem({
 }) {
   private _state: LaunchState = 'choosing';
   private _choice: LaunchChoice | null = null;
-  private _committedElapsed = 0;
-  private _detachAtSeconds = 0;
+  // Flipped by the onComplete callback on the LAST message in _commit()'s
+  // notify() chain (commit message + LAUNCH_BUILDUP_SEQUENCE) — see the
+  // class comment on why this can't be a hand-timed guess.
+  private _buildupComplete = false;
   // Seconds continuously spent inside each zone this "choosing" spell — see
   // CHARGE_SECONDS. Read by OrbitalLaunchVfxSystem (getOrbit/UnknownCharge01)
   // to fill in the zone as a visible charge-up cue.
@@ -124,6 +135,9 @@ export class OrbitalLaunchSystem extends createSystem({
   // what they're for.
   private _elapsed = 0;
   private _zonesReadyAtSeconds = 0;
+  // Guards OrbitalLaunchSynth.startAmbient() so it only fires once per play()
+  // — see update()'s own readyToChoose check for when that actually happens.
+  private _ambientStarted = false;
   // GameDirectorSystem.definePhase() calls stop() on every phase system
   // immediately at registration time (a normalization step, before
   // director.start() has ever run) — without this guard, that boot-time
@@ -170,6 +184,35 @@ export class OrbitalLaunchSystem extends createSystem({
     this._camPos = new Vector3();
     this._camFwd = new Vector3();
     this._toComet = new Vector3();
+
+    // A system-level recenter (long-pressing the Meta button) moves the XR
+    // runtime's own reference space out from under wherever _placeZones()
+    // last anchored both choice zones. StartMenuSystem's own
+    // _recenterToHead() already reacts to this same event to keep
+    // world.player itself aligned, but has no idea this phase also has its
+    // own player-relative content sitting fixed in world space. Re-running
+    // _placeZones() here re-anchors both zones — and retargets Leg C's own
+    // recede/settle so the shrunk planet doesn't end up heading toward a
+    // spot the zone no longer matches — using the exact same "45 degrees
+    // left/right, ARROW_DISTANCE away" rule used to place them the first
+    // time, just re-run against wherever the player now actually is. Same
+    // 'sessionstart'-then-'reset' attachment idiom as StartMenuSystem, for
+    // the same reason (a fresh reference space per session).
+    this.xrManager.addEventListener('sessionstart', () => {
+      this.xrManager.getReferenceSpace()?.addEventListener('reset', () => this._onSystemRecenter());
+    });
+  }
+
+  // Only meaningful while still choosing — once committed/detached there's
+  // no zone left to re-anchor, and touching _orbitZoneCenter after Leg C has
+  // moved on to something else (or the phase has ended) would be actively
+  // wrong.
+  private _onSystemRecenter(): void {
+    if (this._state !== 'choosing') return;
+    this._placeZones();
+    this.world
+      .getSystem(PlanetSeedingVfxSystem)
+      ?.startLaunchRecedeTransition(this._orbitZoneCenter, SEEDING_PLANET_RADIUS);
   }
 
   play(): void {
@@ -177,11 +220,13 @@ export class OrbitalLaunchSystem extends createSystem({
     this._hasPlayed = true;
     this._state = 'choosing';
     this._choice = null;
-    this._committedElapsed = 0;
+    this._buildupComplete = false;
     this._orbitCharge = 0;
     this._unknownCharge = 0;
     this._chargingZone = null;
     this._synth.stopCharge();
+    this._synth.stopAmbient();
+    this._ambientStarted = false;
     this._elapsed = 0;
 
     // Places both zones 45° left/right of wherever the player is actually
@@ -227,6 +272,7 @@ export class OrbitalLaunchSystem extends createSystem({
   stop(): void {
     super.stop();
     this._synth.stopCharge();
+    this._synth.stopAmbient();
     if (this._hasPlayed && this._state !== 'detached') {
       this._choice = this._choice ?? 'orbit';
       this._detach();
@@ -237,7 +283,6 @@ export class OrbitalLaunchSystem extends createSystem({
     if (this._state === 'detached') return;
 
     this._elapsed += delta;
-    if (this._state === 'committed') this._committedElapsed += delta;
 
     // Withhold both choice zones until the planet has actually finished
     // receding/shrinking into its left-side spot (Leg C — see play()'s
@@ -248,6 +293,15 @@ export class OrbitalLaunchSystem extends createSystem({
     // before they've even been told what these spheres are for. Checked
     // once per frame rather than per-hand below.
     const readyToChoose = this._state !== 'choosing' || this.isReadyToChoose();
+
+    // Starts the moment both zones actually reveal (same gate as their own
+    // visibility, see OrbitalLaunchVfxSystem) — a flat, silent world-space
+    // placement otherwise gives a player who turns away nothing to relocate
+    // either zone by besides memory (see AMBIENT_GAIN's own comment).
+    if (this._state === 'choosing' && readyToChoose && !this._ambientStarted) {
+      this._ambientStarted = true;
+      this._synth.startAmbient(this._orbitZoneCenter, this._unknownZoneCenter);
+    }
 
     let inOrbitZone = false;
     let inUnknownZone = false;
@@ -264,7 +318,7 @@ export class OrbitalLaunchSystem extends createSystem({
           inUnknownZone = true;
         }
       } else if (this._state === 'committed') {
-        if (this._committedElapsed >= this._detachAtSeconds && this._isCometInView(this._scratchPos)) {
+        if (this._buildupComplete && this._isCometInView(this._scratchPos)) {
           this._detach();
         }
       }
@@ -347,7 +401,6 @@ export class OrbitalLaunchSystem extends createSystem({
   private _commit(choice: LaunchChoice): void {
     this._choice = choice;
     this._state = 'committed';
-    this._committedElapsed = 0;
     this._orbitCharge = 0;
     this._unknownCharge = 0;
     this._chargingZone = null;
@@ -355,24 +408,58 @@ export class OrbitalLaunchSystem extends createSystem({
     // its own — a hard cut reads as "arrived," not "interrupted," right as
     // the commit chord takes over.
     this._synth.stopCharge();
+    // Both beacons stop the instant a choice is made — the losing zone is
+    // about to hide/fade (see OrbitalLaunchVfxSystem), so it has nothing left
+    // to locate.
+    this._synth.stopAmbient();
     const notifications = this.world.getSystem(NotificationHudSystem);
     const dominantType = getGlobals(this.world).dominantPebbleType.peek();
     const { text, holdSeconds } =
       choice === 'orbit' ? orbitCommitMessage(dominantType) : unknownCommitMessage(dominantType);
     notifications?.notify(text, holdSeconds);
+    // Gas's orbit-choice line ("You will stay as a light in their sky...")
+    // repeats once more — the "omen" reveal carries more weight as a refrain
+    // than a single pass, same idiom a spoken omen/curse would use. Only this
+    // one commit line, not Soul/Organic's or either type's unknown-choice
+    // line.
+    if (choice === 'orbit' && dominantType === VOLATILE_GASSES_TYPE) {
+      notifications?.notify(text, holdSeconds);
+    }
+
+    // Eternal Light/Into the Unknown fire the instant the choice itself is
+    // made, right alongside the commit message above — same natural beat,
+    // not a separate interruption. Complete Collection then checks whether
+    // this run's (type, choice) pair was the last of all 6 combinations (3
+    // pebble types x 2 choices) the player has ever actually experienced.
+    const achievements = this.world.getSystem(AchievementSystem);
+    achievements?.unlock(choice === 'orbit' ? 'eternal-light' : 'into-the-unknown');
+    recordCombo(dominantType, choice);
+    if (hasAllCombos()) achievements?.unlock('complete-collection');
+
     // _scratchPos was just set to the comet's current position by update()'s
     // own per-entity loop, right before this was called.
     this._synth.playCommit(choice === 'orbit' ? 'orbit' : 'launch', this._scratchPos);
-    // Detach is gated on every one of these (see notifyDuration) finishing
-    // its own on-screen time — the "faster/keep going" buildup must fully
-    // play out before the comet is allowed to leave, not just the initial
-    // commit message.
-    let detachAt = notifyDuration(holdSeconds);
-    for (const entry of LAUNCH_BUILDUP_SEQUENCE) {
-      notifications?.notify(entry.text, entry.holdSeconds);
-      detachAt += notifyDuration(entry.holdSeconds);
+    // Detach is gated on every one of these actually finishing its own
+    // on-screen time — the "faster/keep going" buildup must fully play out
+    // before the comet is allowed to leave, not just the initial commit
+    // message. Only the LAST queued message's onComplete needs to flip
+    // _buildupComplete, since notify() is FIFO — but it's real playback
+    // completion, not a summed holdSeconds guess, so unrelated content
+    // already ahead in the queue (an achievement popup, say) correctly
+    // pushes the gate later instead of leaving it too early.
+    this._buildupComplete = false;
+    for (let i = 0; i < LAUNCH_BUILDUP_SEQUENCE.length; i++) {
+      const entry = LAUNCH_BUILDUP_SEQUENCE[i];
+      const isLast = i === LAUNCH_BUILDUP_SEQUENCE.length - 1;
+      notifications?.notify(
+        entry.text,
+        entry.holdSeconds,
+        entry.delaySeconds ?? 0,
+        entry.lineColors,
+        isLast ? () => (this._buildupComplete = true) : undefined,
+        entry.minHoldSeconds ?? 0,
+      );
     }
-    this._detachAtSeconds = detachAt;
   }
 
   private _detach(): void {

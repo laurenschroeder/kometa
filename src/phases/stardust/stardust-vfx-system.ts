@@ -17,7 +17,8 @@ import { GatherableField, GatherState } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
-import { PixelTwinkleSynth } from '../../vfx/audio/pixel-twinkle-synth.js';
+import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
+import { SwirlSynth } from '../../vfx/audio/swirl-synth.js';
 import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { makePixelCrtMaterial } from '../../vfx/shaders/pixel-crt-material.js';
@@ -33,6 +34,13 @@ const SWIRL_GOLD_COLOR: [number, number, number] = hexToRgb(SWIRL_GOLD);
 const SWIRL_POINT_SIZE = 0.022;
 const SWIRL_CAPTURED_SIZE = 0.03;
 const SWIRL_FADE_IN_RATE = 0.7; // 1/s exponential ease toward opacity 1
+// "A swirl has arrived" cue, fired once per slot the instant its render is
+// first built (see _buildSwirlRender) — same one-shot resolving-chime rig
+// Fate Events' payoff beats use (see payoff-chime.ts), just three notes
+// rather than a full triad-per-beat callout. Rises slightly per slot so
+// the 2nd/3rd reveal reads as "another one," not a repeat of the first.
+const SWIRL_ARRIVE_BASE_FREQ = 420;
+const SWIRL_ARRIVE_FREQ_STEP = 70;
 
 // Exported so ArtTestVfxSystem's "current stardust field" variant renders
 // with the exact same color, not an eyeballed copy.
@@ -102,9 +110,9 @@ export class StardustVfxSystem extends createSystem({
   // AudioContext singleton (THREE.AudioContext.getContext()).
   private _audioListener!: AudioListener;
   private _twinkleSynth!: TwinkleSynth;
-  // Square-wave sibling synth, swapped in once StardustSystem.isSwirling()
-  // — see pixel-twinkle-synth.ts's own class comment.
-  private _pixelSynth!: PixelTwinkleSynth;
+  // Glittery/magical/fizzy sibling synth, swapped in once
+  // StardustSystem.isSwirling() — see swirl-synth.ts's own class comment.
+  private _swirlSynth!: SwirlSynth;
 
   // One slot per StardustSystem swirl (see getSwirlCount()) — each built
   // lazily (see _buildSwirlRender) the first frame that slot's
@@ -136,8 +144,8 @@ export class StardustVfxSystem extends createSystem({
     this.player.head.add(this._audioListener);
     this._twinkleSynth = new TwinkleSynth();
     this._twinkleSynth.build(this._audioListener, this.scene);
-    this._pixelSynth = new PixelTwinkleSynth();
-    this._pixelSynth.build(this._audioListener, this.scene);
+    this._swirlSynth = new SwirlSynth();
+    this._swirlSynth.build(this._audioListener, this.scene);
     this._scratchCapturePos = new Vector3();
 
     this._camRight = new Vector3();
@@ -252,9 +260,9 @@ export class StardustVfxSystem extends createSystem({
     }
 
     // Once the swirl finale begins, the pickup/catch cue switches to the
-    // square-wave sibling synth to match the pixel-CRT aesthetic — see
-    // pixel-twinkle-synth.ts's own class comment.
-    const synth = this._stardust.isSwirling() ? this._pixelSynth : this._twinkleSynth;
+    // glittery/magical/fizzy sibling synth — see swirl-synth.ts's own class
+    // comment.
+    const synth = this._stardust.isSwirling() ? this._swirlSynth : this._twinkleSynth;
     for (const ev of this._stardust.drainAttractEvents()) {
       this._scratchCapturePos.set(ev.x, ev.y, ev.z);
       synth.playPickup(this._scratchCapturePos, ev.speed);
@@ -279,8 +287,8 @@ export class StardustVfxSystem extends createSystem({
   }
 
   // Lazily builds swirl `slot`'s rendering the first frame StardustSystem's
-  // swirl field for that slot exists (its own reveal threshold just
-  // crossed — see StardustSystem._buildSwirlField), then every frame after:
+  // swirl field for that slot exists (its own reveal time just arrived —
+  // see StardustSystem._buildSwirlField), then every frame after:
   // keeps the ambient cloud's per-point size zeroed once captured (so it
   // visibly thins out as points are swept up, same idiom as the main
   // ambient stardust field) and eases its fade-in toward full opacity.
@@ -364,6 +372,14 @@ export class StardustVfxSystem extends createSystem({
     const currentPhase = getGlobals(this.world).gamePhase.peek();
     points.visible = currentPhase === Phase.Stardust;
     capturedPoints.visible = CAPTURED_VISIBLE_DURING.has(currentPhase);
+
+    this._scratchCapturePos.fromArray(swirlField.positions);
+    playPayoffChime(
+      this._audioListener,
+      this.scene,
+      this._scratchCapturePos,
+      SWIRL_ARRIVE_BASE_FREQ + slot * SWIRL_ARRIVE_FREQ_STEP,
+    );
   }
 
   private _placeSwirlCapturedPool(slot: number, trail: Float32Array, samples: number, stride: number): void {

@@ -12,7 +12,9 @@ import { BoxGeometry, BufferGeometry, CylinderGeometry, Group, Mesh, ShaderMater
 // targetHeight), the King/bench apply their own KING_SCALE/BENCH_SCALE on
 // top of it, and the primitive placeholder below is authored as fractions
 // of it. Changing this one number rescales all of them together.
-export const PERSON_HEIGHT = 0.6;
+// 2/3 of the original 0.6 — every human figure (named, ambient crowd, King,
+// bench) shrunk together, still in the same proportion to each other.
+export const PERSON_HEIGHT = 0.4;
 
 // Proportions of the primitive placeholder figure, as fractions of
 // PERSON_HEIGHT rather than raw meters — these used to be hand-authored

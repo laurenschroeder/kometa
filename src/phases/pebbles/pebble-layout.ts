@@ -96,3 +96,37 @@ export function assignPebbleSpawnPoint(): PebbleSpawnPoint {
   const group = GROUP_DEFS[Math.floor(Math.random() * GROUP_DEFS.length)];
   return { dir: sampleGroupDirection(group.center, group.cosHalfAngle), radiusT: Math.random(), type: group.type };
 }
+
+// Must match the spawnCenter/spawnRadiusMin/spawnRadiusMax the pebble field
+// is actually constructed with (see PebbleWeavingSystem.init()) — kept as
+// separate constants here (not imported/shared) since this is only ever
+// used for the approximate "where does this call come from" placement
+// below, not gameplay itself; a small mismatch would be cosmetically
+// unnoticeable either way.
+const FIELD_SPAWN_CENTER: [number, number, number] = [0, 1.2, 0];
+const FIELD_SPAWN_RADIUS_MID = (0.5 + 1.8) / 2;
+
+// For the "Three paths call to you" intro beat (see notification-copy.ts's
+// Phase.Pebbles entry and PebbleWeavingSystem.TYPE_REVEAL_AT_SECONDS) — of
+// this type's groups, picks whichever one's center sits closest to the
+// given forward direction (typically the camera forward captured once at
+// phase start) and returns a world-space point roughly in the middle of
+// that group's cluster, for a positional "this path is calling" chime.
+export function closestGroupOriginForType(type: number, forward: Vector3, out: Vector3): Vector3 {
+  let best: GroupDef | null = null;
+  let bestDot = -Infinity;
+  for (const group of GROUP_DEFS) {
+    if (group.type !== type) continue;
+    const dot = group.center.dot(forward);
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = group;
+    }
+  }
+  const dir = best ? best.center : GROUP_DEFS[0].center;
+  return out.set(
+    FIELD_SPAWN_CENTER[0] + dir.x * FIELD_SPAWN_RADIUS_MID,
+    FIELD_SPAWN_CENTER[1] + dir.y * FIELD_SPAWN_RADIUS_MID,
+    FIELD_SPAWN_CENTER[2] + dir.z * FIELD_SPAWN_RADIUS_MID,
+  );
+}

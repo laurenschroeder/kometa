@@ -43,13 +43,11 @@ import { kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
 import { makeToonRimSkinnedMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { CrownRise } from '../../vfx/particles/crown-rise.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
-import { CROWN, GRAVE, MACHINE, ORGANIC_PALETTE, TOWER } from '../../vfx/color/color-scheme.js';
+import { CROWN, GRAVE, ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
 import { CROWD_CAP_DIRECTION, FateBeat, FateEventSystem } from './fate-event-system.js';
-import { PebbleCometPresentationSystem } from '../pebbles/pebble-comet-presentation-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 
-const MACHINE_COUNT = 4;
 const VOLATILE_GASSES_TYPE = 2;
 const ORGANIC_MATTER_TYPE = 1;
 
@@ -61,29 +59,29 @@ const SURFACE_OFFSET = 0.01;
 const STAGGER_WINDOW = 0.3; // same idiom/purpose as FateEventVfxSystem's own person stagger
 const REVEAL_EASE_RATE = 3; // 1/s exponential ease toward the staggered target scale
 
-const MACHINE_COLOR = new Color(MACHINE);
 const CROWN_COLOR = new Color(CROWN);
-const TOWER_COLOR = new Color(TOWER);
+// The King's own worn crown prop — a low band plus evenly-spaced spikes
+// around the rim, all as fractions of PERSON_HEIGHT (same "authored as
+// ratios, not raw meters" convention placeholder-person.ts's own proportions
+// use) so it stays sized correctly relative to the figure if PERSON_HEIGHT
+// ever changes again. Previously a single bare cone, which read as more of
+// a party hat than a crown.
+const CROWN_SPIKE_COUNT = 5;
+const CROWN_BAND_RADIUS = PERSON_HEIGHT * 0.11;
+const CROWN_BAND_HEIGHT = PERSON_HEIGHT * 0.05;
+const CROWN_SPIKE_RADIUS = PERSON_HEIGHT * 0.025;
+const CROWN_SPIKE_HEIGHT = PERSON_HEIGHT * 0.09;
+// Band sinks slightly below the head-top reference point (attachHeadProp's
+// wrapper origin / the placeholder-body offset below) rather than balancing
+// entirely above it, so it reads as resting ON the head, not floating just
+// past the crown of the skull.
+const CROWN_EMBED = CROWN_BAND_HEIGHT * 0.3;
 const GRAVE_COLOR = new Color(GRAVE);
 
-// Was 0.175/0.009/0.016 — read as a thin stick against the rest of the
-// crowd/decorations, so bumped taller and (proportionally more) wider for a
-// sturdier taper.
-const TOWER_HEIGHT = 0.26;
-const TOWER_RADIUS_TOP = 0.022;
-const TOWER_RADIUS_BOTTOM = 0.038;
 const KING_SCALE = 0.75;
 
-// Crown constellation only (see _updateTowerHeight): the tower starts a
-// sliver tall (not literally 0 — a zero-height cylinder reads as broken/
-// flickery) and grows toward full height as the player traces each of the
-// constellation's stars, reaching full height right as the last star
-// completes — just ahead of the Gas Ambient vignette's own death beat.
-const TOWER_MIN_HEIGHT_FRACTION = 0.12;
-const TOWER_GROWTH_EASE_RATE = 2.5; // 1/s exponential ease toward the live target
-
 // Gas's Beat 2.5 (Ambient) vignette — the king's death used to fire the
-// instant the Crown constellation completed (during Constellations, well
+// instant the Throne constellation completed (during Constellations, well
 // before Fate Events even began); it now waits for FateEventSystem's own
 // Ambient beat and plays across three timed sub-beats summing to
 // AMBIENT_BEAT_SECONDS (10s, see fate-event-system.ts): 0-3s the crowd holds
@@ -93,15 +91,16 @@ const TOWER_GROWTH_EASE_RATE = 2.5; // 1/s exponential ease toward the live targ
 // system.ts). GAS_DEATH_START/DURATION below are this file's own slice of
 // that timeline.
 const GAS_DEATH_START_SECONDS = 3;
-// Real death animation — plays once in place at the tower top (its own bone
-// motion carries the "falling backward" topple), holds its final "laying on
-// his back" pose (clampWhenFinished, see _triggerKingDeath), then the king's
-// ROOT physically drops from the tower to the ground over KING_FALL_DURATION
-// while that pose stays locked (see _updatePendingCollapse) — replacing the
-// old KING_TOPPLE_ANGLE root-rotation hack below, which now only fires as a
-// fallback if this clip somehow isn't available.
+// Real death animation — plays once in place on the ground (its own bone
+// motion carries the "falling backward" topple), then holds its final
+// "laying on his back" pose for good (LoopOnce + clampWhenFinished, see
+// _triggerKingDeath) rather than looping back to standing — there's no
+// tower/height to drop from anymore (the King now stands directly on the
+// ground, like every other figure), so once the topple finishes there's
+// nothing left to animate. KING_TOPPLE_ANGLE below is the fallback-only
+// root-rotation hack, used in place of the real clip's own pose if it
+// somehow isn't available.
 const KING_DYING_URL = '/medium/DyingBackwards.fbx';
-const KING_FALL_DURATION = 1.2;
 // Fallback-only from here down: used in place of the real clip's own
 // duration/pose if KING_DYING_URL fails to load (graceful degradation, same
 // idiom as every other FBX consumer in this codebase).
@@ -163,16 +162,20 @@ const BLOSSOM_STAGGER_SPAN = 2.5; // seconds across which each plant's own pulse
 const BLOSSOM_PULSE_DURATION = 1.2; // seconds, one instance's own rise-and-settle
 const BLOSSOM_SCALE_BUMP = 0.6; // peak fractional size increase mid-pulse
 
-// Beat 5 — Gas's "SKULL = COMET" banner rises from just above the tower and
-// holds. Simple canvas-texture billboard, same construction idiom as
+// Beat 5 — Gas's "COMET = SKULL" banner rises above the crowd and holds.
+// Simple canvas-texture billboard, same construction idiom as
 // FateEventVfxSystem's own speech bubbles/fire quads — not PanelUI, which is
 // for interactive panels, the wrong tool for a static in-world graphic.
 const BANNER_WIDTH = 0.3;
 const BANNER_HEIGHT = 0.09;
 const BANNER_RISE_DURATION = 4;
+// How far above its starting point the banner rises — used to be pegged to
+// the (now-removed) tower's own height; a plain fixed height reads the same
+// without needing a tower to measure off of.
+const BANNER_RISE_HEIGHT = 0.31;
 const BANNER_CANVAS_W = 512;
 const BANNER_CANVAS_H = 160;
-// "SKULL = mini comet" — the comet half is a small drawn glyph (bright core
+// "mini comet = SKULL" — the comet half is a small drawn glyph (bright core
 // + trailing red-dust specks), not text, so it actually reads as the thing
 // blamed for the king's death rather than a literal word.
 const BANNER_COMET_TAIL_SPECKS = 10;
@@ -201,6 +204,10 @@ interface DecorationSet {
   groups: Group[];
   normals: Float32Array;
   scale: Float32Array;
+  // Set once every item has actually settled at scale 0 while hidden — see
+  // _updateSet's own early-out comment. Cleared the instant `show` goes
+  // true again so a freshly-revealing set still runs its per-instance work.
+  atRest: boolean;
 }
 
 function buildDecorationSet(count: number, buildOne: () => Group): DecorationSet {
@@ -221,7 +228,7 @@ function buildDecorationSetFromNormals(normals: Float32Array, buildOne: () => Gr
     group.visible = false;
     groups.push(group);
   }
-  return { groups, normals, scale: new Float32Array(count) };
+  return { groups, normals, scale: new Float32Array(count), atRest: false };
 }
 
 interface OrganicScene {
@@ -233,6 +240,7 @@ interface OrganicScene {
   baseScale: Float32Array; // ORGANIC_DECORATION_COUNT*3, non-uniform per-decoration scale
   phase: Float32Array; // ORGANIC_DECORATION_COUNT, idle-anim phase offset
   scale: Float32Array; // ORGANIC_DECORATION_COUNT, current staggered-reveal scale [0,1]
+  atRest: boolean; // see DecorationSet.atRest's own comment — same idiom
 }
 
 const ORIGIN = new Vector3(0, 0, 0);
@@ -246,7 +254,7 @@ const ORIGIN = new Vector3(0, 0, 0);
 // per-type payoff — see FateEventSystem.getBeat()). Dispatch is keyed off
 // ConstellationsSystem.getActiveName() (available from spin-start, unlike
 // globals.celestialSymbol which only resolves once traced). Always-on and
-// self-gated via gamePhase, never GameDirector-managed — the Dog/Crown
+// self-gated via gamePhase, never GameDirector-managed — the Shepherd/Throne
 // mechanics persist a permanent comet attachment/state straight through Fate
 // Events/Launch/Finale, so this can't be phase-gated the way FateEventSystem's
 // own simulation is. All geometry here is a simple placeholder pass, swapped
@@ -263,7 +271,6 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _constellations!: ConstellationsSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
   private _fateEvents!: FateEventSystem;
-  private _pebbleComet!: PebbleCometPresentationSystem;
 
   private _organicScene!: OrganicScene;
   // See BEE_COUNT's own comment — a couple of real animated models, not
@@ -273,7 +280,6 @@ export class EarthSituationsVfxSystem extends createSystem({
   // _buildBees() — the plane the bees' small hover-circle is drawn in.
   private _beeTangentA = new Vector3();
   private _beeTangentB = new Vector3();
-  private _machines!: DecorationSet;
   private _king!: DecorationSet;
   private _kingBody!: Group; // the king's own figure, stays visible lying down once he dies
   // Both null until the shared BreathingIdle rig resolves (see
@@ -282,7 +288,7 @@ export class EarthSituationsVfxSystem extends createSystem({
   // group either way, so it needs no change once the swap happens.
   private _kingMixer: AnimationMixer | null = null;
   private _benchMixer: AnimationMixer | null = null;
-  // DyingBackwards.fbx's own clip, loaded once (see _buildKingTower) —
+  // DyingBackwards.fbx's own clip, loaded once (see _buildKing) —
   // null until it resolves, or forever if it fails to load (see
   // _triggerKingDeath's fallback path). idleAction is the King's own
   // BreathingIdle loop, captured from _swapKingToAnimated so death can stop
@@ -292,20 +298,19 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _kingDyingAction: AnimationAction | null = null;
   // Whichever figure (placeholder, then the swapped-in animated rig) is
   // CURRENTLY the King's/bench's own body visual — tracked so the later
-  // swap can remove exactly that one child (King's crown is a permanent
-  // sibling that must survive the swap; the bench figure has no such
-  // sibling but is handled the same way for consistency).
+  // swap can remove exactly that one child. The bench figure has no
+  // sibling but is handled the same way for consistency.
   private _kingBodyVisual!: Group;
+  // The crown prop currently worn — a fresh one is built for the placeholder
+  // body (a plain child of kingBody, no bone to ride yet) and swapped for
+  // another fresh one rigidly attached to the real rig's own head bone once
+  // it loads (see _swapKingToAnimated/AnimatedPerson.attachHeadProp) rather
+  // than trying to re-parent the same instance — its wrapper math only
+  // applies once a head bone actually exists.
+  private _kingCrown!: Group;
   private _kingMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
   private _benchBodyVisual!: Group;
   private _benchMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
-  private _towerMesh!: Mesh; // the King set's own tower — grows with trace progress, see _updateTowerHeight
-  // Current eased 0-1 tower-height fraction — starts (and resets) at
-  // TOWER_MIN_HEIGHT_FRACTION, eases toward however many of the Crown
-  // constellation's stars are currently traced, independent of the King
-  // set's own pop-in reveal (_updateSet's group-level scale) — the two
-  // compose rather than conflict.
-  private _towerHeightFraction = 0;
   private _graveyard!: DecorationSet;
   private _graveyardBench!: DecorationSet;
 
@@ -326,9 +331,7 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _gasHornTriggered = false;
 
   // Universal payoff (see crown-rise.ts's own class comment) — plays on
-  // EVERY constellation completion, in addition to whichever name-specific
-  // special case (Dog soul-pack) also fires from the same isComplete() edge
-  // below.
+  // EVERY constellation completion.
   private _crown!: CrownRise;
   private _crownWasAttached = false;
   private _audioListener!: AudioListener;
@@ -342,7 +345,6 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _payoffTriggered = false;
   private _payoffElapsed = 0;
   private _bannerMesh!: Mesh;
-  private _bannerEndY = 0;
 
   private _wasComplete = false;
   private _cometEntity: Entity | null = null;
@@ -366,18 +368,16 @@ export class EarthSituationsVfxSystem extends createSystem({
   private _zAxis = new Vector3(0, 0, 1);
 
   init(): void {
-    // PlanetSeedingVfxSystem/ConstellationsSystem/FateEventSystem/
-    // PebbleCometPresentationSystem must be registered before this system
-    // (see index.ts) so they already exist when this init() runs.
+    // PlanetSeedingVfxSystem/ConstellationsSystem/FateEventSystem must be
+    // registered before this system (see index.ts) so they already exist
+    // when this init() runs.
     this._constellations = this.world.getSystem(ConstellationsSystem)!;
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
     this._fateEvents = this.world.getSystem(FateEventSystem)!;
-    this._pebbleComet = this.world.getSystem(PebbleCometPresentationSystem)!;
 
     this._buildOrganicScene();
     this._buildBees();
-    this._buildMachines();
-    this._buildKingTower();
+    this._buildKing();
     this._buildGraveyardScene();
 
     // Own AudioListener, same reason every other generative-audio VFX
@@ -467,7 +467,17 @@ export class EarthSituationsVfxSystem extends createSystem({
     }
     for (const mesh of meshes) (mesh.geometry.getAttribute('aTint') as InstancedBufferAttribute).needsUpdate = true;
 
-    this._organicScene = { meshes, variantOf, localOf, isAnimal, normals, baseScale, phase, scale: new Float32Array(n) };
+    this._organicScene = {
+      meshes,
+      variantOf,
+      localOf,
+      isAnimal,
+      normals,
+      baseScale,
+      phase,
+      scale: new Float32Array(n),
+      atRest: false,
+    };
   }
 
   // See BEE_COUNT's own comment. AssetManager.getGLTF() clones the Object3D
@@ -505,23 +515,32 @@ export class EarthSituationsVfxSystem extends createSystem({
     }
   }
 
-  private _buildMachines(): void {
-    const material = new MeshBasicMaterial({ color: MACHINE_COLOR });
-    this._machines = buildDecorationSet(MACHINE_COUNT, () => {
-      const group = new Group();
-      const body = new Mesh(buildOrganicGeometry({ ampMin: 0.02, ampMax: 0.04 }), material);
-      body.scale.set(0.03, 0.025, 0.03);
-      group.add(body);
-      const antenna = new Mesh(new CylinderGeometry(0.003, 0.003, 0.05, 6), material);
-      antenna.position.y = 0.035;
-      group.add(antenna);
-      return group;
-    });
-    this._registerSet(this._machines);
+  // A fresh crown Group — band + rim spikes, local origin at the band's
+  // own bottom edge so a caller positioning/parenting this at "top of head"
+  // gets a crown that visibly rests there (see CROWN_EMBED). Built fresh
+  // per call (not shared) since the placeholder and the real rig each need
+  // their own instance — see _kingCrown's own comment.
+  private _buildCrownProp(): Group {
+    const group = new Group();
+    const material = new MeshBasicMaterial({ color: CROWN_COLOR });
+
+    const band = new Mesh(new CylinderGeometry(CROWN_BAND_RADIUS, CROWN_BAND_RADIUS * 1.08, CROWN_BAND_HEIGHT, 10), material);
+    band.position.y = CROWN_BAND_HEIGHT / 2 - CROWN_EMBED;
+    group.add(band);
+
+    const spikeGeo = new ConeGeometry(CROWN_SPIKE_RADIUS, CROWN_SPIKE_HEIGHT, 6);
+    const spikeY = CROWN_BAND_HEIGHT - CROWN_EMBED + CROWN_SPIKE_HEIGHT / 2;
+    for (let i = 0; i < CROWN_SPIKE_COUNT; i++) {
+      const angle = (i / CROWN_SPIKE_COUNT) * Math.PI * 2;
+      const spike = new Mesh(spikeGeo, material);
+      spike.position.set(Math.cos(angle) * CROWN_BAND_RADIUS * 0.85, spikeY, Math.sin(angle) * CROWN_BAND_RADIUS * 0.85);
+      group.add(spike);
+    }
+
+    return group;
   }
 
-  private _buildKingTower(): void {
-    const towerMaterial = new MeshBasicMaterial({ color: TOWER_COLOR });
+  private _buildKing(): void {
     // Same shared black outline material every human figure now uses (see
     // animated-person.ts's PERSON_BODY_COLOR) — the King's own lavender
     // KING_COLOR identity is gone, per the same "black center" look applied
@@ -539,16 +558,10 @@ export class EarthSituationsVfxSystem extends createSystem({
     const kingNormals = new Float32Array([CROWD_CAP_DIRECTION.x, CROWD_CAP_DIRECTION.y, CROWD_CAP_DIRECTION.z]);
     this._king = buildDecorationSetFromNormals(kingNormals, () => {
       const group = new Group();
-      const tower = new Mesh(
-        new CylinderGeometry(TOWER_RADIUS_TOP, TOWER_RADIUS_BOTTOM, TOWER_HEIGHT, 8),
-        towerMaterial,
-      );
-      tower.position.y = TOWER_HEIGHT / 2;
-      group.add(tower);
-      this._towerMesh = tower;
 
+      // Stands directly on the ground now — no more tower pedestal (see
+      // this file's own top-level comments on why it was removed).
       const kingBody = new Group();
-      kingBody.position.y = TOWER_HEIGHT;
       kingBody.scale.setScalar(KING_SCALE);
 
       // Non-animated primitive placeholder immediately; swapped for the
@@ -559,9 +572,12 @@ export class EarthSituationsVfxSystem extends createSystem({
       this._kingBodyVisual = buildPlaceholderPerson(this._kingMaterial).group;
       kingBody.add(this._kingBodyVisual);
 
-      const crown = new Mesh(new ConeGeometry(0.014, 0.022, 6), new MeshBasicMaterial({ color: CROWN_COLOR }));
-      crown.position.y = PERSON_HEIGHT + 0.015;
-      kingBody.add(crown);
+      // No head bone to ride yet (see attachHeadProp) — plain child of
+      // kingBody at a fixed offset, same as before, just for this short
+      // placeholder window until the real rig loads.
+      this._kingCrown = this._buildCrownProp();
+      this._kingCrown.position.y = PERSON_HEIGHT;
+      kingBody.add(this._kingCrown);
       group.add(kingBody);
       this._kingBody = kingBody;
 
@@ -586,6 +602,15 @@ export class EarthSituationsVfxSystem extends createSystem({
     this._kingBody.add(this._kingBodyVisual);
     this._kingMixer = animated.mixer;
     this._kingIdleAction = animated.idleAction;
+
+    // Placeholder crown was a fixed-offset child of kingBody (no bone to
+    // ride yet) — swap it for a fresh one rigidly attached to the real
+    // rig's own head bone, so it tracks the idle animation's head bob
+    // instead of staying at an offset tuned for the primitive placeholder's
+    // proportions (see AnimatedPerson.attachHeadProp's own comment).
+    this._kingBody.remove(this._kingCrown);
+    this._kingCrown = this._buildCrownProp();
+    animated.attachHeadProp(this._kingCrown);
   }
 
   // Grave markers (small headstones) at FateEventSystem's own canonical
@@ -658,6 +683,46 @@ export class EarthSituationsVfxSystem extends createSystem({
     ctx.fill();
   }
 
+  // Same "drawn directly on the canvas" reasoning as _drawMiniComet above —
+  // see _buildBanner's own comment for why this replaced a plain
+  // fillText('☠', ...) call. Cranium + jaw in the banner's own ink color,
+  // eye sockets/nasal cavity/teeth cut back to (approximately) the
+  // banner's own background color so they read as sockets rather than a
+  // separate drawn shape.
+  private _drawSkull(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number): void {
+    ctx.fillStyle = '#ffdede';
+    ctx.beginPath();
+    ctx.arc(cx, cy - radius * 0.15, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx - radius * 0.55, cy + radius * 0.15);
+    ctx.quadraticCurveTo(cx, cy + radius * 1.05, cx + radius * 0.55, cy + radius * 0.15);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(20, 4, 4, 0.88)';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + radius * 0.05);
+    ctx.lineTo(cx - radius * 0.12, cy + radius * 0.32);
+    ctx.lineTo(cx + radius * 0.12, cy + radius * 0.32);
+    ctx.closePath();
+    ctx.fill();
+    for (let i = -1; i <= 1; i++) {
+      ctx.fillRect(
+        cx + i * radius * 0.22 - radius * 0.03,
+        cy + radius * 0.55,
+        radius * 0.06,
+        radius * 0.22,
+      );
+    }
+  }
+
   private _buildBanner(): void {
     const canvas = document.createElement('canvas');
     canvas.width = BANNER_CANVAS_W;
@@ -672,11 +737,18 @@ export class EarthSituationsVfxSystem extends createSystem({
     ctx.fillStyle = '#ffdede';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = 'bold 72px sans-serif';
-    ctx.fillText('☠', BANNER_CANVAS_W * 0.2, BANNER_CANVAS_H / 2);
+    // "comet = SKULL" — comet glyph first (reads left-to-right as "this is
+    // what caused this"), skull last. Both are drawn directly on the
+    // canvas (see _drawMiniComet/_drawSkull) rather than typed as text —
+    // the skull specifically USED to be a plain fillText('☠', ...) call,
+    // but a Unicode glyph is only as good as whatever font the browser
+    // happens to resolve 'sans-serif' to, and it was silently rendering as
+    // nothing (missing-glyph) in at least this environment — same "drawn
+    // object, not a font's problem" reasoning the comet glyph already used.
+    this._drawMiniComet(ctx, BANNER_CANVAS_W * 0.2, BANNER_CANVAS_H / 2, BANNER_CANVAS_H * 0.18);
     ctx.font = 'bold 56px sans-serif';
     ctx.fillText('=', BANNER_CANVAS_W * 0.46, BANNER_CANVAS_H / 2);
-    this._drawMiniComet(ctx, BANNER_CANVAS_W * 0.74, BANNER_CANVAS_H / 2, BANNER_CANVAS_H * 0.18);
+    this._drawSkull(ctx, BANNER_CANVAS_W * 0.74, BANNER_CANVAS_H / 2, BANNER_CANVAS_H * 0.24);
 
     const texture = new CanvasTexture(canvas);
     const geo = new PlaneGeometry(BANNER_WIDTH, BANNER_HEIGHT);
@@ -702,7 +774,17 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     this._scratchCenter.copy(this._planetSeeding.getLivePlanetPosition());
     const reach = this._planetSeeding.getLivePlanetRadius() + SURFACE_OFFSET;
-    const spinProgress = SITUATION_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    // Past Constellations every decoration set is always fully revealed —
+    // Leg A is long over by then, so getSpinProgress() already returns 1 in
+    // normal play and this max() changes nothing. It only matters on a
+    // dev-menu jump straight to Fate Events (Leg A never ran, so
+    // PlanetSpinTransition.getProgress() reports 0 for "never started"),
+    // which would otherwise leave the King/tower/machines/graveyard/organic
+    // scene all scaled to 0. Same fix fate-event-vfx-system.ts's own crowd
+    // applies to its spinProgress read.
+    const rawSpinProgress = SITUATION_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    const spinProgress =
+      phase === Phase.Constellations ? rawSpinProgress : Math.max(rawSpinProgress, SITUATION_ELIGIBLE_FROM.has(phase) ? 1 : 0);
     // Every decoration in this file (King/tower, graveyard/bench, dogs,
     // machines, organic scene, bees) was tuned in absolute meters against
     // Fate Events' own settled PLANET_RADIUS — correct only once the live
@@ -719,15 +801,12 @@ export class EarthSituationsVfxSystem extends createSystem({
     const radiusScale = this._planetSeeding.getLivePlanetRadius() / this._fateEvents.getPlanetRadius();
 
     const showOrganicScene = dominant === 1;
-    const showMachines = dominant === 2;
-    const showKing = dominant === 2 && name === 'Crown';
+    const showKing = dominant === 2 && name === 'Throne';
     const showGraveyard = dominant === 0;
 
     this._updateOrganicScene(showOrganicScene, spinProgress, delta, this._scratchCenter, reach, time, radiusScale);
     this._updateBees(showOrganicScene, this._scratchCenter, reach, delta, time, radiusScale);
-    this._updateSet(this._machines, showMachines, spinProgress, delta, this._scratchCenter, reach, radiusScale);
     this._updateSet(this._king, showKing, spinProgress, delta, this._scratchCenter, reach, radiusScale);
-    this._updateTowerHeight(showKing, delta);
     this._updateSet(this._graveyard, showGraveyard, spinProgress, delta, this._scratchCenter, reach, radiusScale);
     this._updateSet(
       this._graveyardBench,
@@ -757,7 +836,7 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     if (this._constellations.isComplete() && !this._wasComplete) {
       this._wasComplete = true;
-      this._onCompletion(name, reach);
+      this._onCompletion(reach);
     }
 
     this._updatePendingCollapse(delta);
@@ -837,14 +916,13 @@ export class EarthSituationsVfxSystem extends createSystem({
   // collapse.elapsed is still within animDuration, either the real clip is
   // playing (useClipPose — nothing else to drive, this._kingMixer?.update()
   // in update() above already advances it) or the fallback root-rotation
-  // topple is. Once animDuration has elapsed the pose is locked in (holding
-  // on DyingBackwards' final frame, or the fallback's fully-toppled
-  // rotation) and this drops the king's ROOT straight down from the tower
-  // to the ground over KING_FALL_DURATION, ease-in like a real fall — he
-  // stays visible lying there afterward rather than disappearing (no more
-  // separate rising-ghost hand-off; that doubled up on the universal
-  // CrownRise payoff — see _onCompletion — which already does the same
-  // "something rises and lands on the comet" beat).
+  // topple is. Once animDuration has elapsed the pose is locked in for good
+  // (holding on DyingBackwards' final frame, or the fallback's
+  // fully-toppled rotation) — he stays visible lying there on the ground
+  // afterward rather than disappearing (no more separate rising-ghost
+  // hand-off; that doubled up on the universal CrownRise payoff — see
+  // _onCompletion — which already does the same "something rises and lands
+  // on the comet" beat).
   private _updatePendingCollapse(delta: number): void {
     const collapse = this._pendingCollapse;
     if (!collapse) return;
@@ -858,37 +936,16 @@ export class EarthSituationsVfxSystem extends createSystem({
       return;
     }
 
-    const fallT = clamp01((collapse.elapsed - collapse.animDuration) / KING_FALL_DURATION);
-    this._kingBody.position.y = TOWER_HEIGHT * this._towerHeightFraction * (1 - fallT * fallT);
-    if (fallT >= 1) {
-      this._pendingCollapse = null;
-    }
-  }
-
-  // Crown constellation only — grows the tower's own height (independent of
-  // the King set's group-level pop-in scale from _updateSet above) from
-  // TOWER_MIN_HEIGHT_FRACTION toward however many of the constellation's
-  // stars are currently traced, so the tower visibly rises one star at a
-  // time instead of appearing at full height the instant the King set pops
-  // in. Not folded into _updateSet's generic DecorationSet loop since this
-  // needs a single King-only mesh's own live progress source
-  // (ConstellationsSystem.getTracedFraction), not spinProgress. Scaling the
-  // tower mesh's own Y (not the whole group, which already carries
-  // _updateSet's own uniform pop-in scale — the two compose rather than
-  // conflict) requires re-deriving position.y alongside scale.y so the
-  // base stays pinned to the ground instead of shrinking toward the
-  // cylinder's center; kingBody rides the current height so he stands on
-  // top of however tall the tower currently is, not floating above it.
-  private _updateTowerHeight(showKing: boolean, delta: number): void {
-    const target = showKing
-      ? TOWER_MIN_HEIGHT_FRACTION + (1 - TOWER_MIN_HEIGHT_FRACTION) * this._constellations.getTracedFraction()
-      : TOWER_MIN_HEIGHT_FRACTION;
-    const pull = 1 - Math.exp(-TOWER_GROWTH_EASE_RATE * delta);
-    this._towerHeightFraction += (target - this._towerHeightFraction) * pull;
-
-    this._towerMesh.scale.y = this._towerHeightFraction;
-    this._towerMesh.position.y = (TOWER_HEIGHT * this._towerHeightFraction) / 2;
-    this._kingBody.position.y = TOWER_HEIGHT * this._towerHeightFraction;
+    // Topple's finished — no tower to drop from anymore (he was already
+    // standing on the ground), so just hold here for good. The real clip's
+    // own LoopOnce/clampWhenFinished (see _triggerKingDeath) already keeps
+    // it locked on its final frame; the fallback's rotation.x is likewise
+    // just left at whatever the loop above last set it to (full
+    // KING_TOPPLE_ANGLE) since nothing touches it past this point.
+    this._pendingCollapse = null;
+    // See globals.ts's own comment — FateEventVfxSystem polls this to
+    // switch the ambient crowd onto their "sitting disbelief" reaction.
+    getGlobals(this.world).kingDeathComplete.value = true;
   }
 
   private _updateSet(
@@ -900,13 +957,27 @@ export class EarthSituationsVfxSystem extends createSystem({
     reach: number,
     radiusScale: number,
   ): void {
+    if (show) {
+      set.atRest = false;
+    } else if (set.atRest) {
+      // Already fully hidden and settled at scale 0 — every item below
+      // would just recompute the exact same "stay at 0" result forever,
+      // so skip the whole per-instance pass (trig included) instead of
+      // paying for it every single frame regardless of whether this set
+      // is even relevant to the current playthrough (e.g. the organic
+      // scene's own decorations still running full-tilt during a Gas run).
+      return;
+    }
+
     const pull = 1 - Math.exp(-REVEAL_EASE_RATE * delta);
     const count = set.groups.length;
+    let allSettled = true;
     for (let i = 0; i < count; i++) {
       const target = show ? smoothstep(clamp01((spinProgress - i / count) / STAGGER_WINDOW)) : 0;
       set.scale[i] += (target - set.scale[i]) * pull;
       const group = set.groups[i];
       group.visible = set.scale[i] > 0.001;
+      if (group.visible) allSettled = false;
       // radiusScale is applied on this outer group's own scale only — every
       // absolute-meter dimension inside it (tower height, King/bench body
       // height, grave stone size, ...) is authored in this group's LOCAL
@@ -921,6 +992,7 @@ export class EarthSituationsVfxSystem extends createSystem({
       this._scratchNormal.set(nx, ny, nz);
       group.quaternion.setFromUnitVectors(this._upAxis, this._scratchNormal);
     }
+    if (!show && allSettled) set.atRest = true;
   }
 
   // Small hover-circle above the organic decorations, in the plane
@@ -974,14 +1046,26 @@ export class EarthSituationsVfxSystem extends createSystem({
     radiusScale: number,
   ): void {
     const scene = this._organicScene;
+    // Same early-out idiom as _updateSet's own atRest — see its comment.
+    // Organic's own decorations otherwise ran this full per-instance pass
+    // (including per-mesh setMatrixAt calls) every frame even while fully
+    // hidden and settled, e.g. for the whole rest of a Soul/Gas run.
+    if (show) {
+      scene.atRest = false;
+    } else if (scene.atRest) {
+      return;
+    }
+
     const pull = 1 - Math.exp(-REVEAL_EASE_RATE * delta);
     const n = ORGANIC_DECORATION_COUNT;
     // Beat 5 payoff pulse — see BLOSSOM_* constants. Zero (no pulse) unless
     // _updatePayoff has actually triggered it this play().
     const blossomActive = this._payoffTriggered && ORGANIC_MATTER_TYPE === this._lastPayoffDominant;
+    let allSettled = true;
     for (let i = 0; i < n; i++) {
       const target = show ? smoothstep(clamp01((spinProgress - i / n) / STAGGER_WINDOW)) : 0;
       scene.scale[i] += (target - scene.scale[i]) * pull;
+      if (scene.scale[i] > 0.001) allSettled = false;
 
       const nx = scene.normals[i * 3];
       const ny = scene.normals[i * 3 + 1];
@@ -1023,6 +1107,7 @@ export class EarthSituationsVfxSystem extends createSystem({
       scene.meshes[scene.variantOf[i]].setMatrixAt(scene.localOf[i], this._scratchMat4);
     }
     for (const mesh of scene.meshes) mesh.instanceMatrix.needsUpdate = true;
+    if (!show && allSettled) scene.atRest = true;
   }
 
   // Beat 5 — fires once per play() the instant FateEventSystem enters
@@ -1044,23 +1129,28 @@ export class EarthSituationsVfxSystem extends createSystem({
       this._lastPayoffDominant = dominant;
       if (dominant === VOLATILE_GASSES_TYPE) {
         this._bannerMesh.visible = true;
-        // Standalone Mesh, not a DecorationSet child — its own absolute
-        // BANNER_WIDTH/HEIGHT geometry and the fixed-meter offsets below
-        // need radiusScale applied directly (same reasoning as _updateBees).
-        this._bannerMesh.scale.setScalar(radiusScale);
-        this._scratchBannerPos
-          .copy(this._scratchCenter)
-          .addScaledVector(CROWD_CAP_DIRECTION, reach + 0.02 * radiusScale);
-        this._bannerMesh.position.copy(this._scratchBannerPos);
-        this._bannerEndY = this._scratchBannerPos.y + (TOWER_HEIGHT + 0.05) * radiusScale;
       }
       playPayoffChime(this._audioListener, this.scene, this._scratchCenter, 420);
     }
     this._payoffElapsed += delta;
 
     if (dominant === VOLATILE_GASSES_TYPE && this._bannerMesh.visible) {
-      const t = clamp01(this._payoffElapsed / BANNER_RISE_DURATION);
-      this._bannerMesh.position.y = this._scratchBannerPos.y + (this._bannerEndY - this._scratchBannerPos.y) * smoothstep(t);
+      // Recomputed every frame from the LIVE planet center/reach/radiusScale
+      // (all passed in fresh each call), not just once at trigger time — the
+      // banner used to freeze at its trigger-time world position, visibly
+      // detaching from the planet as it kept moving (following the player,
+      // then receding for Launch) instead of staying anchored to "the
+      // earth." Standalone Mesh, not a DecorationSet child — its own
+      // absolute BANNER_WIDTH/HEIGHT geometry and the fixed-meter offsets
+      // below need radiusScale applied directly (same reasoning as
+      // _updateBees).
+      this._bannerMesh.scale.setScalar(radiusScale);
+      this._scratchBannerPos
+        .copy(this._scratchCenter)
+        .addScaledVector(CROWD_CAP_DIRECTION, reach + 0.02 * radiusScale);
+      const t = smoothstep(clamp01(this._payoffElapsed / BANNER_RISE_DURATION));
+      this._bannerMesh.position.copy(this._scratchBannerPos);
+      this._bannerMesh.position.y += BANNER_RISE_HEIGHT * radiusScale * t;
       this.camera.getWorldPosition(this._scratchBannerFace);
       this._scratchBannerFace.sub(this._bannerMesh.position).normalize();
       if (this._scratchBannerFace.lengthSq() > 0.0001) {
@@ -1069,46 +1159,42 @@ export class EarthSituationsVfxSystem extends createSystem({
     }
   }
 
-  private _onCompletion(name: string, reach: number): void {
+  private _onCompletion(reach: number): void {
     const globals = getGlobals(this.world);
 
     // Universal payoff — every constellation's completion sends the crown
     // up, regardless of name, colored to match this playthrough's dominant
-    // pebble type. Unconditional, alongside (not replacing) the name-
-    // specific branches below.
+    // pebble type.
     const dominant = globals.dominantPebbleType.peek();
-    this._scratchCrownOrigin.copy(this._scratchCenter).addScaledVector(CROWD_CAP_DIRECTION, reach);
+    // Rotated off CROWD_CAP_DIRECTION, away from the player along the same
+    // tangent the crowd's own semicircle scatter uses (see sphere-scatter.ts's
+    // scatterSemicircleAroundPoint — _beeTangentA is that same "away from
+    // camera" direction, already computed once in _buildBees()), rather than
+    // dead-center — dead-center is exactly the King's own live standing
+    // point (same center+CROWD_CAP_DIRECTION*reach formula _updateSet uses
+    // for him), so the crown used to visibly rise right out of/through his
+    // body instead of the ground behind him.
+    const behindAngle = (14 * Math.PI) / 180;
+    this._scratchNormal
+      .copy(CROWD_CAP_DIRECTION)
+      .multiplyScalar(Math.cos(behindAngle))
+      .addScaledVector(this._beeTangentA, Math.sin(behindAngle))
+      .normalize();
+    this._scratchCrownOrigin.copy(this._scratchCenter).addScaledVector(this._scratchNormal, reach);
     this._crown.trigger(this._scratchCrownOrigin, PEBBLE_TYPES[dominant].color);
 
-    if (name === 'Dog') {
-      // The dog's soul was already quietly riding in the comet's tail this
-      // whole game — no new death, no ghost-rise. Completion just reveals
-      // it: a small pack of already-captured soul pebbles detaches, flies
-      // down, gently visits every person in the crowd, then returns.
-      const positions = this._fateEvents.getSurfacePositions();
-      const n = this._fateEvents.getVisiblePeopleCount();
-      const waypoints: Vector3[] = [];
-      for (let i = 0; i < n; i++) {
-        waypoints.push(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-      }
-      if (this._cometEntity) this._pebbleComet.startSoulPackVisit(this._cometEntity, waypoints);
-    }
     // Crown's king-death vignette no longer fires here — see
     // _updateGasVignette, gated on FateEventSystem's own Ambient beat.
   }
 
   private _resetAll(): void {
-    for (const set of [this._machines, this._king, this._graveyard, this._graveyardBench]) {
+    for (const set of [this._king, this._graveyard, this._graveyardBench]) {
       set.scale.fill(0);
       for (const group of set.groups) group.visible = false;
     }
     this._organicScene.scale.fill(0);
     this._kingBody.visible = true;
     this._kingBody.rotation.x = 0;
-    this._towerHeightFraction = TOWER_MIN_HEIGHT_FRACTION;
-    this._towerMesh.scale.y = TOWER_MIN_HEIGHT_FRACTION;
-    this._towerMesh.position.y = (TOWER_HEIGHT * TOWER_MIN_HEIGHT_FRACTION) / 2;
-    this._kingBody.position.y = TOWER_HEIGHT * TOWER_MIN_HEIGHT_FRACTION;
     this._pendingCollapse = null;
     this._gasVignetteTriggered = false;
     this._gasHornTriggered = false;
@@ -1131,5 +1217,6 @@ export class EarthSituationsVfxSystem extends createSystem({
     this._bannerMesh.visible = false;
 
     getGlobals(this.world).crownLanded.value = false;
+    getGlobals(this.world).kingDeathComplete.value = false;
   }
 }

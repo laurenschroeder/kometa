@@ -10,6 +10,8 @@ import {
   Vector3,
 } from '@iwsdk/core';
 import { getGlobals } from '../../core/globals.js';
+import { VISIT_STARS_TEXT } from '../../core/notification-copy.js';
+import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { Phase } from '../../core/phase.js';
 import { StarDronePool } from '../../vfx/audio/star-drone-pool.js';
 import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
@@ -134,13 +136,16 @@ const TWINKLE_FIXED_SPEED = 1.1;
 export class ConstellationsVfxSystem extends createSystem({}) {
   private _constellations!: ConstellationsSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
+  private _notifications!: NotificationHudSystem;
   // Single shared material for every interactive star across all 9
   // constellations — color used to be baked per-type (one material per
   // type), but now comes from each star's own aColor attribute instead (see
   // UNTOUCHED_STAR_COLOR/_updateStarState), so one material suffices.
   private _starMat!: ShaderMaterial;
   // Reset to false each time Constellations begins (see _onPhaseChange),
-  // flips true once update() sees Leg A (the spin+recede transition) finish.
+  // flips true once update() sees Leg A (the spin+recede transition) finish
+  // AND the VISIT_STARS_TEXT hint has actually been shown (see the gate in
+  // update() for why both are required).
   private _revealed = false;
 
   // Ambient "shape traced out" ribbon — one shared material (color/timing
@@ -203,9 +208,10 @@ export class ConstellationsVfxSystem extends createSystem({}) {
 
   init(): void {
     this._constellations = this.world.getSystem(ConstellationsSystem)!;
-    // PlanetSeedingVfxSystem must be registered before this system (see
-    // index.ts) so it already exists when this init() runs.
+    // PlanetSeedingVfxSystem/NotificationHudSystem must be registered before
+    // this system (see index.ts) so they already exist when this init() runs.
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
+    this._notifications = this.world.getSystem(NotificationHudSystem)!;
 
     // Same deterministic, pure function ConstellationsSystem.init() already
     // called to bake its own layouts against — recomputing it here (rather
@@ -505,7 +511,19 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     const activePositions = this._starPosAttrs[dominant][activeSlot].array as Float32Array;
     const def = this._constellations.getDefs(dominant)[activeSlot];
 
-    if (!this._revealed && phase === Phase.Constellations && !this._planetSeeding.isSpinTransitionActive()) {
+    // Gated on BOTH the spin/recede transition having settled AND the "why
+    // not visit those nearby stars" hint (VISIT_STARS_TEXT) actually having
+    // been shown — without the second half, the constellation could start
+    // flashing/connecting the instant the transition finished (typically
+    // well before that hint even reaches the front of the notification
+    // queue), reading as stars just appearing out of nowhere rather than the
+    // game having actually pointed the player at them first.
+    if (
+      !this._revealed &&
+      phase === Phase.Constellations &&
+      !this._planetSeeding.isSpinTransitionActive() &&
+      this._notifications.hasShown(VISIT_STARS_TEXT)
+    ) {
       this._revealed = true;
       this._applyVisibility(phase);
       // Positions above are already this frame's live ones, so the drones'

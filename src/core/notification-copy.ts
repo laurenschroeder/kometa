@@ -1,5 +1,5 @@
 import { Phase } from './phase.js';
-import { FATE_CROWN_DIALOGUE, hexToRgb } from '../vfx/color/color-scheme.js';
+import { FATE_THRONE_DIALOGUE, hexToRgb } from '../vfx/color/color-scheme.js';
 import { PEBBLE_TYPES } from '../phases/pebbles/pebble-type.js';
 
 // Single source of truth for ALL of this game's narrative text — both the
@@ -23,6 +23,15 @@ export interface NotificationCopy {
   // finishes fading out), this actually pauses first. Omit for the default
   // (no gap).
   delaySeconds?: number;
+  // Only meaningful alongside a "hold until X" idiom (see STARDUST_INTRO_
+  // TEXT/VISIT_STARS_TEXT) where something calls dismissByText() the instant
+  // a gameplay condition is met, which could otherwise cut the message off
+  // almost before it's readable if that condition fires fast (e.g. the
+  // player's hand already sits inside the stardust field the moment the
+  // phase starts). dismissByText() honors this as a floor — the message
+  // still fades out early once it's met, just never sooner. Omit for no
+  // floor (dismiss takes effect immediately, the original behavior).
+  minHoldSeconds?: number;
   // Per-line text color (0-1 RGB), index-matched against text.split('\n') —
   // e.g. Pebbles' "the blue dust of souls" line tinted to match
   // PEBBLE_TYPES[0].color. A line with no entry (array too short, or an
@@ -39,15 +48,43 @@ export interface NotificationCopy {
 // below.
 export const VISIT_STARS_TEXT = 'Why not visit those nearby stars? The people on the planet seem very interested in them.';
 
+// Exported so StardustSystem can dismiss this exact message the instant the
+// player actually gathers their first stardust — see its own use of
+// NotificationHudSystem.dismissByText() and Phase.Stardust's own entry
+// below, same "hold until X" idiom as VISIT_STARS_TEXT above.
+export const STARDUST_INTRO_TEXT = 'You are stardust unformed. Move your hand around to gather yourself into being.';
+
+// Exported so PlanetSeedingSystem can hold the planet at its far-away
+// PLANET_INITIAL_POSITION until this has actually been shown (see
+// NotificationHudSystem.hasShown()), rather than starting its float-toward-
+// the-player ease the instant Seeding begins regardless of whether the
+// player has actually been told to go look for it yet.
+export const SEEDING_INTRO_TEXT = 'Take a spin around this planet. Linger near its surface to seed it with stardust.';
+
 // Every phase gets a sequence (most are one message) — NotificationHudSystem
 // queues them, so a multi-entry sequence plays as consecutive messages, each
 // fully fading out before the next fades in.
 export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Stardust]: [
-    { text: 'You are stardust unformed. Move your hand around to gather yourself into being.', holdSeconds: 5.4 },
+    // A few seconds' breathing room before the very first line — this is
+    // also the instant the whole game starts, so text popping up literally
+    // frame one left no time to get oriented first. holdSeconds is a
+    // generous fallback cap, not the real hold time — see STARDUST_INTRO_
+    // TEXT's own comment: StardustSystem dismisses this the instant the
+    // player actually gathers their first stardust, same "hold until X"
+    // idiom as VISIT_STARS_TEXT/Phase.Constellations. minHoldSeconds is the
+    // original fixed hold this line used to have before it became
+    // dismiss-on-condition — keeps a fast first capture (hand already near
+    // the field) from cutting the instruction off before it's readable.
+    {
+      text: STARDUST_INTRO_TEXT,
+      holdSeconds: 60,
+      minHoldSeconds: 5.4,
+      delaySeconds: 3,
+    },
     { text: 'The faster you swing, the further you go.', holdSeconds: 5.5, delaySeconds: 2 },
     {
-      text: 'If you want to control the comet with a different hand, pinch (or pull trigger) with the hand you want it to follow.',
+      text: 'If you want to control the comet with a different hand, pinch it (or pull trigger on it) with the hand you want it to follow.',
       holdSeconds: 5,
       delaySeconds: 12,
     },
@@ -67,7 +104,7 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
 
   [Phase.Seeding]: [
     {
-      text: 'Take a spin around this planet. Linger near its surface to seed it with stardust.',
+      text: SEEDING_INTRO_TEXT,
       holdSeconds: 4,
     },
   ],
@@ -92,6 +129,16 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
       // own comment. This hold is just the fallback cap for a player who
       // never does.
       holdSeconds: 45,
+      // Without a floor, a player who reaches the first star within
+      // moments of this appearing (or before it's even started fading in)
+      // let ConstellationsSystem's own constellationSpottedMessage —
+      // queued right behind via notifyNext() — effectively override this
+      // one before it was ever actually readable. Same "hold until X, but
+      // no less than this" idiom as STARDUST_INTRO_TEXT's own
+      // minHoldSeconds — dismissByText() defers until this floor is met
+      // (showing immediately if still in its own delay), so the spied
+      // message just waits its turn in the queue instead.
+      minHoldSeconds: 5.5,
     },
   ],
   // Was one generic line for every type (Gas alone also got a supplemental
@@ -122,10 +169,10 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
 // course of a playthrough (declaration order has no effect on behavior —
 // this is purely for readability). Stardust -> Pebbles -> Constellations are
 // still shared/generic; the three pebble types' narratives properly diverge
-// starting partway through Constellations (kingRisingMessage/
-// CELESTIAL_SYMBOL_LINES/celestialSymbolMessage's 3-way branch, then Gas's
-// own fateEventsGasIntroMessage supplement moments later) and stay generic
-// again from there through Finale.
+// starting partway through Constellations (CELESTIAL_SYMBOL_LINES/
+// celestialSymbolMessage's 3-way branch, then Gas's own
+// fateEventsGasIntroMessage supplement moments later) and stay generic again
+// from there through Finale.
 
 // Fired by StardustSystem once the tutorial's gather threshold is reached —
 // not a phase-entry sequence (see NOTIFICATION_COPY above), a mid-phase,
@@ -141,7 +188,7 @@ export const STARDUST_WIN_SEQUENCE: NotificationCopy[] = [
 // so it can't be a static table entry like the ones above.
 export function pebbleCompletionMessage(typeName: string): NotificationCopy {
   return {
-    text: `You've collected so many pebbles, especially ${typeName}! Let's continue further into the universe.`,
+    text: `You've collected so much matter, especially ${typeName}! Let's continue further into the universe.`,
     holdSeconds: 3.5,
   };
 }
@@ -155,19 +202,7 @@ export function constellationSpottedMessage(name: string): NotificationCopy {
   };
 }
 
-// --- Dog/Tree/Crown diverge from here through Fate Events' opening ---
-
-// Fired by ConstellationsSystem the instant the Crown constellation's 3rd
-// star is traced — a mid-trace foreshadowing beat, well before the
-// constellation actually completes, for the king's death vignette that
-// plays later in Fate Events (see earth-situations-vfx-system.ts's Beat 2.5
-// gas vignette).
-export function kingRisingMessage(): NotificationCopy {
-  return {
-    text: 'A new king seems to be rising to power on this planet.',
-    holdSeconds: 4.5,
-  };
-}
+// --- Shepherd/Harvest/Throne diverge from here through Fate Events' opening ---
 
 // Split into two beats, both fired together the instant a constellation's
 // path is fully traced (the same edge EarthSituationsVfxSystem's crown-rise
@@ -185,9 +220,9 @@ export function kingRisingMessage(): NotificationCopy {
 // about it; they're the ones making the myth, not you. Keyed by the same
 // celestialSymbol strings the Fate Events dialogue tables below use.
 const CELESTIAL_SYMBOL_LINES: Record<string, (name: string) => string> = {
-  Dog: (name) => `The ${name} constellation means more to these creatures than you could realize.`,
-  Tree: (name) => `There is a poetry to your attention to the ${name} constellation.`,
-  Crown: (name) => `Your fiery tail has captured a lot of attention in the ${name} constellation.`,
+  Shepherd: (name) => `The ${name} constellation means more to these creatures than you could realize.`,
+  Harvest: (name) => `The creatures find it fitting, seeing you in the ${name} constellation.`,
+  Throne: (name) => `Your fiery tail has captured a lot of attention while flying through the ${name} constellation.`,
 };
 
 export function celestialSymbolFlavorMessage(name: string): NotificationCopy | null {
@@ -201,10 +236,15 @@ export function celestialSymbolFlavorMessage(name: string): NotificationCopy | n
 // Emerge/Hover/Travel/Land stage durations), actively dismissed the instant
 // globals.crownLanded flips true (see ConstellationsSystem's own dismissal),
 // same "long fallback + active dismiss" idiom VISIT_STARS_TEXT already uses.
+// delaySeconds gives celestialSymbolFlavorMessage (queued right before this
+// one — see ConstellationsSystem's trace-completion block) a few silent
+// seconds to breathe on its own before this reveal fades in, rather than
+// cutting straight into it the instant the flavor line fades out.
 export function celestialSymbolMessage(name: string): NotificationCopy {
   return {
     text: `It's been realized, you are crowned the celestial symbol of ${name}.`,
     holdSeconds: 40,
+    delaySeconds: 3,
   };
 }
 
@@ -220,7 +260,7 @@ const FATE_EVENTS_INTRO_BY_TYPE: NotificationCopy[] = [
   },
   // organic matter — the seed-gathering vignette.
   {
-    text: 'This planet has intelligent life, and they understand who you are. They have a job for you.',
+    text: 'This planet has intelligent life, and they understand who you are. They have something for you.',
     holdSeconds: 6.2,
   },
   // volatile gasses — the king's-death/blame vignette (was the old
@@ -238,7 +278,7 @@ export function fateEventsIntroMessage(dominantType: number): NotificationCopy {
 // placeholder person by fate-event-vfx-system.ts, NOT top-HUD notify() calls
 // like everything else in this file) — moved here from the old standalone
 // fate-dialogue.ts so all of the game's narrative text lives in one place.
-// Keyed by the same celestialSymbol strings (Dog/Tree/Crown) used above. ---
+// Keyed by the same celestialSymbol strings (Shepherd/Harvest/Throne) used above. ---
 
 // `entries` is a pool of per-person scripts: each entry is either a single
 // line (a length-1 array) or a short ordered sequence that progresses and
@@ -252,24 +292,64 @@ export function fateEventsIntroMessage(dominantType: number): NotificationCopy {
 // (see VISIBLE_PEOPLE_BY_TYPE in fate-event-system.ts).
 export interface FateDialogueEntry {
   entries: string[][];
-  // Only Crown overrides the family color (Dog/Tree fall back to
+  // Only Throne overrides the family color (Shepherd/Harvest fall back to
   // PEBBLE_TYPES[dominantPebbleType].color in fate-event-system.ts).
   color?: [number, number, number];
-  // Dog only — the full override line EarthSituationsVfxSystem gives to the
-  // one paired person's dialogue instead of the lines above (see
+  // Shepherd/Harvest only — the full override line EarthSituationsVfxSystem
+  // gives to the one paired person's dialogue instead of the lines above (see
   // FateEventSystem.getDialogueLinesFor and earth-situations-vfx-system.ts).
+  // Throne doesn't use this — every one of its people gets a namedLine below
+  // instead, no featured "paired" figure singled out.
   pairedLine?: string;
   // Beat 3's single scripted "who you are / what you need to do" line —
   // force-assigned to EXPLAIN_FIGURE_INDEX's bubble for the whole Explain
   // beat, bypassing the proximity-triggered ambient pool above entirely (see
-  // FateEventSystem.getExplainerText/getBeat).
-  explainerLine: string;
+  // FateEventSystem.getExplainerText/getBeat). Shepherd/Harvest only — Throne
+  // skips Explain entirely (see FateEventSystem.update()'s Ambient->Collect
+  // branch), so nobody there needs a scripted narrator line.
+  explainerLine?: string;
+  // One fixed, hardcoded line per named crowd member (see
+  // GAS_CHARACTER_NAMES) — takes priority over both pairedLine/explainerLine
+  // above and the random `entries` pool below for whichever person index
+  // that name currently maps to (see FateEventSystem.getDialogueLinesFor).
+  // Keyed by NAME rather than person index so each line lives right next to
+  // a readable character name here instead of a magic index number. Throne
+  // populates one of these for EVERY visible person (see GAS_CHARACTER_NAMES
+  // — no featured/explainer/paired split, everyone's just a named crowd
+  // member), so `entries` below is unused for Throne.
+  namedLines?: Record<string, string>;
 }
+
+// Gas/Throne's crowd — every visible person (VISIBLE_PEOPLE_BY_TYPE[2] = 6)
+// is an equally "named" figure now: same gold rim, same "talk to me" marker,
+// same individual namedLine below, no featured explainer/paired split like
+// Shepherd/Harvest still have. Each also gets its own downloaded animation
+// (see fate-event-vfx-system.ts's GAS_CHARACTER_POSES, keyed off these same
+// indices) instead of sharing the crowd's default breathing-idle loop.
+// Indices 4/5 land right next to each other in the crowd's own semicircle
+// layout (see scatterSemicircleAroundPoint's ordering in sphere-scatter.ts),
+// which is why Mourner/Griever share the same Sitting Disbelief animation as
+// a visual pair rather than each getting a distinct one.
+export const GAS_POINTER_INDEX = 0; // == fate-event-system.ts's EXPLAIN_FIGURE_INDEX
+export const GAS_ACCUSER_INDEX = 1; // == fate-event-system.ts's PAIRED_FIGURE_INDEX
+export const GAS_GRUMP_INDEX = 2;
+export const GAS_RANTER_INDEX = 3;
+export const GAS_MOURNER_INDEX = 4;
+export const GAS_GRIEVER_INDEX = 5;
+
+export const GAS_CHARACTER_NAMES: Record<number, string> = {
+  [GAS_POINTER_INDEX]: 'Pointer', // Angry Point, half speed
+  [GAS_ACCUSER_INDEX]: 'Accuser', // Angry Gesture
+  [GAS_GRUMP_INDEX]: 'Grump', // Angry
+  [GAS_RANTER_INDEX]: 'Ranter', // Angry Gesture
+  [GAS_MOURNER_INDEX]: 'Mourner', // Sitting Disbelief
+  [GAS_GRIEVER_INDEX]: 'Griever', // Sitting Disbelief
+};
 
 export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
   // soul dust — VISIBLE_PEOPLE_BY_TYPE[0] = 9, so 7 ambient slots (9 minus
   // the 2 named figures); this pool is sized to exactly match.
-  Dog: {
+  Shepherd: {
     entries: [
       ['WOOF WOOF WOOF WOOF'],
       ['ruff ruff'],
@@ -285,7 +365,7 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
   },
   // organic matter — VISIBLE_PEOPLE_BY_TYPE[1] = N_PEOPLE (10), so 8
   // ambient slots; this pool is sized to match.
-  Tree: {
+  Harvest: {
     entries: [
       ['rustle rustle rustle'],
       ['creeeeeak'],
@@ -301,23 +381,25 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
     explainerLine:
       'Take seeds from our best plants and spread them around this universe.',
   },
-  // volatile gasses — VISIBLE_PEOPLE_BY_TYPE[2] = 6, so only 4 ambient
-  // slots; this pool deliberately holds more than 4 entries, since
-  // FateEventSystem's random per-play offset means which 4 actually show up
-  // varies loop to loop instead of always the same first 4.
-  Crown: {
-    entries: [
-      ['That comet brings death to kings! Beware!'],
-      ['The comet has brought death to our king!'],
-      ['Time for an uprising!'],
-      ['This is too much chaos for me'],
-      ["The king was already sick. The comet's just getting credit."],
-      ["We're blaming the comet mostly so nobody blames the guy who poisoned the wine."],
-    ],
-    color: hexToRgb(FATE_CROWN_DIALOGUE),
-    pairedLine: 'You visit our planet and bring death to our king.',
-    explainerLine:
-      "We don't take this lightly! Go to each of our people and hear what they think of this curse before you leave.",
+  // volatile gasses — every one of VISIBLE_PEOPLE_BY_TYPE[2]'s 6 visible
+  // people gets a namedLine below (see GAS_CHARACTER_NAMES), so this pool is
+  // never actually drawn from — kept empty rather than deleted so
+  // FateDialogueEntry's required `entries` field stays satisfied.
+  Throne: {
+    entries: [],
+    color: hexToRgb(FATE_THRONE_DIALOGUE),
+    // One fixed line per named crowd member — picked to match each one's own
+    // animation (see GAS_CHARACTER_NAMES). Every visible person gets one now
+    // (no separate pairedLine/explainerLine narrator role) — Pointer/Accuser
+    // carry what used to be the explainer/paired lines.
+    namedLines: {
+      Pointer: "Wretched king-killer! We'd all like a word with you.",
+      Accuser: 'You visit our planet and bring death to our king!',
+      Grump: 'How dare you take our king from us!',
+      Ranter: 'Leave us and never come back!',
+      Mourner: 'This is too much chaos for me. Why comet, why?',
+      Griever: 'The comet has brought death to our king!',
+    },
   },
 };
 
@@ -334,7 +416,7 @@ export interface NamedFigureArc {
   lines: string[];
 }
 
-// Indexed by dominantPebbleType (0=soul dust, 1=organic matter, 2=volatile
+// Indexed binantPebbleType (0=soul dust, 1=organic matter, 2=volatile
 // gasses — see pebble-type.ts).
 export const NAMED_FIGURES_BY_TYPE: [NamedFigureArc, NamedFigureArc][] = [
   [
@@ -354,7 +436,7 @@ export const NAMED_FIGURES_BY_TYPE: [NamedFigureArc, NamedFigureArc][] = [
       lines: [
         'Welcome to our lush planet. Try not to step on anything.',
         "The harvest hasn't been this good in years. We're crediting you.",
-        'Statistically it\'s probably the rain. But thank you.',
+        'Statisticy domally it\'s probably the rain. But thank you.',
       ],
     },
     {
@@ -452,7 +534,7 @@ const ORBIT_COMMIT_BY_TYPE: NotificationCopy[] = [
 const UNKNOWN_COMMIT_BY_TYPE: NotificationCopy[] = [
   { text: 'You will carry them onward, to new cosmic lands.', holdSeconds: 5.7 },
   { text: 'You will leave to spread these unique plants elsewhere.', holdSeconds: 5.2 },
-  { text: 'You will leave them with only the story, and no one left to blame.', holdSeconds: 5.9 },
+  { text: 'You will leave the planet with only the story, and no one left to blame.', holdSeconds: 5.9 },
 ];
 export function orbitCommitMessage(dominantType: number): NotificationCopy {
   return ORBIT_COMMIT_BY_TYPE[dominantType] ?? ORBIT_COMMIT_BY_TYPE[0];
@@ -487,33 +569,35 @@ export const LAUNCH_BUILDUP_SEQUENCE: NotificationCopy[] = [
 // dominantPebbleType, same convention as ORBIT_COMMIT_BY_TYPE above.
 const FINALE_MEANING_BY_TYPE: string[] = [
   "Nobody ever told you what a soul actually is. Somehow you ended up with a whole pack of them anyway.",
-  'Long before you arrived, comets like you were already carrying the first ingredients of life from space to world.',
+  'Long before you arrived, comets like you were already carrying the first ingredients of life from space to planet.',
   "They will remember you as an omen. It's easier than remembering there wasn't one.",
 ];
 
 // Fired once by EndRunMenuSystem, right before the "time is done" message —
-// closes out the run in two staggered lines (see NotificationCopy's own
-// comment on '\n' + LINE_STAGGER_SECONDS): the quiet type-specific meaning
-// above, then what your final identity means given the choice made at
-// Launch (OrbitalLaunchSystem.getChoice()) — orbit settles permanently into
-// this world's sky under the name you earned (celestialSymbol, tying back
-// to whichever constellation you became — falls back to the dominant
-// pebble type's own name on a dev-menu skip that never traced one), launch
-// carries on past it into anonymity instead, so no name is named there.
+// closes out the run as two SEPARATE queued notifications (each fully
+// fades out before the next fades in — see NotificationHudSystem.notify()/
+// _triggerPhase's own array-of-entries idiom), not one multi-line box: the
+// quiet type-specific meaning first, then what your final identity means
+// given the choice made at Launch (OrbitalLaunchSystem.getChoice()) — orbit
+// settles permanently into this world's sky under the name you earned
+// (celestialSymbol, tying back to whichever constellation you became —
+// falls back to the dominant pebble type's own name on a dev-menu skip that
+// never traced one), launch carries on past it into anonymity instead, so
+// no name is named there.
 export function finaleMessage(
   dominantType: number,
   celestialSymbol: string | null,
   choice: 'orbit' | 'launch',
-): NotificationCopy {
+): NotificationCopy[] {
   const name = celestialSymbol ?? PEBBLE_TYPES[dominantType]?.name ?? 'the unnamed';
   const meaning = FINALE_MEANING_BY_TYPE[dominantType] ?? FINALE_MEANING_BY_TYPE[0];
   const closing =
     choice === 'orbit'
       ? `A lifetime spent gathering and delivering space dust ends here. You have found your place as ${name}.`
-      : 'A lifetime spent gathering and delivering space dust carries you onward still, for whatever comes next.';
-  return {
-    text: `${meaning}\n${closing}`,
-    holdSeconds: 8.5,
-    lineColors: [null, PEBBLE_TYPES[dominantType]?.color ?? null, null],
-  };
+      : 'A life spent gathering and delivering space dust carries you onward, for whatever comes next.';
+  const typeColor = PEBBLE_TYPES[dominantType]?.color ?? null;
+  return [
+    { text: meaning, holdSeconds: 7, lineColors: [typeColor] },
+    { text: closing, holdSeconds: 5, lineColors: [typeColor] },
+  ];
 }

@@ -13,9 +13,12 @@ function smoothstep(t: number): number {
 // Drives Seeding's single planet "becoming the Fate Events planet"
 // transition: it grows from Seeding's small radius up to Fate Events'
 // PLANET_RADIUS while its center recedes along a blended direction, timed
-// so it lands EXACTLY on Fate Events' fixed PLANET_CENTER/PLANET_RADIUS at
-// completion (no discontinuity for comet-autopilot-system.ts's later orbit
-// math, which reads those same constants during Launch).
+// so it lands EXACTLY on PLANET_CENTER — shifted by however far the player
+// has drifted from world origin since Constellations began (see start()'s
+// own comment and FateEventSystem.play()) — at completion. comet-autopilot-
+// system.ts's later orbit math reads the mesh's own live transform rather
+// than these constants directly, so it stays consistent regardless of where
+// this actually lands.
 //
 // Not a System — a plain, explicitly-driven helper (build/start/update/
 // reset), same idiom as HeartBurstPool/PlanetGrowthPool. Owns the planet's
@@ -41,9 +44,10 @@ export class PlanetFateTransition {
   // grow-phase snapshot, captured in start()
   private _growFromPos = new Vector3();
   private _growFromRadius = SEEDING_PLANET_RADIUS;
-  private _growEndD = 0; // fixed, computed once in build()
-  private _faceRef!: Vector3;
-  private _growEndDir!: Vector3; // fixed unit vector, computed once in build()
+  private _growEndD = 0; // computed fresh every start() — see its own comment
+  private _faceRef = new Vector3();
+  private _growEndDir = new Vector3();
+  private _scratchEndOffset = new Vector3();
 
   private _scratchDir0 = new Vector3();
   private _scratchDir = new Vector3();
@@ -51,22 +55,34 @@ export class PlanetFateTransition {
   build(planetPosition: Float32Array): void {
     this._currentPos.fromArray(planetPosition);
     this._currentRadius = SEEDING_PLANET_RADIUS;
-
-    // Fixed reference point ("roughly your face") and the fixed end state
-    // Fate Events' planet already occupies relative to it — both computed
-    // once since PLANET_CENTER/PLANET_RADIUS never change.
-    this._faceRef = new Vector3(0, PLANET_CENTER[1], 0);
-    const endOffset = new Vector3(PLANET_CENTER[0], PLANET_CENTER[1], PLANET_CENTER[2]).sub(this._faceRef);
-    this._growEndD = endOffset.length() - FATE_PLANET_RADIUS;
-    this._growEndDir = endOffset.normalize();
   }
 
-  start(): void {
+  // driftX/driftZ: how far the player has actually wandered from world
+  // origin by the time Fate Events begins (see FateEventSystem.play()'s own
+  // comment) — shifts _faceRef and the end target by the same amount, so
+  // the grow-in lands in front of wherever the player really is instead of
+  // the raw authored PLANET_CENTER, without ever moving the player's camera
+  // to match it (that used to be an instant teleport — see
+  // FateEventSystem's own history). growEndD/growEndDir end up numerically
+  // IDENTICAL to the undrifted case either way — _faceRef and the target
+  // shift by the exact same amount, so their relative offset (the "how
+  // far/which direction to grow" math) is unaffected; only _faceRef's
+  // absolute position — and so _currentPos's whole output — actually moves.
+  // Recomputed fresh here (rather than once in build()) since the drift is
+  // only known once this phase actually begins.
+  start(driftX = 0, driftZ = 0): void {
     this._elapsed = 0;
     this._active = true;
     this._started = true;
     this._growFromPos.copy(this._currentPos);
     this._growFromRadius = this._currentRadius;
+
+    this._faceRef.set(driftX, PLANET_CENTER[1], driftZ);
+    this._scratchEndOffset
+      .set(PLANET_CENTER[0] + driftX, PLANET_CENTER[1], PLANET_CENTER[2] + driftZ)
+      .sub(this._faceRef);
+    this._growEndD = this._scratchEndOffset.length() - FATE_PLANET_RADIUS;
+    this._growEndDir.copy(this._scratchEndOffset).normalize();
   }
 
   // Overwrites _currentPos/_currentRadius directly, without touching

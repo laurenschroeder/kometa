@@ -32,34 +32,10 @@
     align-items: stretch;
   }
 
-  .dwell-button {
-    position-type: relative;
-    width: 100%;
-    padding: 1.6;
-    margin-top: 1;
-    border-width: 0.12;
-    border-color: #ffffff;
-    border-radius: 1;
-    overflow: hidden;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .dwell-fill {
-    position-type: absolute;
-    position-left: 0;
-    position-top: 0;
-    position-bottom: 0;
-    width: 0%;
-    background-color: #3f7fff;
-  }
-
-  .dwell-label {
-    color: #ffffff;
-    font-size: 2.2;
-    text-align: center;
-    font-family: hud;
-    font-weight: bold;
+  .page-settings {
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .start-hint {
@@ -111,48 +87,63 @@
   <div id="page-main" class="page-main">
     <hudtext class="title">Kometa</hudtext>
     <hudtext id="start-hint" class="start-hint">Pinch (or pull trigger) with both hands to start</hudtext>
-    <div id="btn-achievements" class="dwell-button">
-      <div id="fill-achievements" class="dwell-fill"></div>
-      <hudtext class="dwell-label">Achievements</hudtext>
-    </div>
   </div>
   <div id="page-achievements" class="page-achievements">
     <hudtext class="title">Achievements</hudtext>
     <div class="ach-list">
       <div class="ach-row">
-        <hudtext class="ach-title">First Light</hudtext>
-        <span class="ach-desc">Complete the Stardust phase.</span>
-        <span id="ach-status-first-light" class="ach-status">Locked</span>
+        <hudtext class="ach-title">Full Sweep</hudtext>
+        <span class="ach-desc">Clear every mote from all three Stardust swirls before the phase ends.</span>
+        <span id="ach-status-full-sweep" class="ach-status">Locked</span>
       </div>
       <div class="ach-row">
-        <hudtext class="ach-title">Pebble Pusher</hudtext>
-        <span class="ach-desc">Complete the Pebbles phase.</span>
-        <span id="ach-status-pebble-pusher" class="ach-status">Locked</span>
+        <hudtext class="ach-title">Ambidextrous</hudtext>
+        <span class="ach-desc">Toss the comet to your other hand and catch it.</span>
+        <span id="ach-status-ambidextrous" class="ach-status">Locked</span>
       </div>
       <div class="ach-row">
-        <hudtext class="ach-title">World Seeder</hudtext>
-        <span class="ach-desc">Complete the Planet Seeding phase.</span>
-        <span id="ach-status-world-seeder" class="ach-status">Locked</span>
+        <hudtext class="ach-title">True Believer</hudtext>
+        <span class="ach-desc">Finish Pebbles with one type making up 90% or more of what you gathered.</span>
+        <span id="ach-status-true-believer" class="ach-status">Locked</span>
       </div>
       <div class="ach-row">
-        <hudtext class="ach-title">Brace for Impact</hudtext>
-        <span class="ach-desc">Reach the Fate Events.</span>
-        <span id="ach-status-brace-for-impact" class="ach-status">Locked</span>
+        <hudtext class="ach-title">Perfect Balance</hudtext>
+        <span class="ach-desc">Finish Pebbles with all three types gathered in close to even measure.</span>
+        <span id="ach-status-perfect-balance" class="ach-status">Locked</span>
       </div>
       <div class="ach-row">
-        <hudtext class="ach-title">Among the Stars</hudtext>
-        <span class="ach-desc">Reach the Finale.</span>
-        <span id="ach-status-among-the-stars" class="ach-status">Locked</span>
+        <hudtext class="ach-title">Soul Collector</hudtext>
+        <span class="ach-desc">Gather every detached soul in the graveyard.</span>
+        <span id="ach-status-soul-collector" class="ach-status">Locked</span>
       </div>
       <div class="ach-row">
-        <hudtext class="ach-title">Full Circle</hudtext>
-        <span class="ach-desc">Complete one full loop of the game.</span>
-        <span id="ach-status-full-circle" class="ach-status">Locked</span>
+        <hudtext class="ach-title">Green Thumb</hudtext>
+        <span class="ach-desc">Gather every seed offered to you.</span>
+        <span id="ach-status-green-thumb" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Faced the Mob</hudtext>
+        <span class="ach-desc">Face every last member of the angry, grieving crowd.</span>
+        <span id="ach-status-faced-the-mob" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Eternal Light</hudtext>
+        <span class="ach-desc">Choose to orbit the planet forever.</span>
+        <span id="ach-status-eternal-light" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Into the Unknown</hudtext>
+        <span class="ach-desc">Choose to launch onward into the universe.</span>
+        <span id="ach-status-into-the-unknown" class="ach-status">Locked</span>
+      </div>
+      <div class="ach-row">
+        <hudtext class="ach-title">Complete Collection</hudtext>
+        <span class="ach-desc">Experience every combination of comet type and final choice.</span>
+        <span id="ach-status-complete-collection" class="ach-status">Locked</span>
       </div>
     </div>
-    <div id="btn-back" class="dwell-button">
-      <div id="fill-back" class="dwell-fill"></div>
-      <hudtext class="dwell-label">Back</hudtext>
-    </div>
+  </div>
+  <div id="page-settings" class="page-settings">
+    <hudtext class="title">Settings</hudtext>
   </div>
 </div>

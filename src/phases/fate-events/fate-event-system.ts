@@ -1,18 +1,21 @@
-import { createSystem, Vector3 } from '@iwsdk/core';
+import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { GatherableField, GatherHandInput } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { AchievementSystem } from '../../core/achievement-system.js';
 import { getGlobals } from '../../core/globals.js';
 import {
   farewellMessage,
   FateDialogueEntry,
   fateEventsIntroMessage,
   getFateDialogue,
+  GAS_CHARACTER_NAMES,
   NamedFigureArc,
   NAMED_FIGURES_BY_TYPE,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { scatterOnSphereCap } from '../../vfx/geometry/sphere-scatter.js';
+import { DwellRiseSynth } from '../../vfx/audio/dwell-rise-synth.js';
+import { scatterOnSphereCap, scatterOnSphereCapEven, scatterSemicircleAroundPoint } from '../../vfx/geometry/sphere-scatter.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { CaptureEvent } from '../stardust/stardust-system.js';
@@ -24,7 +27,7 @@ const ORIGIN = new Vector3(0, 0, 0);
 // it like a low round table/altar. That put the whole populated cap out of
 // the player's forward view unless they tilted their head down, and (worse)
 // the King specifically — see earth-situations-vfx-system.ts's
-// _buildKingTower — landed at a RANDOM point inside that cap rather than a
+// _buildKing — landed at a RANDOM point inside that cap rather than a
 // fixed one, so he could end up anywhere within CAP_HALF_ANGLE of the
 // center, easily missed entirely. A first pass moved this all the way to
 // near-side (mostly +Z, toward the player, same convention
@@ -32,23 +35,68 @@ const ORIGIN = new Vector3(0, 0, 0);
 // reading as too close/off to the side. Split the difference: still tilted
 // toward the player, but with more elevation than depth now, landing
 // between the old straight-up and the too-far near-side attempt. Every
-// populated cap (people here, decorations/graveyard/king tower in
+// populated cap (people here, decorations/graveyard/king in
 // earth-situations-vfx-system.ts, which imports this same constant so every
 // scattered element lands on the same region) scatters around this same
 // direction from PLANET_CENTER.
-export const PLANET_CENTER: [number, number, number] = [0, -0.35, -1.9];
+// Z brought in from -1.9 — the populated cap (CROWD_CAP_DIRECTION's region,
+// where every person/king/collectible actually sits) was ~1.9m from the
+// player even after play() resolves this against wherever the player
+// actually is (see _resolvedPlanetCenter's own comment), too far to
+// comfortably reach with the comet for a non-walking/seated player. -1.6
+// still leaves the sphere's single closest point (off in the
+// KING_EXCLUSION-side direction, nowhere near where anything is actually
+// rendered) comfortably outside camera near-clip range.
+export const PLANET_CENTER: [number, number, number] = [0, -0.35, -1.6];
 export const PLANET_RADIUS = 1.4;
 export const CROWD_CAP_DIRECTION = new Vector3(0, 0.95, 0.2).normalize();
 export const N_PEOPLE = 10;
-// Bumped from 28 for the old straight-up cap on a much closer sphere; kept
-// as-is now that the cap points near-side instead — still wide enough to
-// avoid reading as one tight clump.
-const CAP_HALF_ANGLE = (34 * Math.PI) / 180;
+// Bumped from 28 for the old straight-up cap on a much closer sphere, then
+// again from 34 — with PROXIMITY_RADIUS(0.45) generous enough to trigger a
+// visit on a graze, a tight cap let one comet swing/walk sweep past several
+// people at once; a wider disc spaces the crowd out enough that a single
+// continuous pass is more likely to only catch one person at a time (this
+// now works together with the dwell gate above, not instead of it).
+// Exported so PlanetSeedingVfxSystem can keep plants from growing under this
+// same footprint (see PLANT_EXCLUSION_HALF_ANGLE just below) and
+// earth-situations-vfx-system.ts can spread its own decorations a bit wider
+// around it.
+export const CAP_HALF_ANGLE = (42 * Math.PI) / 180;
+// A little wider than the people cap itself — plants have their own base
+// radius, so a plant whose CENTER sits just outside CAP_HALF_ANGLE could
+// still visually brush against a person standing right at the cap's edge.
+// See planet-seeding-vfx-system.ts's _applyHumanZoneExclusion.
+export const PLANT_EXCLUSION_HALF_ANGLE = CAP_HALF_ANGLE + (6 * Math.PI) / 180;
+// Throne only (see FateEventSystem.play()'s isThrone branch) — the crowd
+// forms a single ring at this fixed angular radius from the King (see
+// scatterSemicircleAroundPoint) instead of filling the whole cap's disc,
+// so they read as gathered AROUND him rather than scattered in front of
+// him. Comfortably inside (KING_EXCLUSION_HALF_ANGLE, CAP_HALF_ANGLE).
+// Bumped from 26 alongside CAP_HALF_ANGLE's own widening above — Gas's
+// Collect beat win condition is purely "visit everyone" (see
+// VISIT_FRACTION_TO_COMPLETE), so its crowd benefits the most from more
+// room between neighbors.
+const THRONE_ARC_ANGLE = (32 * Math.PI) / 180;
 // Bumped from 0.3 — easier to trigger just by swinging/walking the comet
 // through the crowd instead of needing to land precisely on someone.
 const PROXIMITY_RADIUS = 0.45;
+// How long a person takes to turn from their base outward-facing pose to
+// look at the player once a hand is near (TURN_IN_SECONDS), and to turn
+// back once it leaves (TURN_OUT_SECONDS, a little slower — reads as
+// settling back rather than snapping) — see _turnAmount/getTurnAmount().
+// _visited below is now gated on this actually reaching 1 rather than
+// firing the instant a hand grazes past (see PROXIMITY_RADIUS's own
+// "easier to trigger" comment above) — a comet just swinging/walking
+// through the crowd in one continuous pass no longer silently visits
+// everyone it happened to cross, since nobody has time to actually turn
+// and notice before it's already moved on. Bumped from 0.9 — that was too
+// quick to actually register as a dwell; now paired with its own rising
+// tone (see DwellRiseSynth/_updateDwellRiseAudio) so the wait reads as
+// "something building," same idiom as OrbitalLaunchSystem's CHARGE_SECONDS.
+const TURN_IN_SECONDS = 1.8;
+const TURN_OUT_SECONDS = 1.3;
 // Keeps the ambient crowd off the exact center point earth-situations-vfx-
-// system.ts's _buildKingTower reserves for the King (see its own comment) —
+// system.ts's _buildKing reserves for the King (see its own comment) —
 // an annulus around him rather than a filled cap, so "people behind/to the
 // side of him" holds structurally instead of by the luck of a random draw.
 const KING_EXCLUSION_HALF_ANGLE = (8 * Math.PI) / 180;
@@ -58,7 +106,7 @@ const KING_EXCLUSION_HALF_ANGLE = (8 * Math.PI) / 180;
 // text with the old text having no chance to be read in full. See
 // getBubbleOpacity()/update()'s _lineTimer advance below.
 const BUBBLE_FADE_IN_SECONDS = 0.4;
-const BUBBLE_HOLD_SECONDS = 2.8;
+const BUBBLE_HOLD_SECONDS = 5.6; // doubled from 2.8 — stays readable longer before fading
 const BUBBLE_FADE_OUT_SECONDS = 0.4;
 const BUBBLE_CYCLE_SECONDS = BUBBLE_FADE_IN_SECONDS + BUBBLE_HOLD_SECONDS + BUBBLE_FADE_OUT_SECONDS;
 // Grace window before "near" -> "far" actually clears state — originally
@@ -95,6 +143,13 @@ const VISIT_FRACTION_TO_COMPLETE = 1.0;
 // ambient crowd's dialogue — see NAMED_FIGURES_BY_TYPE. Exported so
 // FateEventVfxSystem uses the same indices for its gold-rim material swap.
 export const NAMED_FIGURE_COUNT = 2;
+// Gas/Throne only — every visible person there is an equally "named" figure
+// (gold rim, "talk to me" marker, individual namedLine — see
+// notification-copy.ts's GAS_CHARACTER_NAMES), not just the two featured
+// ones Soul/Organic still single out. See getNamedCount(), the live
+// per-playthrough switch FateEventVfxSystem reads instead of the plain
+// NAMED_FIGURE_COUNT constant above.
+export const GAS_NAMED_COUNT = VISIBLE_PEOPLE_BY_TYPE[VOLATILE_GASSES_TYPE];
 // Reuses named figure 0's bubble for Beat 3's single scripted explainer line
 // (see getExplainerText/getExplainerOpacity) — bypassing proximity and the
 // ambient dialogue pool entirely for that one beat.
@@ -103,7 +158,7 @@ export const EXPLAIN_FIGURE_INDEX = 0;
 // the current dialogue's own pairedLine (see getDialogueLinesFor) instead of
 // a scripted arc, so every path has a second reliably-findable talker
 // alongside EXPLAIN_FIGURE_INDEX (previously this was a random, often-missed
-// AMBIENT figure, and Dog-only — see git history).
+// AMBIENT figure, and Shepherd-only — see git history).
 export const PAIRED_FIGURE_INDEX = NAMED_FIGURE_COUNT - 1;
 // Minimum accumulated near-time (see _namedDwell) before stop()'s farewell
 // message will name a figure at all — guards against firing for a player
@@ -128,6 +183,11 @@ const COLLECTIBLE_SURFACE_OFFSET_MAX = 0.06;
 // ghost/seed for it to start pulling in.
 const COLLECTIBLE_ATTRACT_RADIUS = 0.08;
 const COLLECTIBLE_CAPTURE_DISTANCE = 0.03;
+// Soul's ghosts are much bigger than seeds and their mesh origin sits at the
+// base of the tail, so a hand touching a ghost's body could still be outside
+// the seed-sized radius above — some only latched on after lingering.
+const GHOST_ATTRACT_RADIUS = 0.12;
+const GHOST_CAPTURE_DISTANCE = 0.05;
 const COLLECTIBLE_ATTRACT_RATE = 3.0;
 const COLLECTIBLE_CAPTURED_AGE_DECAY = 3.0;
 const COLLECTIBLE_CAPTURED_SPREAD_BASE = 0.01;
@@ -145,6 +205,10 @@ const COLLECTIBLE_CAPTURED_DEPTH_RATIO = 1.4;
 // isn't tracked here at all — it's the existing crown-rise cinematic at the
 // tail end of Phase.Constellations (see ConstellationsSystem/CrownRise),
 // deliberately left where it is rather than relocated into this phase.
+// Gas/Throne skips Explain entirely (see update()'s Ambient->Collect branch)
+// — every person there is already an equally "named" figure with their own
+// line (see GAS_NAMED_COUNT), so there's no single explainer to wait on
+// before skull-gathering can start.
 export enum FateBeat {
   Zoom,
   Ambient,
@@ -157,7 +221,7 @@ const AMBIENT_BEAT_SECONDS = 10;
 // Longer hold than the ambient crowd's own BUBBLE_HOLD_SECONDS — this is the
 // one line every player must actually read, not a chatter line that's fine
 // to miss.
-const EXPLAIN_HOLD_SECONDS = 5;
+const EXPLAIN_HOLD_SECONDS = 10; // doubled from 5, matching BUBBLE_HOLD_SECONDS's own doubling
 // How long the bubble's own fade-in/hold/fade-out cycle takes ONCE
 // triggered (see _updateExplain/_explainTriggered) — not a fixed beat
 // duration from entry anymore, since the beat now waits for the player to
@@ -197,12 +261,29 @@ export class FateEventSystem extends createSystem({
   private _surfacePositions!: Float32Array;
   private _normals!: Float32Array;
 
+  // PLANET_CENTER shifted by however far the player has drifted from world
+  // origin (see _getPlayerDriftXZ()/play()) — what getPlanetCenter()
+  // actually returns once play() has run at least once; defaults to the
+  // raw constant before then, same "harmless placeholder" idiom
+  // _buildSurfaceLayout(false) uses in init().
+  private _resolvedPlanetCenter: [number, number, number] = PLANET_CENTER;
+
   private _active!: Uint8Array;
   private _awayTimer!: Float32Array;
   private _lineIndex!: Uint8Array;
   private _lineTimer!: Float32Array;
   private _visited!: Uint8Array;
   private _visitedCount = 0;
+  // 0-1 per person — eases toward 1 while _active[i] (turning to face the
+  // player, see TURN_IN_SECONDS) and back toward 0 once inactive
+  // (TURN_OUT_SECONDS). Read by FateEventVfxSystem to animate each Collect-
+  // beat person's orientation; _visited is now gated on this actually
+  // reaching 1 (see _updateCollect) rather than firing the instant a hand
+  // grazes past.
+  private _turnAmount!: Float32Array;
+  // Which person (if any) the dwell-rise tone is currently voicing — see
+  // _updateDwellRiseAudio. -1 when nobody is currently mid-turn.
+  private _risingPersonIndex = -1;
   // Random per-play rotation into this._dialogue.entries — see
   // getDialogueLinesFor(). Guarantees every ambient crowd member gets a
   // distinct entry this playthrough (no two people say the same thing) and,
@@ -217,6 +298,14 @@ export class FateEventSystem extends createSystem({
   // Accumulated near-time per named figure, reset each play() — read in
   // stop() to decide who (if anyone) gets the farewell message.
   private _namedDwell!: Float32Array;
+
+  // Own AudioListener, same reason every other generative-audio system in
+  // this codebase has one (see e.g. OrbitalLaunchSystem's own comment) —
+  // drives the dwell-rise tone (see _updateDwellRiseAudio/DwellRiseSynth).
+  private _audioListener!: AudioListener;
+  private _dwellRiseSynth!: DwellRiseSynth;
+  private _scratchRisingPos!: Vector3;
+  private _scratchCamPos!: Vector3;
 
   private _dialogue!: FateDialogueEntry;
   private _color!: [number, number, number];
@@ -252,54 +341,18 @@ export class FateEventSystem extends createSystem({
   init(): void {
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
 
-    const center = new Vector3(...PLANET_CENTER);
-    const { positions: rawPositions, normals: rawNormals } = scatterOnSphereCap(
-      N_PEOPLE,
-      center,
-      PLANET_RADIUS,
-      CROWD_CAP_DIRECTION,
-      CAP_HALF_ANGLE,
-      KING_EXCLUSION_HALF_ANGLE,
-    );
-    // Re-sort the raw scatter by closeness to the player before assigning
-    // indices — CROWD_CAP_DIRECTION already points from PLANET_CENTER toward
-    // the player (see its own comment above), so the point whose normal has
-    // the highest dot product with it is the point on the sphere nearest the
-    // player, not just an arbitrary draw from within the cap. EXPLAIN_FIGURE_
-    // INDEX/PAIRED_FIGURE_INDEX (the only two figures with real dialogue) are
-    // the first two slots, so this puts them at the two closest points —
-    // always easy to walk straight up to instead of possibly landing buried
-    // at the back of the crowd. Bonus: since maxVisible in
-    // FateEventVfxSystem's update() also just takes the lowest indices, the
-    // whole visible crowd now skews toward whichever people are actually
-    // closest to the player too, not only the named two.
-    const order = Array.from({ length: N_PEOPLE }, (_, i) => i);
-    const scratchDir = new Vector3();
-    const dotToPlayer = (i: number): number => {
-      scratchDir.set(rawNormals[i * 3], rawNormals[i * 3 + 1], rawNormals[i * 3 + 2]);
-      return scratchDir.dot(CROWD_CAP_DIRECTION);
-    };
-    order.sort((a, b) => dotToPlayer(b) - dotToPlayer(a));
-
-    const positions = new Float32Array(N_PEOPLE * 3);
-    const normals = new Float32Array(N_PEOPLE * 3);
-    for (let i = 0; i < N_PEOPLE; i++) {
-      const src = order[i];
-      positions[i * 3] = rawPositions[src * 3];
-      positions[i * 3 + 1] = rawPositions[src * 3 + 1];
-      positions[i * 3 + 2] = rawPositions[src * 3 + 2];
-      normals[i * 3] = rawNormals[src * 3];
-      normals[i * 3 + 1] = rawNormals[src * 3 + 1];
-      normals[i * 3 + 2] = rawNormals[src * 3 + 2];
-    }
-    this._surfacePositions = positions;
-    this._normals = normals;
+    // Real layout (Throne's semicircle vs. everyone else's cap) isn't known
+    // until play() (celestialSymbol is still unset at boot) — this is just a
+    // harmless placeholder so the arrays exist before then. See
+    // _buildSurfaceLayout's own comment.
+    this._buildSurfaceLayout(false);
 
     this._active = new Uint8Array(N_PEOPLE);
     this._awayTimer = new Float32Array(N_PEOPLE);
     this._lineIndex = new Uint8Array(N_PEOPLE);
     this._lineTimer = new Float32Array(N_PEOPLE);
     this._visited = new Uint8Array(N_PEOPLE);
+    this._turnAmount = new Float32Array(N_PEOPLE);
     this._namedDwell = new Float32Array(NAMED_FIGURE_COUNT);
 
     this._dialogue = getFateDialogue(null);
@@ -309,6 +362,13 @@ export class FateEventSystem extends createSystem({
     this._scratchHandPos = new Vector3();
     this._scratchHandVel = new Vector3();
     this._hand = { position: new Vector3(), speed: 0, seen: false };
+    this._scratchRisingPos = new Vector3();
+    this._scratchCamPos = new Vector3();
+
+    this._audioListener = new AudioListener();
+    this.player.head.add(this._audioListener);
+    this._dwellRiseSynth = new DwellRiseSynth();
+    this._dwellRiseSynth.build(this._audioListener, this.scene);
 
     // KING_EXCLUSION_HALF_ANGLE passed here too (previously omitted) — without
     // it a graveyard ghost or organic seed could land dead in the crowd cap's
@@ -332,8 +392,16 @@ export class FateEventSystem extends createSystem({
       CAP_HALF_ANGLE,
       KING_EXCLUSION_HALF_ANGLE,
     ).normals;
-    this._graveyardField = this._buildCollectibleField(this._graveyardNormals);
-    this._seedField = this._buildCollectibleField(this._seedNormals);
+    this._graveyardField = this._buildCollectibleField(
+      this._graveyardNormals,
+      GHOST_ATTRACT_RADIUS,
+      GHOST_CAPTURE_DISTANCE,
+    );
+    this._seedField = this._buildCollectibleField(
+      this._seedNormals,
+      COLLECTIBLE_ATTRACT_RADIUS,
+      COLLECTIBLE_CAPTURE_DISTANCE,
+    );
   }
 
   // Shared constructor for both Beat-4 collectible fields — spawnPoint maps
@@ -341,15 +409,15 @@ export class FateEventSystem extends createSystem({
   // GatherableFieldParams' own {dir, radiusT, type} contract), so every
   // particle starts just above its own grave/plant's surface point rather
   // than a generic random shell.
-  private _buildCollectibleField(normals: Float32Array): GatherableField {
+  private _buildCollectibleField(normals: Float32Array, attractRadius: number, captureDistance: number): GatherableField {
     const dir = new Vector3();
     return new GatherableField({
       count: COLLECTIBLE_COUNT,
       spawnCenter: PLANET_CENTER,
       spawnRadiusMin: PLANET_RADIUS + COLLECTIBLE_SURFACE_OFFSET_MIN,
       spawnRadiusMax: PLANET_RADIUS + COLLECTIBLE_SURFACE_OFFSET_MAX,
-      attractRadius: COLLECTIBLE_ATTRACT_RADIUS,
-      captureDistance: COLLECTIBLE_CAPTURE_DISTANCE,
+      attractRadius,
+      captureDistance,
       attractRate: COLLECTIBLE_ATTRACT_RATE,
       capturedAgeDecay: COLLECTIBLE_CAPTURED_AGE_DECAY,
       capturedSpreadBase: COLLECTIBLE_CAPTURED_SPREAD_BASE,
@@ -365,14 +433,120 @@ export class FateEventSystem extends createSystem({
     });
   }
 
+  // How far the player has actually wandered from world origin (XZ only) by
+  // the time Fate Events begins — PLANET_CENTER/the whole crowd-cap layout
+  // is authored assuming the player stands at X=0,Z=0 (see this file's own
+  // CROWD_CAP_DIRECTION comment), but room-scale movement during
+  // Constellations' star-touching can easily carry them elsewhere. Used to
+  // shift where the planet/crowd/decorations actually land (see play()'s
+  // own comment) instead of teleporting the player's camera to match the
+  // authored layout — the camera never moves; everything that tracks the
+  // planet's live position grows in already offset to land in front of
+  // wherever the player actually is. Yaw/facing is deliberately NOT
+  // corrected, only position — keeping this a straightforward "move the
+  // content toward you" rather than also having to re-derive every
+  // direction-based normal in this file against a rotated frame.
+  private _getPlayerDriftXZ(): { x: number; z: number } {
+    this.camera.getWorldPosition(this._scratchCamPos);
+    return { x: this._scratchCamPos.x, z: this._scratchCamPos.z };
+  }
+
+  // Throne's crowd forms a semicircle around the King instead of filling
+  // the cap's whole disc (see scatterSemicircleAroundPoint) — every other
+  // symbol keeps the general, evenly-spaced cap layout (scatterOnSphereCapEven,
+  // which — unlike the old random scatterOnSphereCap this replaced — never
+  // lands two people close enough to overlap, and is a pure function of the
+  // params below rather than a fresh random draw each call, so it lands in
+  // the exact same spots every time this is called). Called once from
+  // init() (celestialSymbol not known yet — see its own comment there) and
+  // again from play() once it is, so a fresh loop can pick a different
+  // branch than a previous one (e.g. replaying via the dev-menu phase jump).
+  private _buildSurfaceLayout(isThrone: boolean): void {
+    const center = new Vector3(...PLANET_CENTER);
+    if (isThrone) {
+      // Gas only ever actually SHOWS VISIBLE_PEOPLE_BY_TYPE[VOLATILE_GASSES_
+      // TYPE] (6) of these N_PEOPLE (10) slots (see FateEventVfxSystem's own
+      // maxVisible) — scattering all 10 across the semicircle and then only
+      // rendering the first 6 left the back half of the arc almost empty
+      // (indices 0/1 claim the two open ends, 2-9 sweep the interior in
+      // order, so hiding 6-9 cuts off before the sweep ever reaches the far
+      // side), crowding the visible 6 into one side instead of spacing them
+      // evenly around the King. Scatter exactly the visible count instead,
+      // then pad the remaining (never-rendered, but still read every frame —
+      // see FateEventVfxSystem._updateLivePositions) slots with copies of
+      // the last real one.
+      const visibleCount = VISIBLE_PEOPLE_BY_TYPE[VOLATILE_GASSES_TYPE];
+      const { positions, normals } = scatterSemicircleAroundPoint(
+        visibleCount,
+        center,
+        PLANET_RADIUS,
+        CROWD_CAP_DIRECTION,
+        THRONE_ARC_ANGLE,
+      );
+      this._surfacePositions = new Float32Array(N_PEOPLE * 3);
+      this._normals = new Float32Array(N_PEOPLE * 3);
+      this._surfacePositions.set(positions);
+      this._normals.set(normals);
+      for (let i = visibleCount; i < N_PEOPLE; i++) {
+        this._surfacePositions[i * 3] = positions[0];
+        this._surfacePositions[i * 3 + 1] = positions[1];
+        this._surfacePositions[i * 3 + 2] = positions[2];
+        this._normals[i * 3] = normals[0];
+        this._normals[i * 3 + 1] = normals[1];
+        this._normals[i * 3 + 2] = normals[2];
+      }
+      return;
+    }
+    const { positions, normals } = scatterOnSphereCapEven(
+      N_PEOPLE,
+      center,
+      PLANET_RADIUS,
+      CROWD_CAP_DIRECTION,
+      CAP_HALF_ANGLE,
+      KING_EXCLUSION_HALF_ANGLE,
+    );
+    this._surfacePositions = positions;
+    this._normals = normals;
+  }
+
   // celestialSymbol/dominantPebbleType were already set (Constellations/
   // Pebbles) well before this phase can ever be reached — safe to read
   // fresh here, same pattern ConstellationsSystem.play() uses.
   play(): void {
     super.play();
+    // PLANET_CENTER/the whole crowd-cap layout below is authored assuming
+    // the player stands at world X=0,Z=0 facing -Z (see this file's own
+    // CROWD_CAP_DIRECTION comment on how carefully that cap placement was
+    // tuned for reach) — but by the time a real playthrough reaches here,
+    // room-scale movement in earlier phases (Constellations' star-touching
+    // especially) can easily have carried the player well away from world
+    // origin, leaving that tuning reachable only by accident. Rather than
+    // instantly teleporting the player's camera to correct for that (a hard
+    // cut that got a lot more noticeable once the planet was brought closer
+    // — see PLANET_CENTER's own comment), the drift is folded into where
+    // the content itself ends up: _resolvedPlanetCenter below is
+    // PLANET_CENTER shifted by the player's actual position, and Leg B (see
+    // startFateEventsTransition() further down) grows/recedes toward THAT
+    // instead of the raw constant — landing in front of wherever the player
+    // actually is, with the camera never moving at all. Everything that
+    // already tracks the planet's LIVE position (crowd/decorations/King,
+    // via getLivePlanetPosition()/getLivePlanetRadius()) follows
+    // automatically; getPlanetCenter() and the two GatherableFields below
+    // are updated explicitly since they don't.
+    const drift = this._getPlayerDriftXZ();
+    this._resolvedPlanetCenter = [PLANET_CENTER[0] + drift.x, PLANET_CENTER[1], PLANET_CENTER[2] + drift.z];
     const globals = getGlobals(this.world);
     const dominantType = globals.dominantPebbleType.peek();
-    this._dialogue = getFateDialogue(globals.celestialSymbol.peek());
+    const celestialSymbol = globals.celestialSymbol.peek();
+    // Keyed off dominantPebbleType, not celestialSymbol — the King (and so
+    // the semicircle gathered around him) is fundamentally a Gas-dominant
+    // mechanic (see VOLATILE_GASSES_TYPE elsewhere in this file/
+    // earth-situations-vfx-system.ts), and unlike celestialSymbol this is
+    // already set the instant Pebbles ends — including on a dev-menu jump
+    // straight to Fate Events, which never sets celestialSymbol at all (see
+    // getFateDialogue's own null-fallback comment).
+    this._buildSurfaceLayout(dominantType === VOLATILE_GASSES_TYPE);
+    this._dialogue = getFateDialogue(celestialSymbol);
     this._namedArcs = NAMED_FIGURES_BY_TYPE[dominantType];
     this._color = this._dialogue.color ?? PEBBLE_TYPES[dominantType].color;
     this._showFire = dominantType === VOLATILE_GASSES_TYPE;
@@ -389,11 +563,24 @@ export class FateEventSystem extends createSystem({
     this._lineTimer.fill(0);
     this._visited.fill(0);
     this._visitedCount = 0;
+    this._turnAmount.fill(0);
+    this._dwellRiseSynth.stop();
+    this._risingPersonIndex = -1;
     this._namedDwell.fill(0);
     this._explainTriggered = false;
     this._explainElapsed = 0;
     this._dialogueOffset = Math.floor(Math.random() * this._dialogue.entries.length);
 
+    // Beat 4's collectible fields were built once at init() (before this
+    // playthrough's drift could possibly be known) using the raw,
+    // unshifted PLANET_CENTER — recenterTo() nudges their already-baked
+    // spawn shell to _resolvedPlanetCenter before reset() copies it into
+    // the live positions array, so ghosts/seeds spawn hovering over
+    // wherever the planet is actually settling this time, not the old
+    // fixed spot. Idempotent, so replaying this phase repeatedly never
+    // accumulates drift across loops.
+    this._graveyardField.recenterTo(...this._resolvedPlanetCenter);
+    this._seedField.recenterTo(...this._resolvedPlanetCenter);
     this._graveyardField.reset();
     this._seedField.reset();
     this._collectCaptureEvents.length = 0;
@@ -402,14 +589,16 @@ export class FateEventSystem extends createSystem({
     this._beatTimer = 0;
 
     // Primary trigger for Leg B — the final grow/zoom-in from wherever
-    // Constellations' spin transition (Leg A) left the planet, to Fate
-    // Events' true PLANET_CENTER/PLANET_RADIUS (see planet-seeding-vfx-
-    // system.ts's startFateEventsTransition, which syncs Leg B's start state
-    // from Leg A before starting it). Also doubles as a dev-menu-skip safety
-    // net: a jump straight to Fate Events (skipping both Seeding and
+    // Constellations' spin transition (Leg A) left the planet, to
+    // _resolvedPlanetCenter/Fate Events' PLANET_RADIUS (see planet-seeding-
+    // vfx-system.ts's startFateEventsTransition, which syncs Leg B's start
+    // state from Leg A before starting it, and PlanetFateTransition.start(),
+    // which now derives its end state from the drift passed in here rather
+    // than the raw constant). Also doubles as a dev-menu-skip safety net: a
+    // jump straight to Fate Events (skipping both Seeding and
     // Constellations) still works, since Leg A always has a sane default
     // position/radius even if it never ran.
-    this._planetSeeding.startFateEventsTransition();
+    this._planetSeeding.startFateEventsTransition(drift.x, drift.z);
   }
 
   // The "branching" payoff: if the player lingered near one of the two
@@ -435,7 +624,15 @@ export class FateEventSystem extends createSystem({
       return;
     }
     if (this._beat === FateBeat.Ambient) {
-      if (this._beatTimer >= AMBIENT_BEAT_SECONDS) this._enterBeat(FateBeat.Explain);
+      if (this._beatTimer >= AMBIENT_BEAT_SECONDS) {
+        // Gas skips the scripted Explain beat entirely — every person is
+        // already an equally "named," gold-rimmed, must-talk-to figure (see
+        // GAS_NAMED_COUNT), so there's no single explainer to wait on before
+        // Collect (skull-gathering) can start. Soul/Organic still go through
+        // Explain as before.
+        const dominant = getGlobals(this.world).dominantPebbleType.peek();
+        this._enterBeat(dominant === VOLATILE_GASSES_TYPE ? FateBeat.Collect : FateBeat.Explain);
+      }
       return;
     }
     if (this._beat === FateBeat.Explain) {
@@ -451,6 +648,21 @@ export class FateEventSystem extends createSystem({
     // playing past this phase ending, see PAYOFF_HOLD_SECONDS's own
     // comment); this system's only job here is the hold-then-advance timer.
     if (this._beatTimer >= PAYOFF_HOLD_SECONDS) {
+      // Beat 4's win condition already requires the FULL collection (every
+      // ghost/seed/person — see _updateCollect's collectDone check) to ever
+      // reach Payoff at all, so this always fires on a normal completion —
+      // it's a per-type flavor of "you finished Fate Events," not a bonus
+      // threshold. Only one of the three names any given run, since only one
+      // dominant type is ever active; seeing all three means playing through
+      // with each type across separate loops.
+      const dominant = getGlobals(this.world).dominantPebbleType.peek();
+      const id =
+        dominant === SOUL_DUST_TYPE
+          ? 'soul-collector'
+          : dominant === ORGANIC_MATTER_TYPE
+            ? 'green-thumb'
+            : 'faced-the-mob';
+      this.world.getSystem(AchievementSystem)?.unlock(id);
       getGlobals(this.world).phaseComplete.value = true;
     }
   }
@@ -520,9 +732,15 @@ export class FateEventSystem extends createSystem({
         const near = dx * dx + dy * dy + dz * dz <= PROXIMITY_RADIUS * PROXIMITY_RADIUS;
 
         if (near) {
-          if (!this._visited[i]) {
-            this._visited[i] = 1;
-            this._visitedCount++;
+          // _visited no longer flips here on first contact — see the
+          // _turnAmount dwell pass below, right after this hand loop.
+          // Re-approaching after leaving (active was 0) replays the whole
+          // dialogue sequence from its first line, instead of staying
+          // frozen wherever isLastLine last left it — so a bubble can be
+          // read again on a return visit, not just once ever.
+          if (!this._active[i]) {
+            this._lineIndex[i] = 0;
+            this._lineTimer[i] = 0;
           }
           this._active[i] = 1;
           this._awayTimer[i] = 0;
@@ -535,6 +753,26 @@ export class FateEventSystem extends createSystem({
       }
     }
 
+    // Turns each visible person toward/away from the player in step with
+    // _active[i] (see TURN_IN_SECONDS/TURN_OUT_SECONDS) — FateEventVfxSystem
+    // reads _turnAmount to actually animate the orientation. _visited only
+    // flips once a person has fully turned to face the player, not on first
+    // contact — see PROXIMITY_RADIUS's own comment on why that used to make
+    // a single sweep through the crowd silently visit everyone it crossed.
+    for (let i = 0; i < visibleCount; i++) {
+      const target = this._active[i] ? 1 : 0;
+      if (this._turnAmount[i] < target) {
+        this._turnAmount[i] = Math.min(target, this._turnAmount[i] + delta / TURN_IN_SECONDS);
+      } else if (this._turnAmount[i] > target) {
+        this._turnAmount[i] = Math.max(target, this._turnAmount[i] - delta / TURN_OUT_SECONDS);
+      }
+      if (!this._visited[i] && this._turnAmount[i] >= 1) {
+        this._visited[i] = 1;
+        this._visitedCount++;
+      }
+    }
+    this._updateDwellRiseAudio(visibleCount);
+
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
     if (dominant === SOUL_DUST_TYPE) this._graveyardField.step(this._hand, delta);
     else if (dominant === ORGANIC_MATTER_TYPE) this._seedField.step(this._hand, delta);
@@ -546,6 +784,14 @@ export class FateEventSystem extends createSystem({
     for (let i = 0; i < visibleCount; i++) {
       if (!this._active[i]) continue;
       if (i < NAMED_FIGURE_COUNT) this._namedDwell[i] += delta;
+      // Bubble/dialogue only starts once the person has actually finished
+      // turning to face the player (_turnAmount reaching 1 — see
+      // TURN_IN_SECONDS), same "not on first contact" reasoning _visited
+      // above already follows — without this, _lineTimer started advancing
+      // (and the bubble started fading in) the instant proximity was
+      // detected, popping up before the person had even turned toward the
+      // player instead of reading as their reaction to actually noticing.
+      if (this._turnAmount[i] < 1) continue;
       const lineCount = this.getDialogueLinesFor(i).length;
       const isLastLine = this._lineIndex[i] >= lineCount - 1;
 
@@ -572,7 +818,49 @@ export class FateEventSystem extends createSystem({
     if (collectDone) this._enterBeat(FateBeat.Payoff);
   }
 
+  // Drives DwellRiseSynth's single shared voice — whoever is currently
+  // furthest into their own turn-in (active, but _turnAmount not yet at 1)
+  // is who it voices, same "one voice, pick the most relevant candidate"
+  // idiom as OrbitalLaunchSystem's own charge tone (only one zone can
+  // charge there too). Silent whenever nobody is currently mid-turn.
+  private _updateDwellRiseAudio(visibleCount: number): void {
+    let best = -1;
+    let bestAmount = -1;
+    for (let i = 0; i < visibleCount; i++) {
+      if (this._active[i] && this._turnAmount[i] < 1 && this._turnAmount[i] > bestAmount) {
+        bestAmount = this._turnAmount[i];
+        best = i;
+      }
+    }
+
+    if (best < 0) {
+      if (this._risingPersonIndex >= 0) {
+        this._dwellRiseSynth.stop();
+        this._risingPersonIndex = -1;
+      }
+      return;
+    }
+
+    this._scratchRisingPos.set(
+      this._surfacePositions[best * 3],
+      this._surfacePositions[best * 3 + 1],
+      this._surfacePositions[best * 3 + 2],
+    );
+    if (this._risingPersonIndex !== best) {
+      this._risingPersonIndex = best;
+      this._dwellRiseSynth.start(this._scratchRisingPos);
+    }
+    this._dwellRiseSynth.update(bestAmount, this._scratchRisingPos);
+  }
+
   private _enterBeat(beat: FateBeat): void {
+    // Leaving Collect (the only beat _updateDwellRiseAudio ever runs in) —
+    // stop it explicitly rather than leaving a voice ringing if this fires
+    // while someone happened to still be mid-turn.
+    if (this._beat === FateBeat.Collect && beat !== FateBeat.Collect) {
+      this._dwellRiseSynth.stop();
+      this._risingPersonIndex = -1;
+    }
     this._beat = beat;
     this._beatTimer = 0;
   }
@@ -585,8 +873,12 @@ export class FateEventSystem extends createSystem({
   getBeatElapsed(): number {
     return this._beatTimer;
   }
+  // PLANET_CENTER shifted by this playthrough's player drift (see
+  // _resolvedPlanetCenter's own comment) — the fire ring (fate-event-vfx-
+  // system.ts's own _buildFire) is the sole consumer, and it's gated to
+  // only appear after Leg B has fully settled there anyway.
   getPlanetCenter(): [number, number, number] {
-    return PLANET_CENTER;
+    return this._resolvedPlanetCenter;
   }
   getPlanetRadius(): number {
     return PLANET_RADIUS;
@@ -631,6 +923,13 @@ export class FateEventSystem extends createSystem({
   getActiveMask(): Uint8Array {
     return this._active;
   }
+  // 0-1 turn-toward-player progress per person — see TURN_IN_SECONDS/
+  // TURN_OUT_SECONDS's own comment. FateEventVfxSystem reads this to blend
+  // each Collect-beat person's orientation between their base outward-facing
+  // pose and facing the player.
+  getTurnAmount(i: number): number {
+    return this._turnAmount[i];
+  }
   // Gas's Beat 4 — FateEventVfxSystem edge-detects a person's 0->1 flip here
   // to trigger that person's skull-symbol flight into the comet's tail (see
   // its own _updateGasSymbols). Sticky (never clears once visited), unlike
@@ -641,18 +940,24 @@ export class FateEventSystem extends createSystem({
   getLineIndex(): Uint8Array {
     return this._lineIndex;
   }
-  // Per-person dialogue. EXPLAIN_FIGURE_INDEX gets its own NAMED_FIGURES_BY_
-  // TYPE arc (Beat 4, after Beat 3's separate explainerLine — see
-  // getExplainerText). PAIRED_FIGURE_INDEX — "the other standing person" —
-  // always gets this playthrough's own pairedLine instead, a fixed single
-  // line straight off this._dialogue (see notification-copy.ts's
-  // FATE_DIALOGUE) rather than a scripted arc, falling back to its own
-  // NAMED_FIGURES_BY_TYPE arc only if a dialogue entry is ever missing one.
-  // Every ambient crowd member (index >= NAMED_FIGURE_COUNT) gets ONE entry
-  // from this._dialogue.entries, unique to them for this playthrough — see
-  // _dialogueOffset's own comment — rather than everyone sharing/repeating
-  // the same shared lines.
+  // Per-person dialogue. A fixed line for one specific named crowd member
+  // (see notification-copy.ts's GAS_CHARACTER_NAMES/namedLines — GAS_
+  // CHARACTER_NAMES maps a person index to a character name, namedLines is
+  // keyed by that same name) takes priority over everything else: Throne
+  // populates one for EVERY visible person, so this always wins there and
+  // the featured-figure branches below are unreachable for that type.
+  // Soul/Organic don't populate namedLines, so for them this falls through
+  // to PAIRED_FIGURE_INDEX's fixed pairedLine, then EXPLAIN_FIGURE_INDEX/
+  // PAIRED_FIGURE_INDEX's own NAMED_FIGURES_BY_TYPE arc (Beat 4, after Beat
+  // 3's separate explainerLine — see getExplainerText), then finally the
+  // ambient pool: every remaining crowd member (index >= NAMED_FIGURE_COUNT)
+  // gets ONE entry from this._dialogue.entries, unique to them for this
+  // playthrough — see _dialogueOffset's own comment — rather than everyone
+  // sharing/repeating the same shared lines.
   getDialogueLinesFor(personIndex: number): readonly string[] {
+    const name = GAS_CHARACTER_NAMES[personIndex];
+    const namedLine = name ? this._dialogue.namedLines?.[name] : undefined;
+    if (namedLine) return [namedLine];
     if (personIndex === PAIRED_FIGURE_INDEX && this._dialogue.pairedLine) {
       return [this._dialogue.pairedLine];
     }
@@ -676,9 +981,11 @@ export class FateEventSystem extends createSystem({
     return 0;
   }
   // Beat 3's single forced line for EXPLAIN_FIGURE_INDEX — see
-  // getExplainerOpacity for its matching fade curve.
+  // getExplainerOpacity for its matching fade curve. Gas never reaches Beat
+  // 3 at all (see update()'s Ambient->Collect branch) so explainerLine is
+  // unset for Throne — the fallback here is just to satisfy the type.
   getExplainerText(): string {
-    return this._dialogue.explainerLine;
+    return this._dialogue.explainerLine ?? '';
   }
   getExplainerOpacity(): number {
     // Timed from _explainElapsed (since the player was first seen near
@@ -704,6 +1011,16 @@ export class FateEventSystem extends createSystem({
   }
   getBobFrequencyMultiplier(): number {
     return BOB_FREQUENCY_MULT_BY_TYPE[getGlobals(this.world).dominantPebbleType.peek()];
+  }
+  // Live (not cached) — how many of this playthrough's visible people count
+  // as "named" (gold rim + talk-to marker, see FateEventVfxSystem's own
+  // MAX_NAMED_FIGURES sizing): just the two featured figures for Soul/
+  // Organic, but literally everyone for Gas (see GAS_NAMED_COUNT's own
+  // comment).
+  getNamedCount(): number {
+    return getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE
+      ? GAS_NAMED_COUNT
+      : NAMED_FIGURE_COUNT;
   }
   // 0-1 overall Beat-4 "collect" progress for HandProgressHudSystem's wrist
   // bar — same per-type win metric _updateCollect's own collectDone check

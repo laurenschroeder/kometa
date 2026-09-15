@@ -48,6 +48,39 @@ export interface KometaGlobals {
   // mechanic. Reset to false in EarthSituationsVfxSystem._resetAll() on a
   // fresh Phase.Stardust loop.
   crownLanded: Signal<boolean>;
+  // Flips true the instant the King's death sequence (see
+  // EarthSituationsVfxSystem's _triggerKingDeath/_updatePendingCollapse) has
+  // fully played out — the topple pose AND the subsequent fall to the
+  // ground, not just the trigger. FateEventVfxSystem polls this to switch
+  // the ambient crowd onto their own "sitting disbelief" reaction (see its
+  // own SITTING_DISBELIEF_URL). Routed through globals rather than a direct
+  // import so fate-event-vfx-system.ts stays decoupled from the King's
+  // visual mechanic (also sidesteps registration order — EarthSituations
+  // VfxSystem registers AFTER FateEventVfxSystem, see index.ts). Reset to
+  // false in EarthSituationsVfxSystem._resetAll() on a fresh Phase.Stardust
+  // loop.
+  kingDeathComplete: Signal<boolean>;
+  // Settings-menu toggles (see StartMenuSystem's new Settings sub-page) —
+  // deliberately NOT persisted via achievement-store.ts's localStorage
+  // pattern, unlike unlockedAchievements. These reset to their defaults
+  // every boot like every other signal here: this experience is designed to
+  // be handed between strangers at a festival, so each new wearer should get
+  // the intended default (virtual sky, notifications on) rather than
+  // inheriting whatever the previous player happened to leave toggled — a
+  // passthrough setting silently carrying over between players would be the
+  // most jarring possible outcome of this feature.
+  //
+  // passthroughEnabled: true shows the real world via camera passthrough
+  // instead of VirtualSkySystem's own gradient/StarfieldSystem's stars (see
+  // both systems' own gamePhase-independent passthroughEnabled.subscribe).
+  passthroughEnabled: Signal<boolean>;
+  // notificationsEnabled: false mutes NotificationHudSystem's popup box (both
+  // phase-entry blurbs and achievement unlocks — see that system's own
+  // _beginShow comment) and AchievementSystem.unlock()'s chime, without
+  // touching the underlying achievement-unlock state or NotificationHudSystem's
+  // own timing/hasShown() bookkeeping, both of which other systems' gameplay
+  // logic still depends on regardless of mute state.
+  notificationsEnabled: Signal<boolean>;
 }
 
 export function bootstrapGlobals(world: World): KometaGlobals {
@@ -61,6 +94,9 @@ export function bootstrapGlobals(world: World): KometaGlobals {
   globals.celestialSymbol = signal(null);
   globals.pebbleTypeWeights = signal([1 / 3, 1 / 3, 1 / 3]);
   globals.crownLanded = signal(false);
+  globals.kingDeathComplete = signal(false);
+  globals.passthroughEnabled = signal(false);
+  globals.notificationsEnabled = signal(true);
   return globals;
 }
 

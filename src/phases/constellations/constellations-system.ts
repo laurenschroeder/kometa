@@ -7,7 +7,6 @@ import {
   celestialSymbolFlavorMessage,
   celestialSymbolMessage,
   constellationSpottedMessage,
-  kingRisingMessage,
   VISIT_STARS_TEXT,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
@@ -51,7 +50,7 @@ const TOUCH_RADIUS = 0.1;
 // (see FateEventSystem.play()). Which single constellation is available is
 // picked from whichever pebble type was dominant in Chapter 2 (globals.
 // dominantPebbleType) — each type maps to exactly one named constellation
-// now (Dog/Tree/Crown, see constellation-set.ts), so play()'s random slot
+// now (Shepherd/Harvest/Throne, see constellation-set.ts), so play()'s random slot
 // pick always lands on index 0. All 3 types' layouts are still generated
 // once here in init(), not just the active type's, because
 // ConstellationsVfxSystem is always-on (like PlanetSeedingVfxSystem) and
@@ -172,11 +171,12 @@ export class ConstellationsSystem extends createSystem({
     // jump straight to Phase.FateEvents (skipping Constellations' own play()
     // entirely) with a class picked via the dev menu's colored buttons —
     // without this, _activeType/_activeSlot stay stuck at their construction
-    // default (0, i.e. 'Dog'), so getActiveName() would report the wrong
-    // constellation regardless of which type was actually picked, breaking
-    // any name-gated Fate Events content (e.g. earth-situations-vfx-system.
-    // ts's showKing, which requires name === 'Crown'). _activeSlot is always
-    // 0 either way — every type has exactly one def, see CONSTELLATION_SETS.
+    // default (0, i.e. 'Shepherd'), so getActiveName() would report the
+    // wrong constellation regardless of which type was actually picked,
+    // breaking any name-gated Fate Events content (e.g. earth-situations-
+    // vfx-system.ts's showKing, which requires name === 'Throne').
+    // _activeSlot is always 0 either way — every type has exactly one def,
+    // see CONSTELLATION_SETS.
     this.cleanupFuncs.push(
       getGlobals(this.world).dominantPebbleType.subscribe((type) => {
         this._activeType = type;
@@ -274,15 +274,6 @@ export class ConstellationsSystem extends createSystem({
           notifications?.notifyNext(text, holdSeconds);
         }
 
-        // Crown only — a mid-trace foreshadowing beat the instant the 3rd
-        // star lands, well before the constellation (and the king's actual
-        // death vignette in Fate Events) completes. See kingRisingMessage's
-        // own comment.
-        if (def.name === 'Crown' && this._tracedCount[this._activeType][this._activeSlot] === 3) {
-          const { text, holdSeconds } = kingRisingMessage();
-          notifications?.notify(text, holdSeconds);
-        }
-
         if (this._tracedCount[this._activeType][this._activeSlot] >= def.starCount) {
           // Both notifications fire right here, together, the same instant
           // the trace finishes (and EarthSituationsVfxSystem's crown-rise
@@ -290,11 +281,15 @@ export class ConstellationsSystem extends createSystem({
           // waiting on the crown to actually land (see this file's own top
           // comment). notifyNext unshifts, so calling celestialSymbolMessage
           // FIRST then celestialSymbolFlavorMessage SECOND is what makes the
-          // flavor line end up displaying first, the reveal right after it.
+          // flavor line end up displaying first; celestialSymbolMessage's own
+          // delaySeconds is what then holds its reveal back a few seconds
+          // after the flavor line fades, rather than cutting straight into
+          // it, and it still stays up (see its own comment) through the rest
+          // of the crown-rise cinematic until crownLanded dismisses it below.
           getGlobals(this.world).celestialSymbol.value = def.name;
-          const { text, holdSeconds } = celestialSymbolMessage(def.name);
+          const { text, holdSeconds, delaySeconds } = celestialSymbolMessage(def.name);
           this._crownedMessageText = text;
-          notifications?.notifyNext(text, holdSeconds);
+          notifications?.notifyNext(text, holdSeconds, delaySeconds);
 
           const flavor = celestialSymbolFlavorMessage(def.name);
           if (flavor) notifications?.notifyNext(flavor.text, flavor.holdSeconds);
@@ -326,14 +321,6 @@ export class ConstellationsSystem extends createSystem({
   // gate ambient scene-setting during the spin, well before completion.
   getActiveName(): string {
     return CONSTELLATION_SETS[this._activeType][this._activeSlot].name;
-  }
-  // 0-1 live trace progress for the active constellation — read by
-  // EarthSituationsVfxSystem to grow the King's tower one star at a time
-  // (see its own _updateTowerHeight). Safe to call before play() ever runs
-  // (defaults to type/slot 0, starCount is always > 0).
-  getTracedFraction(): number {
-    const starCount = CONSTELLATION_SETS[this._activeType][this._activeSlot].starCount;
-    return this._tracedCount[this._activeType][this._activeSlot] / starCount;
   }
   isComplete(): boolean {
     return this._completed;

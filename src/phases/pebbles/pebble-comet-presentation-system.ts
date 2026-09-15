@@ -27,7 +27,6 @@ import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
-import { SoulPackFlight } from '../../vfx/particles/soul-pack-flight.js';
 import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import {
   kGasCloudMat,
@@ -64,12 +63,6 @@ const FACE_CYCLE_SPEED_THRESHOLD = 1.5;
 const TYPE_SOUL = 0;
 const TYPE_ORGANIC = 1;
 const TYPE_GAS = 2;
-
-// How many soul slots detach for Dog's completion payoff, and how much
-// bigger they read while flying/visiting — see startSoulPackVisit and
-// _placeInstancedPebbles's TYPE_SOUL branch.
-const SOUL_PACK_SIZE = 6;
-const SOUL_FLIGHT_SCALE_BOOST = 1.3;
 
 const N_ORGANIC_VARIANTS = 6;
 const kOrganicGeos: BufferGeometry[] = Array.from({ length: N_ORGANIC_VARIANTS }, () => buildOrganicGeometry());
@@ -173,10 +166,6 @@ interface CometVisual {
   // visual having been destroyed (comet entity disqualified) while the
   // (shared, cached) load was still in flight.
   destroyed: boolean;
-  // Dog constellation's completion payoff — a small pack of already-captured
-  // soul slots detaches from the trail, visits the crowd, then returns (see
-  // startSoulPackVisit/_placeInstancedPebbles's TYPE_SOUL branch).
-  soulFlight: SoulPackFlight;
 
   // Gas (type 2) — fixed home per slot: points [i*5, i*5+5).
   gasPoints: Points;
@@ -232,7 +221,6 @@ export class PebbleCometPresentationSystem extends createSystem({
   private _scratchGasPos!: Vector3;
   private _scratchMat4!: Matrix4;
   private _scratchScale!: Vector3;
-  private _scratchCometPos!: Vector3;
 
   init(): void {
     // CometTrailSystem must be registered before this system (see index.ts)
@@ -248,7 +236,6 @@ export class PebbleCometPresentationSystem extends createSystem({
     this._scratchGasPos = new Vector3();
     this._scratchMat4 = new Matrix4();
     this._scratchScale = new Vector3();
-    this._scratchCometPos = new Vector3();
 
     // signal.subscribe() fires immediately with the current value, so
     // _visible is correct before any visuals exist to apply it to.
@@ -518,7 +505,6 @@ export class PebbleCometPresentationSystem extends createSystem({
       soulMeshes,
       soulMeshEntities,
       destroyed: false,
-      soulFlight: new SoulPackFlight(),
       gasPoints,
       gasPositionAttr: gasPosAttr,
       gasBrightAttr,
@@ -638,50 +624,6 @@ export class PebbleCometPresentationSystem extends createSystem({
     this._visuals.delete(entity.index);
   }
 
-  // Dog constellation's completion payoff (see EarthSituationsVfxSystem.
-  // _onCompletion) — picks a handful of this comet's currently-soul-type
-  // slots, captures where they currently ride the trail, and hands them to
-  // that visual's own SoulPackFlight to detach/visit/return. No-ops quietly
-  // if the comet has no visual yet or currently has no trail buffer
-  // (shouldn't happen by the time Fate Events completes, but this mirrors
-  // every other trail consumer's own `if (!trail) continue/return` guard).
-  startSoulPackVisit(entity: Entity, targetPositions: readonly Vector3[], onComplete?: () => void): void {
-    const visual = this._visuals.get(entity.index);
-    if (!visual) return;
-    const trail = this._trailSystem.getBuffer(entity);
-    if (!trail) return;
-    const samples = entity.getValue(CometTrail, 'samples') as number;
-    const stride = entity.getValue(CometTrail, 'stride') as number;
-
-    const candidates: number[] = [];
-    for (let i = 0; i < N_PEBBLES; i++) if (visual.pebbleType[i] === TYPE_SOUL) candidates.push(i);
-    for (let i = candidates.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
-    }
-    const picked = candidates.slice(0, Math.min(SOUL_PACK_SIZE, candidates.length));
-    if (picked.length === 0) return;
-
-    const fromPositions = picked.map((i) => {
-      const out = new Vector3();
-      sampleTrailOffset(
-        trail,
-        samples,
-        stride,
-        visual.pebbleField.t[i],
-        visual.pebbleField.dx[i],
-        visual.pebbleField.dy[i],
-        visual.pebbleField.dz[i],
-        this._camRight,
-        this._camUp,
-        this._camFwd,
-        out,
-      );
-      return out;
-    });
-    visual.soulFlight.trigger(picked, fromPositions, targetPositions, onComplete);
-  }
-
   update(delta: number, time: number): void {
     kSoulIslandMat.uniforms.uTime.value = time;
     kOrganicGlitterMat.uniforms.uTime.value = time;
@@ -701,8 +643,6 @@ export class PebbleCometPresentationSystem extends createSystem({
 
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
-      this._scratchCometPos.fromArray(posView);
-      visual.soulFlight.update(delta);
 
       // Head tracks current position, rotated to keep its textured front
       // facing the direction of travel (velocity) rather than the camera.
@@ -750,37 +690,26 @@ export class PebbleCometPresentationSystem extends createSystem({
 
     for (let i = 0; i < N_PEBBLES; i++) {
       const type = pebbleType[i];
-      const inFlight = type === TYPE_SOUL && visual.soulFlight.isActive(i);
-      if (inFlight) {
-        visual.soulFlight.getPosition(i, this._scratchOffset, this._scratchCometPos);
-      } else {
-        sampleTrailOffset(
-          trail,
-          samples,
-          stride,
-          pebbleField.t[i],
-          pebbleField.dx[i],
-          pebbleField.dy[i],
-          pebbleField.dz[i],
-          this._camRight,
-          this._camUp,
-          this._camFwd,
-          this._scratchOffset,
-        );
-      }
+      sampleTrailOffset(
+        trail,
+        samples,
+        stride,
+        pebbleField.t[i],
+        pebbleField.dx[i],
+        pebbleField.dy[i],
+        pebbleField.dz[i],
+        this._camRight,
+        this._camUp,
+        this._camFwd,
+        this._scratchOffset,
+      );
 
       if (type === TYPE_ORGANIC) {
         this._scratchScale.setScalar(pebbleSizes[i] * PEBBLE_MESH_SCALE);
         this._scratchMat4.compose(this._scratchOffset, pebbleRot[i], this._scratchScale);
         organicMeshes[i % N_ORGANIC_VARIANTS].setMatrixAt(Math.floor(i / N_ORGANIC_VARIANTS), this._scratchMat4);
       } else if (type === TYPE_SOUL) {
-        // A visibly bigger boost while visiting the crowd — cheap "these
-        // pebbles are doing something special" cue, no extra per-instance
-        // tint attribute bookkeeping needed.
-        const flightBoost = inFlight ? SOUL_FLIGHT_SCALE_BOOST : 1;
-        this._scratchScale.setScalar(
-          pebbleSizes[i] * PEBBLE_MESH_SCALE * soulExtraScale[i] * SOUL_SIZE_MULTIPLIER * flightBoost,
-        );
+        this._scratchScale.setScalar(pebbleSizes[i] * PEBBLE_MESH_SCALE * soulExtraScale[i] * SOUL_SIZE_MULTIPLIER);
         this._scratchMat4.compose(this._scratchOffset, pebbleRot[i], this._scratchScale);
         soulMeshes[soulBucket[i]].setMatrixAt(soulLocal[i], this._scratchMat4);
       } else {

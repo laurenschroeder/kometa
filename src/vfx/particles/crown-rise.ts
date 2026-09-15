@@ -34,11 +34,21 @@ const EMERGE_DROP_HEIGHT = 0.18;
 // offset by its index/count along the stage's timeline) — reused here so
 // the crown assembles piece-by-piece instead of all spikes popping in
 // unison.
-const EMERGE_STAGGER_WINDOW = 0.5;
+// Lowered from 0.5 alongside EMERGE_DURATION's own halving — a smaller
+// fraction of an already-shorter duration means each spike's own rise is
+// quicker still, not just packed tighter against its neighbors.
+const EMERGE_STAGGER_WINDOW = 0.4;
 
-// Stage durations sum to the requested ~30s cinematic — see crown-rise's
-// own state machine below for what each stage does.
-const EMERGE_DURATION = 8;
+// Stage durations sum to roughly the requested cinematic length — see
+// crown-rise's own state machine below for what each stage does.
+// EMERGE_DURATION halved from 8 — combined with EMERGE_STAGGER_WINDOW's own
+// smoothstep ease-in, the old duration left only one barely-visible spike
+// inching up for the first couple seconds (the next one doesn't even start
+// until ~0.7s later, at the old spread), which read as "nothing is
+// happening yet." Shorter overall duration packs the same per-spike
+// stagger into less real time, so several spikes are visibly rising within
+// the first second instead of one.
+const EMERGE_DURATION = 4;
 const HOVER_DURATION = 3;
 const TRAVEL_DURATION = 15;
 const LAND_DURATION = 4;
@@ -172,7 +182,7 @@ export class CrownRise {
 
     // Uniform-based body/rim color, retinted per trigger() to that
     // playthrough's dominant pebble color — same retintable-flat-material
-    // pattern _buildDogs/_buildKingTower already use, shared across every
+    // pattern _buildDogs/_buildKing already use, shared across every
     // spike Mesh rather than one material per spike.
     this._material = makeToonRimFlatMaterial([1, 1, 1]);
 

@@ -12,25 +12,67 @@ import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from './planet-seeding-system.
 export const INTERMEDIATE_PLANET_CENTER: [number, number, number] = [0, 1.2, -1.6];
 export const INTERMEDIATE_PLANET_RADIUS = 0.5;
 
-// Bumped from 4.0 — the whole Constellations-onward stretch of the game
-// (transitions + notifications) was reading as too fast-paced; a bit longer
-// than Leg B's own bump gives the accelerate/decelerate arc more room.
-const SPIN_DURATION = 6.5;
-// Peak angular speed (rad/s), reached mid-transition — see the sin(pi*s)
-// envelope in update() below.
-const MAX_SPIN_SPEED = 7;
+// Bumped from 6.5 — this is now the ENTIRE window PlanetGrowthPool has to
+// grow every colored cell's plant from nothing up to full size (see its own
+// activate()/update()), not just a second growth stage on top of plants
+// already grown during Seeding — a slower, more legible "many years later"
+// needs more room than the old two-stage version did.
+const SPIN_DURATION = 11;
+// Peak angular speed (rad/s), reached once spinEnvelope ramps up — see its
+// own comment below. Pulled way down from 7 (over 1 full turn/sec at peak,
+// plus the old linear ramp-up — see spinEnvelope's own comment — read as a
+// toy engine revving rather than a planet turning) — this is now a slow,
+// stately turn even at its peak.
+const MAX_SPIN_SPEED = 2.2;
 
 function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
+// Was a symmetric MAX_SPIN_SPEED*sin(pi*s) hump (rise from 0, peak at
+// s=0.5, ease back to exactly 0 by s=1) — self-terminating, but it meant the
+// spin was already slowing back down while PlanetGrowthPool's own plants
+// were still only half-grown (their scale target rides this same raw s
+// linearly — see planet-growth-pool.ts's update()). Per design: the spin
+// should instead keep ramping up "as the plants get bigger," matching that
+// same linear growth curve, only easing to a stop right at the very end so
+// the transition still lands cleanly rather than cutting off at full speed.
+// The rise itself is smoothstep, not linear — a straight linear ramp reads
+// as a mechanical "revving" climb; easing it keeps the whole build (visual
+// spin AND PlanetSpinSynth's pitch, which rides this same value) gentler
+// and less cartoonish.
+const SPIN_RAMP_DOWN_START = 0.85; // fraction of s where the final stop begins
+function spinEnvelope(s: number): number {
+  if (s < SPIN_RAMP_DOWN_START) return smoothstep(s / SPIN_RAMP_DOWN_START);
+  const tailT = (s - SPIN_RAMP_DOWN_START) / (1 - SPIN_RAMP_DOWN_START);
+  return 1 - smoothstep(tailT);
+}
+
+// Total angle (rad) this transition's spin adds by the time it fully
+// settles — a fixed constant regardless of the STARTING angle it's synced
+// from (syncCurrentRotation), since it's purely the integral of
+// MAX_SPIN_SPEED*spinEnvelope(s) over the transition's own duration.
+// Numerically integrated (not hand-derived via calculus) so it stays
+// correct automatically if MAX_SPIN_SPEED/SPIN_DURATION/spinEnvelope's
+// shape are ever retuned again. PlanetSeedingVfxSystem uses this to
+// predict the mesh's FINAL rotation before this transition even starts
+// (see its own _applyHumanZoneExclusion) — the only way to decide which
+// cells will end up under Fate Events' crowd before plants have already
+// grown there, since the transition's actual current rotation while it's
+// running still has this much left to add.
+const ROTATION_INTEGRATION_STEPS = 2000;
+export const TOTAL_ROTATION_DELTA = (() => {
+  let sum = 0;
+  for (let i = 0; i < ROTATION_INTEGRATION_STEPS; i++) {
+    sum += spinEnvelope((i + 0.5) / ROTATION_INTEGRATION_STEPS);
+  }
+  return MAX_SPIN_SPEED * SPIN_DURATION * (sum / ROTATION_INTEGRATION_STEPS);
+})();
+
 // Same "blend direction+distance from a fixed face-reference point, land
 // exactly on a fixed end state" technique PlanetFateTransition uses, plus a
-// self-terminating spin: angular speed follows MAX_SPIN_SPEED*sin(pi*s) (s =
-// eased progress) — rises from 0, peaks at s=0.5, eases back to exactly 0 by
-// s=1, so "spinning faster and faster, then stopping" falls out of the same
-// curve without a separate deceleration phase to hand-author. Not a System —
-// same explicitly-driven idiom (build/start/update/reset) as
+// self-terminating spin (see spinEnvelope above). Not a System — same
+// explicitly-driven idiom (build/start/update/reset) as
 // PlanetFateTransition/HeartBurstPool, owned and ticked every frame by
 // PlanetSeedingVfxSystem, which also owns the sequencing between this (Leg
 // A) and PlanetFateTransition (Leg B).
@@ -81,13 +123,24 @@ export class PlanetSpinTransition {
     this._currentRadius = radius;
   }
 
+  // Same idiom as syncCurrentState above, for rotation: Seeding's own
+  // live-following planet (see PlanetSeedingSystem.getSpinAngle())
+  // already turns slowly in place before Leg A ever starts — without this,
+  // start() would snap the spin back to angle 0, a visible jump right as the
+  // transition begins. Call once, immediately before start().
+  syncCurrentRotation(radiansY: number): void {
+    this._spinAngle = radiansY;
+  }
+
   start(): void {
     this._elapsed = 0;
     this._active = true;
     this._started = true;
     this._growFromPos.copy(this._currentPos);
     this._growFromRadius = this._currentRadius;
-    this._spinAngle = 0;
+    // _spinAngle is deliberately NOT reset here — see syncCurrentRotation's
+    // own comment; it must already carry whatever angle the caller synced
+    // in immediately before this call.
   }
 
   update(delta: number): void {
@@ -113,7 +166,7 @@ export class PlanetSpinTransition {
     this._currentPos.copy(this._faceRef).addScaledVector(this._scratchDir, centerDist);
     this._currentRadius = radius;
 
-    this._angularSpeedNorm = Math.sin(Math.PI * s);
+    this._angularSpeedNorm = spinEnvelope(s);
     this._spinAngle += MAX_SPIN_SPEED * this._angularSpeedNorm * delta;
 
     if (s >= 1) {

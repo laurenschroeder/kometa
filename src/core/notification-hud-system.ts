@@ -92,6 +92,7 @@ type QueueEntry = {
   text: string;
   holdSeconds: number;
   delaySeconds: number;
+  minHoldSeconds: number;
   lineColors?: (readonly [number, number, number] | null)[];
   onComplete?: () => void;
 };
@@ -126,6 +127,16 @@ export class NotificationHudSystem extends createSystem({
   private _state = FadeState.Idle;
   private _elapsed = 0;
   private _holdSeconds = 0;
+  // Total time the current message has actually been visible (In + Hold,
+  // reset on _beginShow) — separate from _elapsed, which resets at each
+  // state transition. Used to enforce QueueEntry.minHoldSeconds against
+  // dismissByText() regardless of which sub-state a too-early dismiss call
+  // lands in.
+  private _shownElapsed = 0;
+  // Set by dismissByText() when it's called before minHoldSeconds has
+  // actually elapsed — checked every update() tick until the floor is met,
+  // at which point the deferred dismiss finally takes effect.
+  private _pendingDismiss = false;
   private _queue: QueueEntry[] = [];
   // Held during FadeState.Delay — the message waiting out its silent gap
   // before _beginShow() actually puts it on screen.
@@ -135,6 +146,21 @@ export class NotificationHudSystem extends createSystem({
   // was queued (see onComplete's own comment on notify()).
   private _current: QueueEntry | null = null;
   private _bootTriggered = false;
+  // Captured once per message, at _beginShow() time — NOT re-read every
+  // frame, so a mid-message toggle of the Settings menu can't visually
+  // glitch whatever's already on screen. Gates only the box's own
+  // opacity/visibility/chime in _setBoxOpacity()/_setBoxVisible()/
+  // _beginShow() below — every other piece of state (the queue, _elapsed/
+  // _shownElapsed timing, _shownTexts/hasShown(), onComplete() firing) is
+  // completely unaffected by mute, since hasShown() gates real gameplay
+  // reveals elsewhere (PlanetSeedingSystem/ConstellationsVfxSystem) that
+  // must keep working identically whether or not the player has muted
+  // notifications.
+  private _currentMuted = false;
+  // Every distinct text that has ever reached _beginShow() this loop — see
+  // hasShown(). Cleared alongside _bootTriggered in resetBootTrigger(), the
+  // same "a fresh run started" signal.
+  private _shownTexts = new Set<string>();
 
   // Soft "pop" played every time a message actually appears (see
   // _beginShow) — positioned at the HUD panel's own live world position
@@ -219,6 +245,7 @@ export class NotificationHudSystem extends createSystem({
     this._current = null;
     this._active = false;
     this._state = FadeState.Idle;
+    this._pendingDismiss = false;
     if (this._boxEl) this._setBoxVisible(false, 0);
   }
 
@@ -226,27 +253,63 @@ export class NotificationHudSystem extends createSystem({
   // is met (e.g. Constellations' "why not visit those nearby stars" blurb,
   // dismissed the instant the player actually touches one) — regardless of
   // where it currently sits in the pipeline. Currently ON SCREEN (In or
-  // Hold): skips straight to fade-out rather than vanishing instantly, so
-  // it doesn't read as a glitch. Still waiting out its own delaySeconds
-  // (Delay/_pending): drops it and re-pumps, so whatever's next isn't stuck
-  // waiting on a delay that no longer matters. Still further back in
-  // _queue, never yet shown: just removed outright. Matches by exact
-  // text — fine for the one-off "hold until X" messages this exists for,
-  // which each use their own unique copy.
+  // Hold): skips straight to fade-out rather than vanishing instantly (or,
+  // if minHoldSeconds hasn't been met yet, defers — see that field's own
+  // comment), so it doesn't read as a glitch and always gets at least its
+  // guaranteed minimum time on screen. Still waiting out its own
+  // delaySeconds (Delay/_pending): a message with a minHoldSeconds floor is
+  // shown right now instead (skipping whatever's left of the delay) so that
+  // guarantee still holds even though the dismiss condition fired before
+  // the delay even finished — this is exactly what used to make
+  // STARDUST_INTRO_TEXT's dismiss-on-first-capture silently skip straight
+  // to the next queued line whenever the player was already near the
+  // stardust field within the first few seconds, before its own delay ever
+  // ran out. One with no floor drops as before and re-pumps, so whatever's
+  // next isn't stuck waiting on a delay that no longer matters. Still
+  // further back in _queue, never yet shown: left alone, to play in its own
+  // turn once the messages ahead of it finish — used to be deleted outright
+  // here, but that silently ate the message entirely whenever the player
+  // reached their first star before the 3 earlier Constellations-entry
+  // lines had even finished queueing through (a wide/late-reveal layout
+  // like Harvest's makes this easy to hit), which read as "the notification
+  // never showed" rather than "the player found it before the hint was
+  // needed." Letting it play out later is harmless — ConstellationsSystem's
+  // own constellationSpottedMessage still fires right after via
+  // notifyNext(), so the player just gets both.
   dismissByText(text: string): void {
     if (this._current?.text === text && (this._state === FadeState.In || this._state === FadeState.Hold)) {
-      this._state = FadeState.Out;
-      this._elapsed = 0;
+      if (this._shownElapsed >= this._current.minHoldSeconds) {
+        this._state = FadeState.Out;
+        this._elapsed = 0;
+      } else {
+        // Too early — defer; update() re-checks this every tick and fires
+        // the actual dismiss once minHoldSeconds is met (see its own
+        // comment on _shownElapsed).
+        this._pendingDismiss = true;
+      }
       return;
     }
     if (this._pending?.text === text) {
-      this._pending = null;
-      this._active = false;
-      this._state = FadeState.Idle;
-      this._pump();
+      const pending = this._pending;
+      if (pending.minHoldSeconds > 0) {
+        // This message is guaranteed to actually appear for at least
+        // minHoldSeconds — dropping it here (its dismiss condition fired
+        // before its own delaySeconds even finished waiting out) would
+        // break that guarantee just as surely as never showing it at all.
+        // Show it right now instead, skipping whatever's left of the
+        // delay, and defer the dismiss exactly like the on-screen case
+        // above.
+        this._pending = null;
+        this._beginShow(pending);
+        this._pendingDismiss = true;
+      } else {
+        this._pending = null;
+        this._active = false;
+        this._state = FadeState.Idle;
+        this._pump();
+      }
       return;
     }
-    this._queue = this._queue.filter((entry) => entry.text !== text);
   }
 
   // Called by EndRunMenuSystem's "Main Menu" choice, alongside
@@ -256,6 +319,18 @@ export class NotificationHudSystem extends createSystem({
   // again on a second run started fresh from the Start Menu.
   resetBootTrigger(): void {
     this._bootTriggered = false;
+    this._shownTexts.clear();
+  }
+
+  // True once a notify() call for this exact text has actually started
+  // showing on screen (fade-in begun) at least once this loop — NOT full
+  // completion, since some messages (e.g. VISIT_STARS_TEXT) are designed to
+  // be cut short by dismissByText() rather than ever finish naturally. For
+  // callers (e.g. ConstellationsVfxSystem) that need to gate a visual reveal
+  // on "the player has actually been told this" rather than a hand-timed
+  // guess at when the message would have appeared.
+  hasShown(text: string): boolean {
+    return this._shownTexts.has(text);
   }
 
   private _maybeTriggerBoot(): void {
@@ -270,7 +345,7 @@ export class NotificationHudSystem extends createSystem({
     const sequence = NOTIFICATION_COPY[phase];
     if (!sequence) return;
     for (const entry of sequence) {
-      this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0, entry.lineColors);
+      this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0, entry.lineColors, undefined, entry.minHoldSeconds ?? 0);
     }
   }
 
@@ -294,8 +369,9 @@ export class NotificationHudSystem extends createSystem({
     delaySeconds = 0,
     lineColors?: (readonly [number, number, number] | null)[],
     onComplete?: () => void,
+    minHoldSeconds = 0,
   ): void {
-    this._queue.push({ text, holdSeconds, delaySeconds, lineColors, onComplete });
+    this._queue.push({ text, holdSeconds, delaySeconds, minHoldSeconds, lineColors, onComplete });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -313,8 +389,9 @@ export class NotificationHudSystem extends createSystem({
     delaySeconds = 0,
     lineColors?: (readonly [number, number, number] | null)[],
     onComplete?: () => void,
+    minHoldSeconds = 0,
   ): void {
-    this._queue.unshift({ text, holdSeconds, delaySeconds, lineColors, onComplete });
+    this._queue.unshift({ text, holdSeconds, delaySeconds, minHoldSeconds, lineColors, onComplete });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -336,6 +413,8 @@ export class NotificationHudSystem extends createSystem({
   // Actually puts a message on screen — either immediately from _pump() (no
   // delay) or once FadeState.Delay's wait finishes (see update()).
   private _beginShow(next: QueueEntry): void {
+    this._currentMuted = !getGlobals(this.world).notificationsEnabled.peek();
+    this._shownTexts.add(next.text);
     const lines = next.text.split('\n');
     this._lineCount = Math.min(lines.length, MAX_LINES);
     for (let i = 0; i < MAX_LINES; i++) {
@@ -356,10 +435,14 @@ export class NotificationHudSystem extends createSystem({
     this._current = next;
     this._state = FadeState.In;
     this._elapsed = 0;
+    this._shownElapsed = 0;
+    this._pendingDismiss = false;
     this._setBoxVisible(true, 0);
 
-    this._panelObject.getWorldPosition(this._scratchSoundPos);
-    playNotificationChime(this._audioListener, this.scene, this._scratchSoundPos);
+    if (!this._currentMuted) {
+      this._panelObject.getWorldPosition(this._scratchSoundPos);
+      playNotificationChime(this._audioListener, this.scene, this._scratchSoundPos);
+    }
   }
 
   // Total time the "In" phase takes for the current message — the last
@@ -383,6 +466,16 @@ export class NotificationHudSystem extends createSystem({
         this._beginShow(next);
       }
       return;
+    }
+
+    if (this._state === FadeState.In || this._state === FadeState.Hold) {
+      this._shownElapsed += delta;
+      if (this._pendingDismiss && this._current && this._shownElapsed >= this._current.minHoldSeconds) {
+        this._pendingDismiss = false;
+        this._state = FadeState.Out;
+        this._elapsed = 0;
+        return;
+      }
     }
 
     if (this._state === FadeState.In) {
@@ -423,14 +516,19 @@ export class NotificationHudSystem extends createSystem({
     }
   }
 
+  // Both setters clamp to invisible while _currentMuted — the caller's own
+  // requested opacity/visibility is computed and passed in either way (see
+  // every call site above), so the underlying fade timing stays identical
+  // whether or not the box actually renders; only the box's own display is
+  // suppressed, same reasoning as skipping the chime in _beginShow().
   private _setBoxOpacity(opacity: number): void {
-    this._boxEl!.setProperties({ opacity });
+    this._boxEl!.setProperties({ opacity: this._currentMuted ? 0 : opacity });
   }
 
   private _setBoxVisible(visible: boolean, opacity: number): void {
     this._boxEl!.setProperties({
-      display: visible ? 'flex' : 'none',
-      opacity,
+      display: visible && !this._currentMuted ? 'flex' : 'none',
+      opacity: this._currentMuted ? 0 : opacity,
     });
   }
 }

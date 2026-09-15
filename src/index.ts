@@ -1,4 +1,4 @@
-import { AssetType, DomeGradient, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
+import { AssetType, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
 import { ArtTestSystem } from './phases/art-test/art-test-system.js';
 import { ArtTestVfxSystem } from './phases/art-test/art-test-vfx-system.js';
 import { CometAudioSystem } from './comet/comet-audio-system.js';
@@ -21,7 +21,7 @@ import { PhaseMenuSystem } from './core/phase-menu-system.js';
 import { StarfieldSystem } from './core/starfield-system.js';
 import { SkyBackdropSystem } from './core/sky-backdrop-system.js';
 import { StartMenuSystem } from './core/start-menu-system.js';
-import { BLACK, DOME_EQUATOR, DOME_GROUND, DOME_SKY, hexToRgba } from './vfx/color/color-scheme.js';
+import { VirtualSkySystem } from './core/virtual-sky-system.js';
 import { ConstellationsSystem } from './phases/constellations/constellations-system.js';
 import { ConstellationsVfxSystem } from './phases/constellations/constellations-vfx-system.js';
 import { EarthSituationsVfxSystem } from './phases/fate-events/earth-situations-vfx-system.js';
@@ -68,7 +68,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     beeFlying: { url: '/gltf/beeFlying.glb', type: AssetType.GLTF },
   },
   xr: {
-    sessionMode: SessionMode.ImmersiveVR,
+    // AR (not VR) is the boot-time session mode so camera passthrough is
+    // actually possible at all — WebXR fixes environmentBlendMode (and this
+    // app's own WebGL context alpha-compositing) once, at session-request
+    // time, from whatever sessionMode is requested here; there's no runtime
+    // API to flip it later. Settings' "Passthrough" toggle is therefore a
+    // purely visual switch within this one persistent AR session (see
+    // VirtualSkySystem) rather than a session restart.
+    sessionMode: SessionMode.ImmersiveAR,
     offer: 'always',
     features: { handTracking: true },
   },
@@ -89,12 +96,15 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
 
   // Explicit, always-visible fallback for entering XR (see index.html) —
   // the `offer: 'always'` config above already asks the browser to show its
-  // own native "enter VR" affordance via navigator.xr.offerSession, but
-  // that's a Quest-Browser-specific extension to the WebXR spec; browsers
-  // without it show nothing at all with no other way in. Shown only while
-  // NonImmersive (browser/2D mode) and hidden the instant a session starts;
-  // VisibilityState returns to NonImmersive on its own if the session ends,
-  // which re-shows it — no separate session-end handling needed here.
+  // own native "enter" affordance via navigator.xr.offerSession, but that's
+  // a Quest-Browser-specific extension to the WebXR spec; browsers without
+  // it show nothing at all with no other way in. launchXR/offerSession work
+  // identically for 'immersive-ar' as they did for 'immersive-vr' — nothing
+  // about this fallback needed to change when the boot session mode did (see
+  // xr.sessionMode above). Shown only while NonImmersive (browser/2D mode)
+  // and hidden the instant a session starts; VisibilityState returns to
+  // NonImmersive on its own if the session ends, which re-shows it — no
+  // separate session-end handling needed here.
   const enterVrButton = document.getElementById('enter-vr-button') as HTMLButtonElement | null;
   if (enterVrButton) {
     enterVrButton.addEventListener('click', () => launchXR(world));
@@ -103,23 +113,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     });
   }
 
-  world.renderer.setClearColor(BLACK, 1.0);
-
-  // A faint navy->teal gradient instead of a pure void — subtle enough not
-  // to read as "daytime sky" in a space setting, just enough haze that the
-  // backdrop isn't flat black. StarfieldSystem's background stars and
-  // SkyBackdropSystem's hero star render over the top of this.
-  const root = world.activeLevel.value;
-  const DOME_COLORS: Record<'sky' | 'equator' | 'ground', [number, number, number, number]> = {
-    sky: hexToRgba(DOME_SKY, 1),
-    equator: hexToRgba(DOME_EQUATOR, 1),
-    ground: hexToRgba(DOME_GROUND, 1),
-  };
-  for (const key of ['sky', 'equator', 'ground'] as const) {
-    const v = root.getVectorView(DomeGradient, key) as Float32Array;
-    v.set(DOME_COLORS[key]);
-  }
-  root.setValue(DomeGradient, '_needsUpdate', true);
+  // Clear color/alpha and the virtual sky backdrop (replacing DomeGradient,
+  // which EnvironmentSystem permanently hides once in an AR session — see
+  // that system's own class comment) are now owned entirely by
+  // VirtualSkySystem, driven live off globals.passthroughEnabled, since this
+  // one persistent AR session needs to flip between "opaque virtual sky" and
+  // "camera passthrough" without ever restarting.
 
   // Components must be registered before any system query references them
   // (query bitmasks are computed at registerSystem time) and before the
@@ -168,10 +167,16 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // GameDirectorSystem (which it looks up via getSystem in its own init()).
   world.registerSystem(PhaseMenuSystem, { priority: 5 });
 
-  // Gates director.start() behind the Start button's dwell-select — see
+  // Gates director.start() behind the Start cube's poke-hold-select — see
   // its own comments. director.start() is called from inside
   // StartMenuSystem itself, not from this file.
   world.registerSystem(StartMenuSystem, { priority: 5 });
+
+  // Opaque virtual-sky backdrop (replaces DomeGradient, see its own class
+  // comment) plus the renderer's clear-alpha ownership — always-on, reacts
+  // to globals.passthroughEnabled directly, never GameDirector-managed, same
+  // idiom as StarfieldSystem/SkyBackdropSystem below.
+  world.registerSystem(VirtualSkySystem, { priority: 4 });
 
   // View-locked HUD flashing each phase's instructional blurb — always-on,
   // reacts to globals.gamePhase directly (see its own gamePhase.subscribe),
@@ -208,8 +213,10 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // up to 60s, Stage B up to +30s more) plus the win-sequence notification
     // playback (~13s) can now total more than the old timeout on a slow/idle
     // player; this stays purely a safety net for someone who never engages
-    // at all.
-    timeoutSeconds: 150,
+    // at all. Bumped again from 150 — a struggling player (steep effective
+    // bar once both swirl stages are counted) was cutting it too close to
+    // this safety net.
+    timeoutSeconds: 180,
   });
 
   world
@@ -235,11 +242,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
   director.definePhase(Phase.Seeding, {
     systems: [world.getSystem(PlanetSeedingSystem)!],
-    // Bumped from 90 — PlanetSeedingSystem's own COVERAGE_WIN_FRACTION and
-    // fall-cooldown pacing were both slowed down (see their own comments) so
-    // the phase reads as a gradual reveal rather than finishing almost
-    // instantly; this safety net needed matching headroom.
-    timeoutSeconds: 150,
+    // Bumped from 150 — PlanetSeedingSystem's own COVERAGE_WIN_FRACTION now
+    // requires the ENTIRE grid colored (was 0.7), not just most of it (see
+    // its own comment); this safety net needed matching headroom. 180 -> 240
+    // when the grid doubled to 80 cells (see planet-stain-material.ts's
+    // MAX_SPLATS).
+    timeoutSeconds: 240,
   });
 
   // ConstellationsVfxSystem is registered but, like StardustVfxSystem/
@@ -251,7 +259,11 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     .registerSystem(ConstellationsVfxSystem, { priority: 32 });
   director.definePhase(Phase.Constellations, {
     systems: [world.getSystem(ConstellationsSystem)!],
-    timeoutSeconds: 120,
+    // Bumped from 120 — trace time is entirely player-paced, and the ~30s
+    // crown-rise cinematic that must still play out after tracing (see
+    // notification-copy.ts's celestialSymbolMessage) eats into this same
+    // budget, leaving too little room for a slower player.
+    timeoutSeconds: 150,
   });
 
   // The hero star that reveals once a constellation is won — never passed to

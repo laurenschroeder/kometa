@@ -181,7 +181,7 @@ export function normalizeGeometryToUnitRadiusFromOrigin(geo: BufferGeometry): vo
 // positions/normals stay exactly as authored. Rotates -90° about X —
 // (x,y,z) -> (x,z,-y) — so "tall" ends up along local +Y, matching every
 // other Y-up assumption in this codebase (e.g. planet-growth-pool.ts's
-// trySpawn aligning local +Y with a surface normal). Originally private to
+// build() aligning local +Y with a surface normal). Originally private to
 // planet-growth-pool.ts's own two plant packs; moved here once
 // fate-event-vfx-system.ts's blobpeople.fbx needed the exact same conversion,
 // rather than duplicating it a second time.

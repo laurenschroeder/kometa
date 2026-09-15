@@ -1,4 +1,5 @@
 import { createSystem, Vector3 } from '@iwsdk/core';
+import { AchievementSystem } from '../../core/achievement-system.js';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { CapturedField, GatherableField, GatherHandInput } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
@@ -6,7 +7,7 @@ import { getGlobals } from '../../core/globals.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { pebbleCompletionMessage } from '../../core/notification-copy.js';
 import { samplePebbleSizes } from '../../vfx/particles/pebble-size.js';
-import { assignPebbleSpawnPoint } from './pebble-layout.js';
+import { assignPebbleSpawnPoint, closestGroupOriginForType } from './pebble-layout.js';
 import { PEBBLE_TYPES } from './pebble-type.js';
 
 // Bumped from 150 — puts meaningfully more pebbles across the layout
@@ -88,6 +89,12 @@ export class PebbleWeavingSystem extends createSystem({
 
   private _hand!: GatherHandInput;
   private _scratchVel!: Vector3;
+  // Camera forward captured once at play() — see getCallOrigin(), used to
+  // place the "three paths call to you" intro chimes (PebbleFieldVfxSystem)
+  // at whichever group of each type actually sits closest to forward,
+  // rather than re-sampling forward (and getting a different answer) each
+  // time one fires.
+  private _refForward!: Vector3;
 
   init(): void {
     this._field = new GatherableField({
@@ -143,6 +150,7 @@ export class PebbleWeavingSystem extends createSystem({
 
     this._hand = { position: new Vector3(), speed: 0, seen: false };
     this._scratchVel = new Vector3();
+    this._refForward = new Vector3();
   }
 
   // Own progress state resets on play() — GameDirectorSystem only resets
@@ -155,6 +163,7 @@ export class PebbleWeavingSystem extends createSystem({
     this._captureEvents.length = 0;
     this._attractEvents.length = 0;
     this._elapsed = 0;
+    this.camera.getWorldDirection(this._refForward);
   }
 
   update(delta: number): void {
@@ -173,7 +182,10 @@ export class PebbleWeavingSystem extends createSystem({
 
     if (!this._hasWon && this._field.totalCaptured >= WIN_CAPTURE_COUNT) {
       this._hasWon = true;
-      getGlobals(this.world).phaseComplete.value = true;
+      // A "you gathered enough" success cue — 'true-believer'/'perfect-
+      // balance' below only unlock under stricter, mutually-exclusive
+      // conditions, so most wins otherwise played no sound at all.
+      this.world.getSystem(AchievementSystem)?.playSuccessChime();
 
       const counts = this._field.getTypeCounts();
       let dominant = 0;
@@ -193,8 +205,27 @@ export class PebbleWeavingSystem extends createSystem({
       const weights: [number, number, number] = [counts[0] / total, counts[1] / total, counts[2] / total];
       getGlobals(this.world).pebbleTypeWeights.value = weights;
 
+      // Mutually exclusive by construction — a dominant share this high
+      // can't also be this evenly split — so at most one of these fires.
+      const achievements = this.world.getSystem(AchievementSystem);
+      if (weights[dominant] >= 0.9) {
+        achievements?.unlock('true-believer');
+      } else if (Math.max(...weights) - Math.min(...weights) <= 0.1) {
+        achievements?.unlock('perfect-balance');
+      }
+
       const { text, holdSeconds } = pebbleCompletionMessage(PEBBLE_TYPES[dominant].name);
-      this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);
+      // phaseComplete only flips once this message has actually finished
+      // its own on-screen time (fade-in + hold + fade-out) — previously set
+      // the instant the win condition was reached, well before notify() was
+      // even called, so GameDirectorSystem could already be transitioning
+      // to Seeding before the player had any real chance to read this,
+      // reading as the notification getting cut off.
+      this.world
+        .getSystem(NotificationHudSystem)
+        ?.notify(text, holdSeconds, 0, undefined, () => {
+          getGlobals(this.world).phaseComplete.value = true;
+        });
     }
   }
 
@@ -228,10 +259,26 @@ export class PebbleWeavingSystem extends createSystem({
   getTypeRevealProgress(type: number): number {
     return smoothstep((this._elapsed - TYPE_REVEAL_AT_SECONDS[type]) / TYPE_REVEAL_GROW_SECONDS);
   }
+  // World-space point to play that type's "call" chime from — see
+  // pebble-layout.ts's closestGroupOriginForType and PebbleFieldVfxSystem's
+  // own use of this alongside getTypeRevealProgress.
+  getCallOrigin(type: number, out: Vector3): Vector3 {
+    return closestGroupOriginForType(type, this._refForward, out);
+  }
   // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
   // fraction of WIN_CAPTURE_COUNT gathered so far, not the raw field total.
   getProgress01(): number {
     return Math.min(1, this._field.totalCaptured / WIN_CAPTURE_COUNT);
+  }
+  // Per-type live capture count as its own fraction of WIN_CAPTURE_COUNT —
+  // for HandProgressHudSystem's wrist bar, which during Pebbles renders
+  // three stacked segments (one per PEBBLE_TYPES color) instead of one
+  // solid fill, so the bar reads as a running tally of the actual mix
+  // gathered so far rather than just an undifferentiated total. The three
+  // fractions sum to exactly getProgress01()'s own value (same underlying
+  // counts), just split by type instead of combined.
+  getTypeProgress01(type: number): number {
+    return Math.min(1, this._field.getTypeCounts()[type] / WIN_CAPTURE_COUNT);
   }
 
   // Returns this frame's capture events and clears the queue — see

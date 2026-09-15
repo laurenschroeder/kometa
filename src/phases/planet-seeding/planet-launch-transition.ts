@@ -1,8 +1,11 @@
 import { Vector3 } from '@iwsdk/core';
 
 // Bumped from 3.0 — see PlanetSpinTransition's own SPIN_DURATION comment;
-// the whole Constellations-onward stretch needed more breathing room.
-const RECEDE_DURATION = 5.5; // seconds
+// the whole Constellations-onward stretch needed more breathing room. Bumped
+// again from 5.5 — this recede/shrink starts right as Fate Events ends (see
+// its farewellMessage, "they watch you go, and don't look away"), and read
+// as too quick right on the heels of that quiet beat.
+const RECEDE_DURATION = 9; // seconds
 
 function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);

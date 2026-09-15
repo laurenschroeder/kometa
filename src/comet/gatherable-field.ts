@@ -100,6 +100,11 @@ export class GatherableField {
   private readonly _params: GatherableFieldParams;
   private readonly _spawnPos: Float32Array;
   private readonly _spawnRadiusT: Float32Array; // count, normalized 0-1 spawn distance
+  // Tracks the last absolute target passed to recenterTo() — lets that
+  // method always land exactly on the requested center regardless of how
+  // many times (or from what prior value) it's been called, instead of
+  // accumulating drift across repeated calls (e.g. one per replay loop).
+  private readonly _recenteredTo = new Vector3();
   private readonly _scratchPos = new Vector3();
   private readonly _typeCounts: number[] = [0, 0, 0];
   // Last-known velocity while Attracting — carried forward as a decaying
@@ -126,6 +131,7 @@ export class GatherableField {
     this._velZ = new Float32Array(n);
 
     const [cx, cy, cz] = params.spawnCenter;
+    this._recenteredTo.set(cx, cy, cz);
     const radiusRange = params.spawnRadiusMax - params.spawnRadiusMin;
     const dir = new Vector3();
     for (let i = 0; i < n; i++) {
@@ -184,6 +190,27 @@ export class GatherableField {
     if (!this._params.spawnPoint) {
       this.assignedType.fill(0);
     }
+  }
+
+  // Shifts every particle's baked-in spawn point so the field's effective
+  // spawnCenter becomes (x,y,z) instead of whatever params.spawnCenter was
+  // at construction — for callers whose real center (e.g. wherever the
+  // player actually ended up standing) isn't known until later. Idempotent:
+  // repeated calls only ever apply the remaining delta from the last one,
+  // so calling this again on a replay loop never accumulates drift. Call
+  // before reset() so the shift is reflected in the positions reset()
+  // copies from _spawnPos.
+  recenterTo(x: number, y: number, z: number): void {
+    const dx = x - this._recenteredTo.x;
+    const dy = y - this._recenteredTo.y;
+    const dz = z - this._recenteredTo.z;
+    if (dx === 0 && dy === 0 && dz === 0) return;
+    for (let i = 0; i < this._params.count; i++) {
+      this._spawnPos[i * 3] += dx;
+      this._spawnPos[i * 3 + 1] += dy;
+      this._spawnPos[i * 3 + 2] += dz;
+    }
+    this._recenteredTo.set(x, y, z);
   }
 
   // Single comet, single hand input — see comet/comet-handoff-system.ts for

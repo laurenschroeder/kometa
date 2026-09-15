@@ -1,4 +1,4 @@
-import { ShaderMaterial, Vector3 } from '@iwsdk/core';
+import { ShaderMaterial, Vector4 } from '@iwsdk/core';
 
 function vec3Glsl([r, g, b]: [number, number, number]): string {
   return `vec3(${r.toFixed(4)}, ${g.toFixed(4)}, ${b.toFixed(4)})`;
@@ -24,9 +24,16 @@ const OUTLINE_GLSL = `
 // lands nearest a cell, that cell's uSplatBirth/Color/Center are set ONCE
 // and never reassigned to a different cell, so — unlike the old ring-buffer
 // design — a splat can never be silently evicted by a later, unrelated
-// landing. PlanetSeedingSystem's own win condition is "half of these cells
-// have been colored" (see its COVERAGE_WIN_FRACTION).
-export const MAX_SPLATS = 40;
+// landing. PlanetSeedingSystem's own win condition is "every one of these
+// cells has been colored" (see its COVERAGE_WIN_FRACTION).
+//
+// Doubled from 40 for 2x plant density (one plant per cell — see
+// planet-growth-pool.ts). Per-splat data is packed into two vec4 arrays
+// (center+birth, color+fade) so the fragment shader stays at 2*MAX_SPLATS
+// uniform slots — four separate arrays at 80 would need ~320, over GLES 3.0's
+// guaranteed minimum of 224 fragment uniform vectors (desktop GPUs allow far
+// more, so the emulator wouldn't catch it; Quest might).
+export const MAX_SPLATS = 80;
 // Splats now grow in TWO stages rather than one: during Seeding, a landing
 // only ever grows to SEED_SPLAT_DOT (tiny — a ~8.6° cap, just enough to read
 // as "something landed here"), so the planet fills in with a scatter of
@@ -52,7 +59,7 @@ const SPLAT_SOFTNESS = 0.05;
 // MAX_SPLAT_DOT. Color visibly follows the player around the planet's
 // surface, and — since each splat's color is independently rolled from the
 // comet's own pebble-type mix — the surface reads as multi-colored rather
-// than a single flat hue. uSplatBirth defaults to -1 ("not yet colored");
+// than a single flat hue. Birth (uSplatCenterBirth[i].w) defaults to -1 ("not yet colored");
 // the loop below skips any cell still at that sentinel, so cells fill in in
 // whatever order the player actually visits rather than a fixed prefix.
 export function makePlanetStainMaterial(baseColor: [number, number, number]): ShaderMaterial {
@@ -73,9 +80,8 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
   const fragmentShader = `
     uniform float uTime;
     uniform float uFinalGrowT;
-    uniform vec3  uSplatCenter[${MAX_SPLATS}];
-    uniform vec3  uSplatColor[${MAX_SPLATS}];
-    uniform float uSplatBirth[${MAX_SPLATS}];
+    uniform vec4  uSplatCenterBirth[${MAX_SPLATS}]; // xyz = unit center, w = birth time
+    uniform vec4  uSplatColorFade[${MAX_SPLATS}];   // rgb = color, a = fade (1 = hidden)
     varying vec3  vViewNormal;
     varying vec3  vViewDir;
     varying vec3  vLocalPos;
@@ -90,15 +96,17 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
 
       vec3 bodyCol = ${vec3Glsl(baseColor)};
       vec3 localDir = normalize(vLocalPos);
+      float stageDot = mix(${SEED_SPLAT_DOT.toFixed(4)}, ${FINAL_SPLAT_DOT.toFixed(4)}, uFinalGrowT);
       for (int i = 0; i < ${MAX_SPLATS}; i++) {
-        if (uSplatBirth[i] < 0.0) continue;
-        float age    = max(0.0, uTime - uSplatBirth[i]);
+        vec4 centerBirth = uSplatCenterBirth[i];
+        if (centerBirth.w < 0.0) continue;
+        float age    = max(0.0, uTime - centerBirth.w);
         float growT  = clamp(age / ${SPLAT_GROW_SECONDS.toFixed(4)}, 0.0, 1.0);
-        float stageDot = mix(${SEED_SPLAT_DOT.toFixed(4)}, ${FINAL_SPLAT_DOT.toFixed(4)}, uFinalGrowT);
         float threshold = mix(1.0, stageDot, growT);
-        float d = dot(localDir, uSplatCenter[i]);
+        float d = dot(localDir, centerBirth.xyz);
         float splatEdge = smoothstep(threshold - ${SPLAT_SOFTNESS.toFixed(4)}, threshold + ${SPLAT_SOFTNESS.toFixed(4)}, d);
-        bodyCol = mix(bodyCol, uSplatColor[i], splatEdge);
+        vec4 colorFade = uSplatColorFade[i];
+        bodyCol = mix(bodyCol, colorFade.rgb, splatEdge * (1.0 - colorFade.a));
       }
 
       vec3 col = mix(bodyCol, vec3(1.0), outline);
@@ -106,17 +114,15 @@ export function makePlanetStainMaterial(baseColor: [number, number, number]): Sh
     }
   `;
 
-  const splatCenters: Vector3[] = Array.from({ length: MAX_SPLATS }, () => new Vector3(0, 1, 0));
-  const splatColors: Vector3[] = Array.from({ length: MAX_SPLATS }, () => new Vector3(0, 0, 0));
-  const splatBirths: number[] = new Array(MAX_SPLATS).fill(-1);
+  const splatCenterBirths: Vector4[] = Array.from({ length: MAX_SPLATS }, () => new Vector4(0, 1, 0, -1));
+  const splatColorFades: Vector4[] = Array.from({ length: MAX_SPLATS }, () => new Vector4(0, 0, 0, 0));
 
   return new ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
       uFinalGrowT: { value: 0 },
-      uSplatCenter: { value: splatCenters },
-      uSplatColor: { value: splatColors },
-      uSplatBirth: { value: splatBirths },
+      uSplatCenterBirth: { value: splatCenterBirths },
+      uSplatColorFade: { value: splatColorFades },
     },
     vertexShader,
     fragmentShader,

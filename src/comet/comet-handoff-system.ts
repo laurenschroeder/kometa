@@ -1,4 +1,5 @@
 import { createSystem, Entity, Object3D, Quaternion, Vector3 } from '@iwsdk/core';
+import { AchievementSystem } from '../core/achievement-system.js';
 import { CometBody } from './comet-body-component.js';
 import { CometCaught } from './comet-event-tags.js';
 import { HandAnchor, HandSide } from './hand-anchor-component.js';
@@ -112,6 +113,10 @@ export class CometHandoffSystem extends createSystem({
     if (this._gripPos.distanceToSquared(this._cometPos) <= CATCH_RADIUS * CATCH_RADIUS) {
       this._switchTo(entity, catcher);
       entity.addComponent(CometCaught);
+      // Deliberate toss/catch only — NOT the passive-drift branch above
+      // (which also calls _switchTo), since that isn't something the player
+      // actually chose to do.
+      this.world.getSystem(AchievementSystem)?.unlock('ambidextrous');
     }
   }
 

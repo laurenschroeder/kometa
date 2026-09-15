@@ -7,24 +7,30 @@ import {
 } from '../../vfx/geometry/fbx-field-loader.js';
 import { makeToonRimInstancedDitherMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { hexToRgb, ORGANIC_GLITTER_DARK, ORGANIC_GLITTER_LIGHT, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
-import { N_PLANETS, PLANET_RADIUS } from './planet-seeding-system.js';
+import { MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
+import { CELL_DIRS, PLANET_RADIUS } from './planet-seeding-system.js';
 
-// Bumped from 6, then 10x'd again to 100 for a visibly dense, fully-covered
-// planet rather than a sparse handful of sprouts — trySpawn's hemisphere
-// split below still gives both art-style halves their own even share of
-// this larger pool.
-const PER_PLANET_CAP = 100;
-const POOL_SIZE = N_PLANETS * PER_PLANET_CAP;
+// One slot per grid cell (see planet-seeding-system.ts's CELL_DIRS) — a
+// plant only ever grows exactly where its cell was colored during Seeding,
+// so the pool is sized/positioned off that same fixed layout rather than an
+// independent one. With only ever one planet, there's no per-planet
+// indexing to do (see planet-seeding-system.ts's own N_PLANETS comment for
+// why other files in this phase still carry that indirection — this one no
+// longer needs to).
+const POOL_SIZE = MAX_SPLATS;
 
-// Art-style comparison: two real plant packs, one per planet hemisphere
-// (split on each slot's own fixed direction — see fibonacciSphereDir and
+// Two real plant packs. Which one(s) a given cell draws from depends on the
+// playthrough's dominant pebble type (see activate()'s own `dominant`
+// param): Organic keeps the original art-style comparison, split by
+// hemisphere (each slot's own fixed CELL_DIRS direction — see
 // _slotIsFlower) — desertPlantsClean.fbx on the +X half, flowers.fbx on the
-// -X half, so seeding either side during play grows that half's own style,
-// side by side with the other for a direct look. Both load independently
-// and fall back to the placeholder rock (see build()) until they resolve,
-// same graceful-degradation idiom fbx-field-loader.ts's own callers already
-// use. If one style loses, reverting to a single pack is just deleting its
-// URL/MAX_COUNT consts + build()'s _slotIsFlower assignment.
+// -X half, so filling in either side during play eventually blooms that
+// half's own style, side by side with the other for a direct look. Soul
+// commits the WHOLE grid to flowers.fbx only, and Gas the whole grid to
+// desertPlantsClean.fbx only — no hemisphere split for either. Both packs
+// still load unconditionally and independently, falling back to the
+// placeholder rock (see build()) until they resolve, same graceful-
+// degradation idiom fbx-field-loader.ts's own callers already use.
 //
 // Replaces the original desertPlants.fbx (which wrapped its plants in a
 // 'Layer_1' group and needed recenterAndGroundGeometry's bounding-box
@@ -57,6 +63,14 @@ const DESERT_PLANTS_MAX_COUNT = 9;
 const FLOWERS_URL = '/medium/flowersOriginAtBottom.fbx';
 const FLOWERS_MAX_COUNT = 4;
 
+// Same 0=soul/1=organic/2=gas ordering as pebble-type.ts's PEBBLE_TYPES —
+// each consuming file in this codebase keeps its own local copy of these
+// (see fate-event-system.ts/fate-event-vfx-system.ts/earth-situations-vfx-
+// system.ts) rather than a shared import, and this file follows the same
+// convention. Only activate() below reads these.
+const SOUL_DUST_TYPE = 0;
+const VOLATILE_GASSES_TYPE = 2;
+
 // buildOrganicGeometry()'s unit-radius rock, scaled down to a small
 // sprouting mound on Seeding's PLANET_RADIUS=0.11 planet (~0.03m diameter) —
 // not person-shaped (see this class's own comment: no people during
@@ -64,19 +78,37 @@ const FLOWERS_MAX_COUNT = 4;
 // spin-driven civilization forming). Sprouts are parented under the
 // planet's own (already PLANET_RADIUS-scaled) mesh entity — three.js
 // compounds a child's local scale/position with its parent's, so both this
-// target size and trySpawn's position below are pre-divided by PLANET_RADIUS
-// to cancel that compounding back out to the intended absolute world size.
+// target size and activate()'s position below are pre-divided by
+// PLANET_RADIUS to cancel that compounding back out to the intended
+// absolute world size.
 // Bumped 1.6x from the old rock-tuned size, then halved back down to 0.8x —
-// the 1.6x size read as too large once seen in headset.
+// the 1.6x size read as too large once seen in headset. Now also the size a
+// plant POPS IN AT the instant its cell activates (see activate()), not an
+// already-grown "small during Seeding" stage — plants no longer exist at
+// all until Leg A begins.
 const GROWTH_TARGET_SCALE = (0.02 / PLANET_RADIUS) * 0.8;
-// Second growth stage, same "starts small during Seeding, blooms bigger
-// during the Seeding->Constellations spin" beat as the planet's own splats/
-// moons (see planet-stain-material.ts's uFinalGrowT) — update() now
-// interpolates every already-spawned sprout's target between these two
-// based on live spin progress, instead of settling once at GROWTH_TARGET_
-// SCALE and staying there forever.
+// Mature size, reached by the time Leg A's spin finishes — update() eases
+// every activated slot's scale from GROWTH_TARGET_SCALE up to this across
+// the live spin progress (see PlanetSpinTransition), the same "many years
+// later" beat the planet's own splats/moons get (see planet-stain-
+// material.ts's uFinalGrowT).
 const GROWTH_FINAL_SCALE = GROWTH_TARGET_SCALE * 2.5;
-const GROWTH_EASE_RATE = 2.0; // 1/s exponential ease, same idiom as _easeCoverage
+// Slowed from 2.0 — at that rate scale caught up to grownTarget's slow
+// 11s ramp almost instantly every frame, so the pop-in to GROWTH_TARGET_SCALE
+// read as a quick snap rather than a plant actually growing.
+const GROWTH_EASE_RATE = 0.5; // 1/s exponential ease, same idiom as _easeCoverage
+
+// activate() fires all at once (see its own comment), but swapping every
+// activated slot's placeholder rock geometry for its real plant mesh is NOT
+// cheap — each swap clones a BufferGeometry (attribute arrays included) and
+// disposes the old one's GPU resources. Doing all of that synchronously for
+// every colored cell in one call (up to POOL_SIZE, currently 80) in the same
+// frame startSpinTransition() fires is exactly the kind of one-frame CPU/GPU
+// burst that reads as a hitch right as the spin begins — spreading it across
+// a handful of frames instead is imperceptible (every slot still shows SOME
+// plant immediately, just the rock placeholder for a few extra frames) and
+// keeps any single frame's swap work small.
+const GEOMETRY_SWAPS_PER_FRAME = 6;
 
 // Local-space push straight out along the landing normal, on top of sitting
 // exactly on the unit sphere. Now that the planet mesh itself is a perfect
@@ -97,36 +129,69 @@ const SURFACE_LIFT = 1.002;
 // set once and left alone.
 const SPROUT_BRIGHT = 0.7; // same base brightness OrganicScene's own instances use
 // Same fixed 5-color set every other production organic surface draws from
-// (see color-scheme.ts's ORGANIC_PALETTE) — each sprout picks one entry at
-// random in setInstanceAttrs, instead of every plant sharing one flat green.
+// (see color-scheme.ts's ORGANIC_PALETTE) — setPlantInstanceAttrs picks one
+// entry at random for callers that don't care which plant matches which
+// cell (e.g. fate-events/seed-blossom.ts); this file's own activate() below
+// instead uses the EXACT color PlanetSeedingSystem already rolled for that
+// cell (see stampPlantAttrs), so a grown plant always matches its splat.
 const PLANT_PALETTE = ORGANIC_PALETTE;
 
 // Dedicated "shaded dither toon" material for growth-pool sprouts only — a
 // visually distinct look from kOrganicGlitterMat's grainy/glitter sparkle
 // (see pebble-material.ts), which stays exactly as-is for pebbles/comet/
 // seeding dust. bodyColorDark/Light below are effectively decorative only:
-// every sprout instance sets aTinted=1 (see setInstanceAttrs), so the
+// every sprout instance sets aTinted=1 (see stampPlantAttrs), so the
 // fragment shader's own tint mix always resolves to the instance's aTint
 // color regardless of these two values — kept dark to match the previous
 // organic look's near-black undertone in case aTinted is ever dialed back.
-const PLANT_DITHER_MAT = makeToonRimInstancedDitherMaterial({
+// Exported for fate-events/seed-blossom.ts's tail plants, so they match the
+// planet's own sprouts.
+export const PLANT_DITHER_MAT = makeToonRimInstancedDitherMaterial({
   bodyColorDark: hexToRgb(ORGANIC_GLITTER_DARK),
   bodyColorLight: hexToRgb(ORGANIC_GLITTER_LIGHT),
   rimColor: hexToRgb(WHITE),
 });
 
 // Stamps the three per-instance attributes PLANT_DITHER_MAT requires onto a
-// single-instance geometry. Needed on the initial placeholder rock AND again
-// on every real plant geometry once swapped in (a fresh clone from
-// loadFbxNamedGroupChildMeshes has no instance attributes of its own yet).
-// Picks a fresh random palette color each call, so a slot's placeholder rock
-// and its eventual real plant mesh don't have to match — no visible harm
-// either way since the swap already replaces the whole geometry.
-function setInstanceAttrs(geo: BufferGeometry): void {
-  const [r, g, b] = PLANT_PALETTE[Math.floor(Math.random() * PLANT_PALETTE.length)];
+// single-instance geometry, given an EXACT color — needed on the initial
+// placeholder rock AND again on every real plant geometry once swapped in (a
+// fresh clone from loadFbxAllMeshes has no instance attributes of its own).
+function stampPlantAttrs(geo: BufferGeometry, color: readonly [number, number, number]): void {
+  const [r, g, b] = color;
   geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array([SPROUT_BRIGHT]), 1));
   geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array([r, g, b]), 3));
   geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array([1]), 1));
+}
+
+// Same as stampPlantAttrs, but picks a fresh random palette color each call
+// instead of taking one explicitly — for callers with no specific per-cell
+// color to match (currently just fate-events/seed-blossom.ts's tail plants).
+export function setPlantInstanceAttrs(geo: BufferGeometry): void {
+  stampPlantAttrs(geo, PLANT_PALETTE[Math.floor(Math.random() * PLANT_PALETTE.length)]);
+}
+
+// loadFbxAllMeshes' cache hands every caller the SAME geometry objects, and
+// convertZUpToYUp rewrites positions in place — so the conversion has to
+// happen exactly once per pack, here, rather than in each consumer's own
+// .then() (a second consumer, fate-events/seed-blossom.ts, would otherwise
+// rotate them twice).
+const plantPackCache = new Map<string, Promise<BufferGeometry[]>>();
+function loadConvertedPlantPack(url: string, maxCount: number): Promise<BufferGeometry[]> {
+  let promise = plantPackCache.get(url);
+  if (!promise) {
+    promise = loadFbxAllMeshes(url, maxCount, normalizeGeometryToUnitRadiusFromOrigin).then((geos) => {
+      for (const geo of geos) convertZUpToYUp(geo);
+      return geos;
+    });
+    plantPackCache.set(url, promise);
+  }
+  return promise;
+}
+export function loadDesertPlantGeos(): Promise<BufferGeometry[]> {
+  return loadConvertedPlantPack(DESERT_PLANTS_URL, DESERT_PLANTS_MAX_COUNT);
+}
+export function loadFlowerPlantGeos(): Promise<BufferGeometry[]> {
+  return loadConvertedPlantPack(FLOWERS_URL, FLOWERS_MAX_COUNT);
 }
 
 // Both plant packs were authored Z-up — confirmed by directly parsing both
@@ -139,63 +204,56 @@ function setInstanceAttrs(geo: BufferGeometry): void {
 // surface, which is why they weren't reading as attached to the ground even
 // once grounded on the (wrong) axis.
 
-// Even 360° coverage guarantee: rather than only growing wherever stardust
-// actually happened to land (which could leave most of the planet bare
-// depending on how/where the player moved their hand), each pool slot gets
-// its own FIXED, evenly-distributed direction around the whole sphere
-// (poles included) via the standard Fibonacci-sphere lattice — trySpawn()
-// just activates the next slot in this pre-planned layout (see build()),
-// still triggered by real landing events so growth still tracks how much
-// the player has actually seeded, but no longer placed at the exact spot
-// that triggered it.
-function fibonacciSphereDir(index: number, count: number): Vector3 {
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  const y = count > 1 ? 1 - (index / (count - 1)) * 2 : 0; // 1 -> -1 pole to pole
-  const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y));
-  const theta = goldenAngle * index;
-  return new Vector3(Math.cos(theta) * radiusAtY, y, Math.sin(theta) * radiusAtY);
-}
-
-// Seeding's own "cause life to grow" flourish — no longer Organic-only
-// (the bees in earth-situations-vfx-system.ts are the one thing still
-// unique to that class): every landing, regardless of dominant type,
-// activates the next slot in a fixed, evenly-distributed layout around the
-// WHOLE planet (see fibonacciSphereDir), capped per planet (an
-// "established little colony," not unbounded clutter at this tiny scale),
-// permanent — riding along with the planet through Constellations/Fate
-// Events/Launch, not reset or hidden once Seeding ends (see
+// Seeding's own "cause life to grow" flourish — no longer Organic-only (the
+// bees in earth-situations-vfx-system.ts are the one thing still unique to
+// that class). Seeding itself only colors the grid (see
+// planet-seeding-system.ts) — no plant ever appears there. Once Leg A's spin
+// begins, activate() looks at exactly which cells got colored and grows a
+// real plant at each one, in that cell's own pre-rolled color, so the
+// "many years later" reveal reads as the colored grid itself sprouting to
+// life rather than a separate, disconnected bloom. Permanent once grown —
+// riding along with the planet through Constellations/Fate Events/Launch,
+// not reset or hidden once Seeding ends (see
 // PlanetSeedingVfxSystem.startSpinTransition's own comment). Deliberately
-// NOT person-shaped — Seeding shouldn't show people; the actual
-// Fate Events civilization only starts forming later, during the
-// Seeding->Constellations spin transition (see FateEventVfxSystem). Not a
-// System — a plain pooled-effect class driven by explicit
-// trySpawn()/update()/reset() calls from PlanetSeedingVfxSystem, same idiom
-// as HeartBurstPool. Fixed slots (planet*PER_PLANET_CAP + localIndex), no
-// free-list needed: a planet's count only ever grows within a single
-// Seeding attempt, and reset() zeroes every planet's count together on a
-// fresh loop.
+// NOT person-shaped — Seeding shouldn't show people; the actual Fate Events
+// civilization only starts forming later, during this same spin transition
+// (see FateEventVfxSystem). Not a System — a plain pooled-effect class
+// driven by explicit build()/activate()/update()/reset() calls from
+// PlanetSeedingVfxSystem, same idiom as HeartBurstPool. Fixed slots
+// (one per CELL_DIRS cell), no free-list needed: activate() only ever runs
+// once per play(), and reset() zeroes every slot together on a fresh loop.
 export class PlanetGrowthPool {
   private _groups: Group[] = [];
   private _meshes: InstancedMesh[] = [];
   private _scale = new Float32Array(POOL_SIZE);
-  // 1 once trySpawn() has actually claimed a slot — distinct from _scale
-  // reaching 0, since a spawned-but-not-yet-eased-up sprout also has scale
-  // 0 for a moment. update() only advances slots this is set for.
+  // 1 once activate() has claimed this slot (its cell was colored) —
+  // distinct from _scale reaching 0, since a just-activated sprout also has
+  // scale 0 for a moment. update() only advances slots this is set for.
   private _spawned = new Uint8Array(POOL_SIZE);
-  private _countPerPlanet = new Uint8Array(N_PLANETS);
+  // 1 for a slot PlanetSeedingVfxSystem has marked as falling inside Fate
+  // Events' crowd area (see its own _applyHumanZoneExclusion) — update()
+  // eases these back down to scale 0 instead of toward the normal growth
+  // target, so any plant already grown there quietly shrinks away to make
+  // room for a person instead of popping out instantly.
+  private _excluded = new Uint8Array(POOL_SIZE);
 
   // Populated once each pack's own load resolves — empty until then, in
-  // which case trySpawn() just leaves that slot on its rock placeholder.
+  // which case activate() just leaves that slot on its rock placeholder.
   private _desertGeos: BufferGeometry[] = [];
   private _flowerGeos: BufferGeometry[] = [];
-  // Round-robin cursor per pack so consecutive spawns on the same
+  // Round-robin cursor per pack so consecutive activations on the same
   // hemisphere cycle through all its species rather than repeating one.
   private _desertNext = 0;
   private _flowerNext = 0;
-  // Per-slot fixed direction/style — see fibonacciSphereDir's own comment.
-  // Index-aligned with _groups/_meshes.
-  private _slotDir: Vector3[] = [];
+  // Per-slot fixed hemisphere — ORGANIC_MATTER_TYPE's own art-style split
+  // (see build()'s own comment); Soul/Gas ignore this and commit the whole
+  // grid to one pack instead (see activate()). Index-aligned with
+  // _groups/_meshes/CELL_DIRS.
   private _slotIsFlower: boolean[] = [];
+  // Slots activate() has claimed but whose real-mesh geometry swap hasn't
+  // happened yet — see GEOMETRY_SWAPS_PER_FRAME. FIFO, drained a few at a
+  // time by update().
+  private _pendingSwaps: { slot: number; useFlowers: boolean; color: [number, number, number] }[] = [];
 
   private _upAxis = new Vector3(0, 1, 0);
   private _identity = new Matrix4();
@@ -205,29 +263,38 @@ export class PlanetGrowthPool {
   // (not the world root) so they inherit the planet's live position for
   // free as it eases around following the player's head, rather than each
   // needing its own per-frame re-derivation from a stale spawn-time
-  // snapshot. positions set below are therefore LOCAL to the planet, not
-  // world-absolute.
+  // snapshot. Position/orientation are fixed from CELL_DIRS and set once
+  // here — every slot lands on its grid point immediately, whether or not
+  // it's ever actually activated.
   build(world: World, parentEntity: Entity): void {
-    for (let planet = 0; planet < N_PLANETS; planet++) {
-      for (let local = 0; local < PER_PLANET_CAP; local++) {
-        const group = new Group();
-        const geo = buildOrganicGeometry();
-        setInstanceAttrs(geo);
-        const mesh = new InstancedMesh(geo, PLANT_DITHER_MAT, 1);
-        mesh.setMatrixAt(0, this._identity);
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.frustumCulled = false;
-        group.add(mesh);
-        group.name = `growth-sprout-${planet}-${local}`;
-        group.scale.setScalar(0);
-        group.visible = false;
-        this._groups.push(group);
-        this._meshes.push(mesh);
-        const dir = fibonacciSphereDir(local, PER_PLANET_CAP);
-        this._slotDir.push(dir);
-        this._slotIsFlower.push(dir.x < 0);
-        world.createTransformEntity(group, parentEntity);
-      }
+    const dir = new Vector3();
+    for (let i = 0; i < POOL_SIZE; i++) {
+      const group = new Group();
+      const geo = buildOrganicGeometry();
+      const placeholderColor = PLANT_PALETTE[Math.floor(Math.random() * PLANT_PALETTE.length)];
+      stampPlantAttrs(geo, placeholderColor);
+      const mesh = new InstancedMesh(geo, PLANT_DITHER_MAT, 1);
+      mesh.setMatrixAt(0, this._identity);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.frustumCulled = false;
+      group.add(mesh);
+      group.name = `growth-sprout-${i}`;
+      group.scale.setScalar(0);
+      group.visible = false;
+
+      dir.set(CELL_DIRS[i * 3], CELL_DIRS[i * 3 + 1], CELL_DIRS[i * 3 + 2]);
+      // Unit-direction local offset (NOT multiplied by PLANET_RADIUS) — the
+      // parent mesh's own PLANET_RADIUS scale already stretches this out to
+      // sit exactly on the surface; multiplying here too would compound and
+      // land it deep inside the planet instead. SURFACE_LIFT nudges it out a
+      // little further still — see its own comment.
+      group.position.set(dir.x * SURFACE_LIFT, dir.y * SURFACE_LIFT, dir.z * SURFACE_LIFT);
+      group.quaternion.setFromUnitVectors(this._upAxis, dir);
+      this._slotIsFlower.push(dir.x < 0);
+
+      this._groups.push(group);
+      this._meshes.push(mesh);
+      world.createTransformEntity(group, parentEntity);
     }
 
     // Both packs now trust their own authored origin instead of re-deriving
@@ -236,72 +303,124 @@ export class PlanetGrowthPool {
     // artist put it. convertZUpToYUp is still needed for both (verified: Z
     // is the tallest axis on every mesh in each pack, same as every other
     // FBX in the project).
-    loadFbxAllMeshes(DESERT_PLANTS_URL, DESERT_PLANTS_MAX_COUNT, normalizeGeometryToUnitRadiusFromOrigin).then(
-      (geos) => {
-        for (const geo of geos) convertZUpToYUp(geo);
-        this._desertGeos = geos;
-      },
-    );
-    loadFbxAllMeshes(FLOWERS_URL, FLOWERS_MAX_COUNT, normalizeGeometryToUnitRadiusFromOrigin).then((geos) => {
-      for (const geo of geos) convertZUpToYUp(geo);
+    loadDesertPlantGeos().then((geos) => {
+      this._desertGeos = geos;
+    });
+    loadFlowerPlantGeos().then((geos) => {
       this._flowerGeos = geos;
     });
+
+    // PLANT_DITHER_MAT's shader has never actually been compiled yet at this
+    // point — every slot above sits invisible (group.visible = false), and
+    // three.js only compiles a material's program on its first real draw.
+    // Without this, that first-ever compile happens the instant activate()
+    // makes a slot visible (right as Leg A's spin starts, alongside "Many
+    // years later" — see GEOMETRY_SWAPS_PER_FRAME's own comment on the
+    // OTHER hitch already fixed at that same moment), which can itself
+    // stall a frame by several/tens of ms. Pre-warming it here, at build()
+    // time (game boot, minutes before Constellations is ever reached),
+    // moves that one-time cost somewhere it can't be felt. Fire-and-forget —
+    // nothing here depends on it finishing before build() returns.
+    world.renderer.compileAsync(world.scene, world.camera).catch(() => {});
   }
 
-  // dirX/dirY/dirZ from the actual landing are no longer used for
-  // placement (see fibonacciSphereDir's own comment on why) — only the
-  // landing EVENT matters here, to decide whether another slot activates.
-  trySpawn(planet: number): boolean {
-    const localIndex = this._countPerPlanet[planet];
-    if (localIndex >= PER_PLANET_CAP) return false;
-    this._countPerPlanet[planet] = localIndex + 1;
+  // Fired once by PlanetSeedingVfxSystem.startSpinTransition() — grows a
+  // real plant at every cell PlanetSeedingSystem actually colored during
+  // Seeding (coloredMask/cellColors, straight from its own getColoredMask()/
+  // getCellColors()), in that cell's own fixed color, and leaves every
+  // uncolored cell's slot alone (hidden, scale 0, forever — Seeding's win
+  // condition already requires the WHOLE grid colored, see
+  // COVERAGE_WIN_FRACTION, so in normal play this should mean every slot;
+  // this still degrades gracefully for a dev-menu skip that jumped into
+  // Seeding and left early with gaps). `dominant` (globals.dominantPebbleType,
+  // read by the caller) decides which pack(s) supply the mesh — see this
+  // file's own top comment: Organic keeps the hemisphere-split art
+  // comparison, Soul/Gas each commit the whole grid to a single pack.
+  activate(coloredMask: Uint8Array, cellColors: Float32Array, dominant: number): void {
+    for (let slot = 0; slot < POOL_SIZE; slot++) {
+      if (!coloredMask[slot]) continue;
+      this._spawned[slot] = 1;
+      this._scale[slot] = 0;
 
-    const slot = planet * PER_PLANET_CAP + localIndex;
-    const group = this._groups[slot];
-    const dir = this._slotDir[slot];
-    // Unit-direction local offset (NOT multiplied by PLANET_RADIUS) — the
-    // parent mesh's own PLANET_RADIUS scale already stretches this out to
-    // sit exactly on the surface; multiplying here too would compound and
-    // land it deep inside the planet instead. SURFACE_LIFT nudges it out a
-    // little further still — see its own comment.
-    group.position.set(dir.x * SURFACE_LIFT, dir.y * SURFACE_LIFT, dir.z * SURFACE_LIFT);
-    group.quaternion.setFromUnitVectors(this._upAxis, dir);
-    group.visible = true;
-    this._scale[slot] = 0;
-    this._spawned[slot] = 1;
+      const color: [number, number, number] = [
+        cellColors[slot * 3],
+        cellColors[slot * 3 + 1],
+        cellColors[slot * 3 + 2],
+      ];
 
-    // Hemisphere split for the art-style comparison — see this file's own
-    // top comment. Whichever pack has actually resolved by the time this
-    // particular slot activates supplies the mesh; each slot gets its own
-    // clone (never the cache's shared instance directly) since
-    // PLANT_DITHER_MAT's per-instance attributes live ON the geometry —
-    // two InstancedMeshes sharing one geometry object would also share
-    // (and clobber) each other's aTint/aBright/aTinted.
-    const useFlowers = this._slotIsFlower[slot];
-    const pack = useFlowers ? this._flowerGeos : this._desertGeos;
-    if (pack.length > 0) {
+      // Whichever pack has actually resolved by now supplies the mesh — see
+      // GEOMETRY_SWAPS_PER_FRAME's own comment on why the actual clone/
+      // dispose is deferred to update() instead of happening right here.
+      const useFlowers =
+        dominant === SOUL_DUST_TYPE ? true : dominant === VOLATILE_GASSES_TYPE ? false : this._slotIsFlower[slot];
+      const pack = useFlowers ? this._flowerGeos : this._desertGeos;
+      if (pack.length > 0) {
+        // group.visible deliberately NOT set here — see _drainPendingSwaps,
+        // which flips it on in lockstep with the same GEOMETRY_SWAPS_PER_FRAME
+        // throttle instead of all ~POOL_SIZE slots turning visible (each its
+        // own InstancedMesh draw call, doubled under stereo XR rendering) in
+        // this one synchronous frame. That used to undo the whole point of
+        // throttling the geometry swap: the swap was spread out, but the
+        // sudden burst of new draw calls right as the spin starts wasn't.
+        this._pendingSwaps.push({ slot, useFlowers, color });
+      } else {
+        // Pack not resolved yet (very unlikely this late — both start
+        // loading back in build(), well before Seeding even begins) — at
+        // least recolor the placeholder rock in place so it matches its
+        // splat instead of showing its random build()-time color. Cheap
+        // (no clone/dispose), so no need to defer this branch or its
+        // visibility.
+        stampPlantAttrs(this._meshes[slot].geometry as BufferGeometry, color);
+        this._groups[slot].visible = true;
+      }
+    }
+  }
+
+  // Drains a few queued real-mesh swaps (see _pendingSwaps/
+  // GEOMETRY_SWAPS_PER_FRAME) every frame instead of all at once.
+  private _drainPendingSwaps(): void {
+    for (let n = 0; n < GEOMETRY_SWAPS_PER_FRAME && this._pendingSwaps.length > 0; n++) {
+      const { slot, useFlowers, color } = this._pendingSwaps.shift()!;
+      const pack = useFlowers ? this._flowerGeos : this._desertGeos;
+      // Each slot gets its own clone (never the cache's shared instance
+      // directly) since PLANT_DITHER_MAT's per-instance attributes live ON
+      // the geometry — two InstancedMeshes sharing one geometry object
+      // would also share (and clobber) each other's aTint/aBright/aTinted.
       const idx = useFlowers ? this._flowerNext++ : this._desertNext++;
       const geo = pack[idx % pack.length].clone();
-      setInstanceAttrs(geo);
+      stampPlantAttrs(geo, color);
+      this._meshes[slot].geometry.dispose();
       this._meshes[slot].geometry = geo;
+      // Reveal exactly when the real mesh lands — see activate()'s own
+      // comment on why this moved here instead of all slots going visible
+      // together the instant activate() runs.
+      this._groups[slot].visible = true;
     }
-    return true;
   }
 
-  // spinProgress is PlanetSpinTransition.getProgress() (0 through Seeding,
-  // ramping 0->1 across the Seeding->Constellations spin, holding 1 after)
-  // — every already-spawned sprout's target scale rides that same curve
-  // from GROWTH_TARGET_SCALE up to GROWTH_FINAL_SCALE, so sprouts planted
-  // during Seeding visibly bloom bigger exactly during the spin, the same
-  // beat the planet's own splats/moons already get.
+  // spinProgress is PlanetSpinTransition.getProgress() (0 before Leg A,
+  // ramping 0->1 across it, holding 1 after) — every activated slot's
+  // target scale rides that same curve from GROWTH_TARGET_SCALE up to
+  // GROWTH_FINAL_SCALE, so every plant grows in lockstep with the spin, the
+  // same beat the planet's own splats/moons already get.
   update(delta: number, spinProgress: number): void {
+    this._drainPendingSwaps();
     const pull = 1 - Math.exp(-GROWTH_EASE_RATE * delta);
-    const target = GROWTH_TARGET_SCALE + (GROWTH_FINAL_SCALE - GROWTH_TARGET_SCALE) * spinProgress;
+    const grownTarget = GROWTH_TARGET_SCALE + (GROWTH_FINAL_SCALE - GROWTH_TARGET_SCALE) * spinProgress;
     for (let i = 0; i < POOL_SIZE; i++) {
-      if (!this._spawned[i] || this._scale[i] === target) continue;
+      if (!this._spawned[i]) continue;
+      const target = this._excluded[i] ? 0 : grownTarget;
+      if (this._scale[i] === target) continue;
       this._scale[i] += (target - this._scale[i]) * pull;
       this._groups[i].scale.setScalar(this._scale[i]);
     }
+  }
+
+  // Called once by PlanetSeedingVfxSystem._applyHumanZoneExclusion, right
+  // as Leg A's spin settles — see that method's own comment for why the
+  // exclusion decision can't be made any earlier than that.
+  excludeSlot(index: number): void {
+    this._excluded[index] = 1;
   }
 
   reset(): void {
@@ -311,8 +430,9 @@ export class PlanetGrowthPool {
       this._scale[i] = 0;
     }
     this._spawned.fill(0);
-    this._countPerPlanet.fill(0);
+    this._excluded.fill(0);
     this._desertNext = 0;
     this._flowerNext = 0;
+    this._pendingSwaps.length = 0;
   }
 }

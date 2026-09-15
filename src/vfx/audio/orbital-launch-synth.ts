@@ -29,6 +29,23 @@ const CHARGE_PEAK_GAIN = 0.16;
 // charge fills — see updateCharge().
 const CHARGE_START_RATIO = 0.5;
 
+// Ambient locator beacon — a quiet, slowly pulsing tone at each choice zone,
+// independent of the single-voice charge-rise tone above (that only plays
+// while a hand is actually inside a zone). Both zones are placed once and
+// stay fixed in world space for the rest of the phase (see
+// OrbitalLaunchSystem's own class comment) — a player who turns away after
+// they're placed has no landmark to relocate either one besides turning back
+// toward wherever they last remembered seeing it. This gives a spatial-audio
+// cue to home in on instead, active the whole time both zones are revealed.
+// Same octave-down root as the charge tone's own CHARGE_START_RATIO, so the
+// two read as related sounds rather than a mismatched new voice.
+const AMBIENT_GAIN = 0.012;
+const AMBIENT_FADE_SECONDS = 0.6;
+// Slow tremolo so this reads as a pulsing "there's something over here"
+// beacon rather than a flat drone the ear tunes out.
+const AMBIENT_PULSE_HZ = 0.35;
+const AMBIENT_PULSE_DEPTH = 0.006;
+
 // Detach whoosh — bigger/longer than the comet's own release whoosh
 // (comet-interaction-synth.ts) since this is the actual "you're gone" launch
 // moment, plus a soft low swelling "bloom" tail underneath it for a
@@ -59,6 +76,13 @@ function buildReverbImpulse(context: AudioContext): AudioBuffer {
   return buffer;
 }
 
+interface AmbientVoice {
+  osc: OscillatorNode;
+  gain: GainNode;
+  lfo: OscillatorNode;
+  sound: PositionalAudio;
+}
+
 function buildNoiseBuffer(context: AudioContext, duration: number): AudioBuffer {
   const length = Math.floor(context.sampleRate * duration);
   const buffer = context.createBuffer(1, length, context.sampleRate);
@@ -85,6 +109,12 @@ export class OrbitalLaunchSynth {
   private _chargeSound!: PositionalAudio;
   private _chargeRoot = ORBIT_ROOT;
   private _chargeRunning = false;
+
+  // Ambient locator beacons — one per zone, both playing simultaneously and
+  // independently of the charge-rise voice above (see AMBIENT_GAIN's own
+  // comment). Built once by startAmbient(), torn down by stopAmbient().
+  private _ambientOrbit: AmbientVoice | null = null;
+  private _ambientUnknown: AmbientVoice | null = null;
 
   build(listener: AudioListener, scene: Scene): void {
     this._listener = listener;
@@ -174,6 +204,82 @@ export class OrbitalLaunchSynth {
     this._chargeOsc.stop();
     this._scene.remove(this._chargeSound);
     this._chargeGain.disconnect();
+  }
+
+  // Starts both zones' ambient locator beacons together — idempotent, so
+  // OrbitalLaunchSystem can call this unconditionally once zones are
+  // revealed without tracking its own "already started" guard here too.
+  startAmbient(orbitPosition: Vector3, unknownPosition: Vector3): void {
+    if (this._ambientOrbit || this._ambientUnknown) return;
+    const context = this._listener.context;
+    if (context.state !== 'running') context.resume().catch(() => {});
+    this._ambientOrbit = this._buildAmbientVoice(ORBIT_ROOT, orbitPosition);
+    this._ambientUnknown = this._buildAmbientVoice(UNKNOWN_ROOT, unknownPosition);
+  }
+
+  private _buildAmbientVoice(root: number, position: Vector3): AmbientVoice {
+    const context = this._listener.context;
+    const now = context.currentTime;
+
+    const osc = context.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(root * CHARGE_START_RATIO, now);
+
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(AMBIENT_GAIN, now + AMBIENT_FADE_SECONDS);
+    osc.connect(gain);
+
+    // Modulates gain.gain's own automated value up/down by
+    // AMBIENT_PULSE_DEPTH rather than replacing it — an oscillator's raw
+    // output swings ±1 around zero, so routing it through a small fixed
+    // gain (lfoDepth) and into the AudioParam adds a tremolo on top of
+    // whatever gain is already scheduled there.
+    const lfo = context.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.setValueAtTime(AMBIENT_PULSE_HZ, now);
+    const lfoDepth = context.createGain();
+    lfoDepth.gain.value = AMBIENT_PULSE_DEPTH;
+    lfo.connect(lfoDepth);
+    lfoDepth.connect(gain.gain);
+
+    const sound = new PositionalAudio(this._listener);
+    sound.setNodeSource(gain as unknown as AudioScheduledSourceNode);
+    sound.position.copy(position);
+    this._scene.add(sound);
+
+    osc.start(now);
+    lfo.start(now);
+
+    return { osc, gain, lfo, sound };
+  }
+
+  // Fades out and stops both beacons — called once a choice is committed
+  // (the zones themselves hide/fade at that point too, see
+  // OrbitalLaunchVfxSystem) or on any hard reset. Safe to call even if
+  // never started.
+  stopAmbient(): void {
+    this._stopAmbientVoice(this._ambientOrbit);
+    this._stopAmbientVoice(this._ambientUnknown);
+    this._ambientOrbit = null;
+    this._ambientUnknown = null;
+  }
+
+  private _stopAmbientVoice(voice: AmbientVoice | null): void {
+    if (!voice) return;
+    const context = this._listener.context;
+    const now = context.currentTime;
+    voice.gain.gain.cancelScheduledValues(now);
+    voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+    voice.gain.gain.linearRampToValueAtTime(0, now + AMBIENT_FADE_SECONDS);
+    voice.osc.stop(now + AMBIENT_FADE_SECONDS + 0.05);
+    voice.lfo.stop(now + AMBIENT_FADE_SECONDS + 0.05);
+    const sound = voice.sound;
+    const gain = voice.gain;
+    setTimeout(() => {
+      this._scene.remove(sound);
+      gain.disconnect();
+    }, (AMBIENT_FADE_SECONDS + 0.1) * 1000);
   }
 
   playCommit(choice: 'orbit' | 'launch', position: Vector3): void {

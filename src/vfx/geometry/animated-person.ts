@@ -61,6 +61,11 @@ const RIGHT_ARM_BONE_NAME = 'mixamorigRightArm';
 // The body's standing axis — used for horizontal centering, see
 // AnimatedPersonTemplate's own comment on why the bounding box isn't.
 const HIPS_BONE_NAME = 'mixamorigHips';
+// For AnimatedPerson.attachHeadProp() — a worn prop (the King's crown) rides
+// this bone directly rather than a fixed offset off the figure's root, so it
+// tracks the head through the breathing-idle animation's own subtle bob/sway
+// instead of floating at a height tuned for a static pose.
+const HEAD_BONE_NAME = 'mixamorigHead';
 
 interface AnimatedPersonTemplate {
   root: Group; // raw FBXLoader output (SkinnedMesh + bone hierarchy) — never itself added to the scene, only ever cloned
@@ -93,6 +98,11 @@ interface AnimatedPersonTemplate {
   posedMinY: number;
   posedHipsX: number;
   posedHipsZ: number;
+  // Native-unit (NOT meters — see buildAnimatedPerson's own scale comment)
+  // vertical gap between the head bone's own world position and the top of
+  // the skull (box.max.y), measured at the same posed frame as the above —
+  // what attachHeadProp() below rests a worn prop on top of.
+  headTopOffsetY: number;
 }
 
 export interface AnimatedPerson {
@@ -110,6 +120,17 @@ export interface AnimatedPerson {
   // null only if the rig's own bone naming ever changes — every current
   // clone of BreathingIdle.fbx has this bone.
   rightArmBone: Bone | null;
+  headBone: Bone | null;
+  // Rigidly attaches `prop` (authored in real meters, local origin = where
+  // it should rest relative to the top of the head) directly onto the head
+  // bone, so it rides the idle animation's own head bob/sway instead of
+  // sitting at a fixed offset off the figure's root — see this file's own
+  // HEAD_BONE_NAME comment. A bone's children live in the rig's native
+  // (large, non-metric) unit space, so this wraps `prop` in an inverse-scale
+  // Group to cancel that back out to real meters before parenting it; a
+  // no-op (identity attach, prop just added straight to the group) if
+  // headBone is null, so callers don't need their own fallback branch.
+  attachHeadProp(prop: Object3D): void;
 }
 
 let templatePromise: Promise<AnimatedPersonTemplate | null> | null = null;
@@ -203,6 +224,20 @@ export function loadAnimatedPersonTemplate(): Promise<AnimatedPersonTemplate | n
           hipsWorld.set((box.min.x + box.max.x) / 2, 0, (box.min.z + box.max.z) / 2);
         }
 
+        // See AnimatedPersonTemplate.headTopOffsetY's own comment — falls
+        // back to a plausible skull radius fraction of the whole figure's
+        // height if the bone is ever renamed, rather than leaving a worn
+        // prop with no offset at all (which would bury it at the neck).
+        const headBone = root.getObjectByName(HEAD_BONE_NAME);
+        let headTopOffsetY: number;
+        if (headBone) {
+          const headWorld = new Vector3();
+          headBone.getWorldPosition(headWorld);
+          headTopOffsetY = box.max.y - headWorld.y;
+        } else {
+          headTopOffsetY = (box.max.y - box.min.y) * 0.06;
+        }
+
         return {
           root: root as unknown as Group,
           clip,
@@ -210,6 +245,7 @@ export function loadAnimatedPersonTemplate(): Promise<AnimatedPersonTemplate | n
           posedMinY: box.min.y,
           posedHipsX: hipsWorld.x,
           posedHipsZ: hipsWorld.z,
+          headTopOffsetY,
         };
       },
       (err) => {
@@ -285,6 +321,25 @@ export function buildAnimatedPerson(
   action.time = Math.random() * template.clip.duration;
 
   const rightArmBone = (clonedRoot.getObjectByName(RIGHT_ARM_BONE_NAME) as Bone | undefined) ?? null;
+  const headBone = (clonedRoot.getObjectByName(HEAD_BONE_NAME) as Bone | undefined) ?? null;
 
-  return { group: outer, mixer, idleAction: action, rightArmBone };
+  // See AnimatedPerson.attachHeadProp's own comment — `wrapper`'s inverse
+  // scale converts back from the bone hierarchy's native units to real
+  // meters for anything added inside it, and its own position (set in the
+  // bone's native units, unaffected by wrapper's own scale) rests it right
+  // on top of the head.
+  function attachHeadProp(prop: Object3D): void {
+    if (!headBone) {
+      prop.position.y = targetHeight;
+      outer.add(prop);
+      return;
+    }
+    const wrapper = new Group();
+    wrapper.position.y = template.headTopOffsetY;
+    wrapper.scale.setScalar(scale > 1e-6 ? 1 / scale : 1);
+    wrapper.add(prop);
+    headBone.add(wrapper);
+  }
+
+  return { group: outer, mixer, idleAction: action, rightArmBone, headBone, attachHeadProp };
 }

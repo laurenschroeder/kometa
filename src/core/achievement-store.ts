@@ -37,9 +37,45 @@ export function unlockAchievement(id: string): boolean {
   return true;
 }
 
+const COMBO_STORAGE_KEY = 'kometa:achievement-combos';
+
+function loadCombos(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COMBO_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+// Persisted set of "<dominantPebbleType>-<launchChoice>" combos the player
+// has actually experienced across separate runs — separate from
+// unlockedAchievements since this tracks raw history, not a single unlock
+// flag. Drives the 'complete-collection' achievement (see hasAllCombos) once
+// all 3 pebble types x 2 launch choices have each been seen at least once.
+export const seenCombos: Signal<Set<string>> = signal(loadCombos());
+
+export function recordCombo(dominantType: number, choice: 'orbit' | 'launch'): void {
+  const key = `${dominantType}-${choice}`;
+  if (seenCombos.value.has(key)) return;
+  const next = new Set(seenCombos.value);
+  next.add(key);
+  seenCombos.value = next;
+  localStorage.setItem(COMBO_STORAGE_KEY, JSON.stringify([...next]));
+}
+
+// 3 pebble types x 2 launch choices — see recordCombo's own comment.
+export function hasAllCombos(): boolean {
+  return seenCombos.value.size >= 6;
+}
+
 // Dev/debug utility — wipes persisted unlock state so achievement unlocks
 // can be re-triggered/re-tested without waiting on their real conditions.
 export function resetAchievements(): void {
   unlockedAchievements.value = new Set();
   localStorage.removeItem(STORAGE_KEY);
+  seenCombos.value = new Set();
+  localStorage.removeItem(COMBO_STORAGE_KEY);
 }

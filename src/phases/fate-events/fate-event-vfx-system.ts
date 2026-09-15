@@ -1,5 +1,7 @@
 import {
   AdditiveBlending,
+  AnimationAction,
+  AnimationClip,
   AnimationMixer,
   AssetManager,
   AudioListener,
@@ -13,6 +15,7 @@ import {
   Group,
   InstancedBufferAttribute,
   InstancedMesh,
+  LoopRepeat,
   Matrix4,
   Mesh,
   MeshBasicMaterial,
@@ -27,12 +30,24 @@ import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { GatherableField, GatherState } from '../../comet/gatherable-field.js';
 import { getGlobals } from '../../core/globals.js';
+import {
+  GAS_ACCUSER_INDEX,
+  GAS_GRIEVER_INDEX,
+  GAS_GRUMP_INDEX,
+  GAS_MOURNER_INDEX,
+  GAS_RANTER_INDEX,
+} from '../../core/notification-copy.js';
 import { Phase } from '../../core/phase.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
 import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
-import { buildAnimatedPerson, loadAnimatedPersonTemplate, PERSON_BODY_COLOR } from '../../vfx/geometry/animated-person.js';
+import {
+  buildAnimatedPerson,
+  loadAnimatedPersonTemplate,
+  loadPersonClip,
+  PERSON_BODY_COLOR,
+} from '../../vfx/geometry/animated-person.js';
 import {
   convertZUpToYUp,
   loadFbxMeshesByName,
@@ -49,7 +64,15 @@ import {
 import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
-import { EXPLAIN_FIGURE_INDEX, FateBeat, FateEventSystem, NAMED_FIGURE_COUNT } from './fate-event-system.js';
+import {
+  CROWD_CAP_DIRECTION,
+  EXPLAIN_FIGURE_INDEX,
+  FateBeat,
+  FateEventSystem,
+  GAS_NAMED_COUNT,
+  NAMED_FIGURE_COUNT,
+} from './fate-event-system.js';
+import { SeedBlossom } from './seed-blossom.js';
 
 const JUMP_FREQUENCY = 5; // Hz — speed of the single hop, see _jumpElapsed
 const JUMP_AMPLITUDE = 0.135; // scaled with PERSON_HEIGHT's 2.2x then 3x bumps (0.045 -> 0.135)
@@ -72,10 +95,12 @@ const BUBBLE_EASE_RATE = 8;
 const BUBBLE_CANVAS_W = 384;
 const BUBBLE_CANVAS_H = 250;
 
-// "Talk to me" markers for the two named figures (EXPLAIN_FIGURE_INDEX/
-// PAIRED_FIGURE_INDEX) — the only two people per scene with actual
-// individual narrative lines rather than shared ambient chatter, so they're
-// the ones worth calling out from across the crowd. Reuses the existing
+// "Talk to me" markers for this playthrough's named figures — just
+// EXPLAIN_FIGURE_INDEX/PAIRED_FIGURE_INDEX for Soul/Organic (the only two
+// people per scene with individual narrative lines rather than shared
+// ambient chatter), but every visible person for Gas (see
+// FateEventSystem.getNamedCount()) — whoever's "named" is worth calling out
+// from across the crowd. Reuses the existing
 // starIllustration texture (already in the asset manifest, see index.ts)
 // rather than drawing a new glyph — quicker, and its bright four-point-star
 // shape already reads as "notice me" at a glance. Floats well above
@@ -156,7 +181,7 @@ function smoothstep(t: number): number {
 // Per-constellation "situation" animation layered on top of the base
 // bob/bubble behavior above — see EarthSituationsVfxSystem for the
 // non-person-attached half of this same feature (ambient decorations,
-// ghost-rise/soul-pack mechanics, dialogue pairing). This stays here because
+// dialogue pairing). This stays here because
 // it directly manipulates this system's own person arm meshes.
 const POINT_UP_DURATION = 4; // seconds organic matter's "point at the comet" pose holds
 const POINT_UP_EASE_RATE = 5;
@@ -172,16 +197,69 @@ const POINT_UP_ROTATION_X = -1.3;
 
 // Gas's Beat 2.5 (Ambient) crowd reaction — see earth-situations-vfx-
 // system.ts's own top comment for the full 0-10s sub-beat breakdown; this
-// file owns the two sub-beats that manipulate person arm/orientation
-// (watching/waving 0-3s, turning to face the player 8-10s), since it's what
-// already owns those meshes. The 3-8s death itself is earth-situations-vfx-
+// file owns the sub-beats that manipulate person arm/orientation (watching/
+// waving 0-3s, then turning once the King has actually died), since it's
+// what already owns those meshes. The death itself is earth-situations-vfx-
 // system.ts's own (it owns the king/tower/ghost).
 const GAS_WATCH_DURATION = 3;
 const GAS_WAVE_ROTATION_X = -0.9;
 const GAS_WAVE_FREQ = 2; // Hz
 const GAS_WAVE_AMPLITUDE = 0.35; // radians, side-to-side
-const GAS_TURN_START = 8;
+// The crowd stays in its base outward-facing pose all through the King's
+// death, THEN turns to face him over this ramp — started by
+// globals.kingDeathComplete flipping true (see _crowdTurnElapsed), not by
+// Ambient's own beat-entry timing. Everyone except Pointer (see
+// EXPLAIN_FIGURE_INDEX/_gasFacingBlendFor) stays facing the King forever
+// once turned — Pointer alone later breaks off to address the player, since
+// it's the one whose own line tells the player to go talk to everyone.
+const GAS_KING_TURN_RAMP_SECONDS = 1.5;
+// How long Pointer keeps facing the fallen King (after finishing the ramp
+// above) before breaking off toward the player — see _gasFacingBlendFor.
+const POINTER_KING_HOLD_SECONDS = 1.5;
+// Pointer's own swivel from King to player, once POINTER_KING_HOLD_SECONDS
+// has elapsed.
 const GAS_TURN_DURATION = 2;
+
+// Mourner/Griever's shared reaction pose (see GAS_CHARACTER_POSES below).
+// Reuses animated-person.ts's loadPersonClip (same technique the King's own
+// DyingBackwards.fbx already uses) since it's just another Mixamo clip
+// sharing the crowd's existing 'mixamorig...' rig — no separate geometry/
+// material/mixer needed, just a clip swap on each figure's already-built
+// mixer.
+const SITTING_DISBELIEF_URL = '/medium/SittingDisbelief.fbx';
+// How long _applyCustomPersonClip's crossfade from idle into the new pose
+// takes — same rough "readable but not slow" range as this file's other
+// short blends (GAS_KING_TURN_RAMP_SECONDS/POINTER_KING_HOLD_SECONDS).
+const CUSTOM_POSE_CROSSFADE_SECONDS = 0.6;
+
+// Gas/Throne's own cast (see notification-copy.ts's GAS_CHARACTER_NAMES for
+// the name<->index<->animation mapping this table mirrors) — six figures
+// each locked onto one fixed pose instead of the shared BreathingIdle loop.
+// Everyone (Pointer included) stays on the plain idle loop through the
+// king's death and the crowd's own turn-to-face-the-player, THEN switches
+// onto these poses permanently, all at once — see _applyGasCharacterPoses,
+// gated on dominantPebbleType being Gas since Soul/Organic never show
+// anyone past EXPLAIN_FIGURE_INDEX anyway (see peopleEnabled above).
+const ANGRY_URL = '/medium/Angry.fbx';
+const ANGRY_POINT_URL = '/medium/AngryPoint.fbx';
+const ANGRY_GESTURE_URL = '/medium/AngryGesture.fbx';
+// Pointer's own accusatory point reads better slowed down against the
+// crowd's normal-speed idle/angry poses — half of the clip's authored speed.
+const POINTER_TIME_SCALE = 0.5;
+
+interface GasCharacterPose {
+  index: number;
+  url: string;
+  timeScale: number;
+}
+const GAS_CHARACTER_POSES: GasCharacterPose[] = [
+  { index: EXPLAIN_FIGURE_INDEX, url: ANGRY_POINT_URL, timeScale: POINTER_TIME_SCALE }, // Pointer
+  { index: GAS_ACCUSER_INDEX, url: ANGRY_GESTURE_URL, timeScale: 1 }, // Accuser
+  { index: GAS_GRUMP_INDEX, url: ANGRY_URL, timeScale: 1 }, // Grump
+  { index: GAS_RANTER_INDEX, url: ANGRY_GESTURE_URL, timeScale: 1 }, // Ranter
+  { index: GAS_MOURNER_INDEX, url: SITTING_DISBELIEF_URL, timeScale: 1 }, // Mourner
+  { index: GAS_GRIEVER_INDEX, url: SITTING_DISBELIEF_URL, timeScale: 1 }, // Griever
+];
 
 // Beat 4 — Gas's "symbol added to your tail" flourish. A simpler, inline
 // version of the plan's own suggested standalone pooled class: with exactly
@@ -218,6 +296,15 @@ const RIM_FLASH_MIN = 0.15;
 const RIM_FLASH_MAX = 1.0;
 const RIM_FLASH_FREQUENCY = 0.7; // Hz, full dim-to-bright-to-dim cycles per second
 const NAMED_RIM_COLOR: [number, number, number] = hexToRgb(NAMED_RIM);
+// Build-time sizing for the named-figure materials/markers below — big
+// enough to cover whichever type needs the most named slots. Soul/Organic
+// only ever use the first NAMED_FIGURE_COUNT (2); Gas uses all GAS_NAMED_
+// COUNT (6, see that constant's own comment) since every visible Gas person
+// is equally "named" now. Which slots actually GET the gold rim/marker each
+// playthrough is decided live via FateEventSystem.getNamedCount() (see
+// update()'s own namedCount), not by this constant — this is purely "how
+// many instances to build up front."
+const MAX_NAMED_FIGURES = Math.max(NAMED_FIGURE_COUNT, GAS_NAMED_COUNT);
 // Collectibles' rim settles back to this the instant they're captured — the
 // crowd's own ordinary/default rim color (see NAMED_RIM_COLOR's own comment),
 // same "gold means interactive, white means settled" language the rest of
@@ -252,8 +339,8 @@ const FIRE_CANVAS_SIZE = 128;
 // from the static scenery around them instead of just being bigger dots.
 // 5x back up from 0.009 (that 1/5 cut read as way too small once actually
 // seen in headset), then 3x again alongside the crowd's own 3x bump — see
-// PERSON_HEIGHT. 0.045 -> 0.135.
-const GHOST_SIZE = 0.135;
+// PERSON_HEIGHT. 0.045 -> 0.135, then cut to 2/3 (0.09).
+const GHOST_SIZE = 0.09;
 // Ghost spheres render with the exact same translucent wiggly blue look real
 // soul-dust pebbles use (pebble-material.ts's SOUL_ISLAND_PALETTE, via a
 // per-slot makeToonRimInstancedWigglyLiveRimMaterial instance — see
@@ -290,6 +377,14 @@ const COLLECTIBLE_BOB_FREQ = 0.45; // Hz — slowed from 0.9 for a gentler ghost
 const COLLECTIBLE_BOB_AMPLITUDE = 0.02; // meters
 const DANCE_FREQ = 1.4; // Hz
 const DANCE_AMPLITUDE = 0.025; // meters, in camera-right/up space
+// Organic's Beat 5 "seeds blossom in your tail" (see seed-blossom.ts) — each
+// bloom plays PebbleSynth's green/earthy catch plus a light glass twinkle for
+// the dust, pitched up bloom by bloom (the synths' own speed->pitch mapping,
+// pentatonic-snapped) so the sequence reads as a rising arpeggio, capped by
+// the same resolving chime Soul's dance gets once the last one opens.
+const BLOOM_SPEED_MIN = 0.2;
+const BLOOM_SPEED_MAX = 1.8;
+const BLOOM_FINAL_CHIME_FREQ = 520;
 
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
@@ -346,15 +441,49 @@ function stampSoulIslandInstanceAttrs(geo: BufferGeometry): void {
   geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array([Math.random()]), 1));
 }
 
+// Drawn as canvas primitives, not a fillText('☠', ...) glyph — a Unicode
+// glyph is only as good as whatever font the browser happens to resolve
+// 'sans-serif' to, and this one was silently rendering as nothing (missing-
+// glyph) in at least this environment. Same "drawn object, not a font's
+// problem" fix earth-situations-vfx-system.ts's own banner skull already
+// uses (see its _drawSkull), just filled red instead of bone-white — Gas's
+// skull symbols read as a hot, angry red flying at the player, not a pale
+// death's-head.
 function buildSkullTexture(): CanvasTexture {
   const s = SKULL_CANVAS_SIZE;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = s;
   const ctx = canvas.getContext('2d')!;
-  ctx.font = `${s * 0.8}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('☠', s / 2, s / 2 + s * 0.05);
+  const cx = s / 2;
+  const cy = s / 2;
+  const radius = s * 0.42;
+
+  ctx.fillStyle = '#e0201a';
+  ctx.beginPath();
+  ctx.arc(cx, cy - radius * 0.15, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx - radius * 0.55, cy + radius * 0.15);
+  ctx.quadraticCurveTo(cx, cy + radius * 1.05, cx + radius * 0.55, cy + radius * 0.15);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(20, 4, 4, 0.9)';
+  ctx.beginPath();
+  ctx.arc(cx - radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx + radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + radius * 0.05);
+  ctx.lineTo(cx - radius * 0.12, cy + radius * 0.32);
+  ctx.lineTo(cx + radius * 0.12, cy + radius * 0.32);
+  ctx.closePath();
+  ctx.fill();
+  for (let i = -1; i <= 1; i++) {
+    ctx.fillRect(cx + i * radius * 0.22 - radius * 0.03, cy + radius * 0.55, radius * 0.06, radius * 0.22);
+  }
   return new CanvasTexture(canvas);
 }
 
@@ -418,6 +547,10 @@ export class FateEventVfxSystem extends createSystem({
   // primitive figure's raw `rightArm` Mesh).
   private _mixers: (AnimationMixer | null)[] = [];
   private _rightArmBones: (Bone | null)[] = [];
+  // The idle-breathing action itself (see animated-person.ts's own
+  // AnimatedPerson.idleAction) — kept around so Gas's post-death cast switch
+  // below (_applyGasCharacterPoses) can swap each figure's mixer off it.
+  private _idleActions: (AnimationAction | null)[] = [];
   // Current EASED additive offset applied on top of the idle animation's own
   // bone rotation each frame (see _updateSituations) — NOT an absolute pose
   // like the old primitive-figure code's _armRestZ/rotation.set() approach,
@@ -442,6 +575,24 @@ export class FateEventVfxSystem extends createSystem({
   private _pointUpTimer = 0;
   private _wasComplete = false;
 
+  // Gas's crowd-turn — seconds since globals.kingDeathComplete was first
+  // observed true, counted up each frame once it is; -1 = not yet started
+  // (still in the crowd's base outward-facing pose). Drives both
+  // _gasTurnAmount (turned-away-from-base ramp, shared by everyone) and
+  // _gasFacingBlendFor (per-person King-vs-player gaze target).
+  private _crowdTurnElapsed = -1;
+
+  // Set by _applyCustomPersonClip — true for any figure whose mixer is
+  // currently NOT on the shared idle loop (Gas's own post-death cast switch
+  // below), so both _updateSituations' arm overlay and _resetAll's
+  // revert-to-idle logic know to leave/undo that figure alone rather than
+  // fight it. Sticky per person (never cleared except on a fresh loop) and
+  // doubles as _applyGasCharacterPoses' own per-character one-shot guard.
+  private _customPoseActive!: Uint8Array;
+  // Gas's own cast (see GAS_CHARACTER_POSES) — one clip per pose, index-
+  // matched, loaded once in init(); null until each resolves.
+  private _gasCharacterClips: (AnimationClip | null)[] = new Array(GAS_CHARACTER_POSES.length).fill(null);
+
   private _bubbleMeshes: Mesh[] = [];
   private _bubbleEntities: Entity[] = [];
   private _bubbleCtxs: CanvasRenderingContext2D[] = [];
@@ -450,8 +601,8 @@ export class FateEventVfxSystem extends createSystem({
   private _lastLineIndex!: Int16Array;
   private _explainerDrawn = false;
 
-  // "Talk to me" markers, one per named figure (NAMED_FIGURE_COUNT) — see
-  // MARKER_* constants' own comment.
+  // "Talk to me" markers, one per built named-figure slot (MAX_NAMED_
+  // FIGURES) — see MARKER_* constants' own comment.
   private _markerMeshes: Mesh[] = [];
   private _talkedTo!: Uint8Array;
 
@@ -479,6 +630,9 @@ export class FateEventVfxSystem extends createSystem({
   // _updateCollectibles.
   private _ghostRimPhase!: Float32Array;
   private _seedRimPhase!: Float32Array;
+  // Beat 5 — Organic's seeds-to-plants payoff, riding on _seedMeshes' own
+  // trail positions (see seed-blossom.ts).
+  private _seedBlossom!: SeedBlossom;
 
   private _camWorldPos!: Vector3;
   private _faceDir!: Vector3;
@@ -495,9 +649,28 @@ export class FateEventVfxSystem extends createSystem({
   private _scratchGasUp!: Vector3;
   private _scratchGasForward!: Vector3;
   private _scratchGasRight!: Vector3;
-  private _scratchGasToPlayer!: Vector3;
+  private _scratchGasToTarget!: Vector3;
   private _scratchGasMatrix!: Matrix4;
   private _scratchGasTargetQuat!: Quaternion;
+  // Player's live world position — one shared point, recomputed once per
+  // frame, not per person. _scratchKingPos is the other shared point (the
+  // fallen King); _scratchGasPersonTarget below is where each person's own
+  // gaze actually blends BETWEEN the two, per _gasFacingBlendFor(i).
+  private _scratchGasFaceTarget!: Vector3;
+  private _scratchKingPos!: Vector3;
+  private _scratchGasPersonTarget!: Vector3;
+  // General "look at the player when a hand lingers nearby" turn (Collect
+  // beat only, see FateEventSystem.getTurnAmount) — same up/forward/right
+  // basis-construction idiom as the Gas scratch vectors above, kept
+  // separate so this doesn't fight that mechanic's own quaternion writes
+  // once the Gas King-facing blend (gasTurn) takes over post-King-death.
+  private _scratchTurnUp!: Vector3;
+  private _scratchTurnForward!: Vector3;
+  private _scratchTurnRight!: Vector3;
+  private _scratchTurnToTarget!: Vector3;
+  private _scratchTurnMatrix!: Matrix4;
+  private _scratchTurnQuat!: Quaternion;
+  private _scratchTurnTarget!: Vector3;
   private _camRight!: Vector3;
   private _camUp!: Vector3;
   private _camFwd!: Vector3;
@@ -537,9 +710,19 @@ export class FateEventVfxSystem extends createSystem({
     this._scratchGasUp = new Vector3();
     this._scratchGasForward = new Vector3();
     this._scratchGasRight = new Vector3();
-    this._scratchGasToPlayer = new Vector3();
+    this._scratchGasToTarget = new Vector3();
     this._scratchGasMatrix = new Matrix4();
     this._scratchGasTargetQuat = new Quaternion();
+    this._scratchGasFaceTarget = new Vector3();
+    this._scratchKingPos = new Vector3();
+    this._scratchTurnUp = new Vector3();
+    this._scratchTurnForward = new Vector3();
+    this._scratchTurnRight = new Vector3();
+    this._scratchTurnToTarget = new Vector3();
+    this._scratchTurnMatrix = new Matrix4();
+    this._scratchTurnQuat = new Quaternion();
+    this._scratchTurnTarget = new Vector3();
+    this._scratchGasPersonTarget = new Vector3();
     this._camRight = new Vector3();
     this._camUp = new Vector3();
     this._camFwd = new Vector3();
@@ -561,7 +744,13 @@ export class FateEventVfxSystem extends createSystem({
     this._skullFromY = new Float32Array(this._fateEvents.getPersonCount());
     this._skullFromZ = new Float32Array(this._fateEvents.getPersonCount());
 
-    this._talkedTo = new Uint8Array(NAMED_FIGURE_COUNT);
+    this._talkedTo = new Uint8Array(MAX_NAMED_FIGURES);
+    this._customPoseActive = new Uint8Array(this._fateEvents.getPersonCount());
+    GAS_CHARACTER_POSES.forEach((pose, slot) => {
+      loadPersonClip(pose.url).then((clip) => {
+        this._gasCharacterClips[slot] = clip;
+      });
+    });
 
     this._buildPeople();
     this._buildBubbles();
@@ -570,6 +759,10 @@ export class FateEventVfxSystem extends createSystem({
     this._buildSkulls();
     this._buildGhostMeshes(this._ghostMeshes, this._fateEvents.getGraveyardField().count);
     this._buildSeedMeshes(this._seedMeshes, this._fateEvents.getSeedField().count);
+    this._seedBlossom = new SeedBlossom();
+    this._seedBlossom.build(this.world, this._fateEvents.getSeedField().count, (rank, total, position) =>
+      this._onSeedBloom(rank, total, position),
+    );
 
     // signal.subscribe() fires immediately, so state is correct before the
     // first frame renders (same idiom ConstellationsVfxSystem/
@@ -608,6 +801,7 @@ export class FateEventVfxSystem extends createSystem({
     for (const mesh of this._skullMeshes) mesh.visible = false;
     for (const mesh of this._ghostMeshes) mesh.visible = false;
     for (const mesh of this._seedMeshes) mesh.visible = false;
+    this._seedBlossom.reset();
     this._wasActive.fill(0);
     this._wasVisited.fill(0);
     this._skullState.fill(SkullState.Hidden);
@@ -618,6 +812,19 @@ export class FateEventVfxSystem extends createSystem({
     this._wasComplete = false;
     this._explainerDrawn = false;
     this._payoffChimePlayed = false;
+    this._crowdTurnElapsed = -1;
+
+    // Undo _applyCustomPersonClip's action swap (Gas's own per-character
+    // poses, and/or the king-death sitting-disbelief reaction) so a fresh
+    // loop's crowd comes back up breathing/idle again instead of frozen
+    // mid-pose — same idiom earth-situations-vfx-system.ts's own
+    // _resetAll() already uses to undo the King's DyingBackwards swap.
+    for (let i = 0; i < this._customPoseActive.length; i++) {
+      if (!this._customPoseActive[i]) continue;
+      this._mixers[i]?.stopAllAction();
+      this._idleActions[i]?.reset().play();
+    }
+    this._customPoseActive.fill(0);
   }
 
   private _buildPeople(): void {
@@ -632,8 +839,8 @@ export class FateEventVfxSystem extends createSystem({
     // baked in at construction, unlike body color which used to be a live
     // per-instance uniform override.
     this._peopleMaterial = makeToonRimSkinnedMaterial(PERSON_BODY_COLOR);
-    this._namedRimPhase = new Float32Array(NAMED_FIGURE_COUNT);
-    for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
+    this._namedRimPhase = new Float32Array(MAX_NAMED_FIGURES);
+    for (let i = 0; i < MAX_NAMED_FIGURES; i++) {
       this._namedMaterials.push(makeToonRimSkinnedMaterial(PERSON_BODY_COLOR, NAMED_RIM_COLOR));
       this._namedRimPhase[i] = Math.random();
     }
@@ -642,7 +849,7 @@ export class FateEventVfxSystem extends createSystem({
     this._armOffsetZ = new Float32Array(count);
 
     for (let i = 0; i < count; i++) {
-      const material = i < NAMED_FIGURE_COUNT ? this._namedMaterials[i] : this._peopleMaterial;
+      const material = i < MAX_NAMED_FIGURES ? this._namedMaterials[i] : this._peopleMaterial;
       // Non-animated primitive placeholder immediately (visible/functional
       // right away, same graceful-degradation idiom every other FBX
       // consumer in this codebase uses) — swapped for the real shared
@@ -659,6 +866,7 @@ export class FateEventVfxSystem extends createSystem({
       this._personGroups.push(group);
       this._mixers.push(null); // no real rig/mixer until the swap below resolves
       this._rightArmBones.push(null); // _updateSituations skips the arm overlay entirely until this is real
+      this._idleActions.push(null);
       this._baseQuats.push(group.quaternion.clone());
       this._personEntities.push(this.world.createTransformEntity(group));
     }
@@ -679,11 +887,64 @@ export class FateEventVfxSystem extends createSystem({
       const group = this._personGroups[i];
       while (group.children.length > 0) group.remove(group.children[0]);
 
-      const material = i < NAMED_FIGURE_COUNT ? this._namedMaterials[i] : this._peopleMaterial;
+      const material = i < MAX_NAMED_FIGURES ? this._namedMaterials[i] : this._peopleMaterial;
       const animated = buildAnimatedPerson(template, material, PERSON_HEIGHT);
       group.add(animated.group);
       this._mixers[i] = animated.mixer;
       this._rightArmBones[i] = animated.rightArmBone;
+      this._idleActions[i] = animated.idleAction;
+    }
+  }
+
+  // Blends from whatever this figure's mixer currently has playing (always
+  // the idle action — see _customPoseActive's own one-shot-guard comment,
+  // this only ever fires once per figure) into the new clip over
+  // CUSTOM_POSE_CROSSFADE_SECONDS, instead of a hard mixer.stopAllAction()
+  // cut — the idle breathing loop otherwise vanishes and the reaction pose
+  // snaps in on the very same frame, which read as an abrupt switch rather
+  // than someone's posture actually changing.
+  private _applyCustomPersonClip(i: number, clip: AnimationClip, timeScale = 1): void {
+    const mixer = this._mixers[i];
+    const idleAction = this._idleActions[i];
+    if (!mixer || !idleAction) return; // still on the primitive placeholder — no real rig to switch yet
+    this._customPoseActive[i] = 1;
+    const action = mixer.clipAction(clip);
+    action.reset();
+    action.setLoop(LoopRepeat, Infinity);
+    action.timeScale = timeScale;
+    // Staggered per-person start offset into the clip's own loop — without
+    // this the pair sharing Sitting Disbelief (Mourner/Griever) would move in
+    // perfect unison, same "everyone starts at t=0 together" problem
+    // buildAnimatedPerson's own idle-phase randomization already solves for
+    // the breathing loop (see animated-person.ts).
+    action.time = Math.random() * clip.duration;
+    action.play();
+    action.crossFadeFrom(idleAction, CUSTOM_POSE_CROSSFADE_SECONDS, false);
+  }
+
+  // Gas/Throne only (see GAS_CHARACTER_POSES' own comment) — everyone in the
+  // gas vignette (Pointer included) stays on the plain idle loop through the
+  // king's death and the crowd's own turn (see _crowdTurnElapsed/
+  // _gasFacingBlendFor), THEN switches permanently onto their individual
+  // pose once Ambient itself ends (fate-event-system.ts's AMBIENT_BEAT_
+  // SECONDS) — comfortably after both the death and the full turn sequence
+  // (crowd-turn ramp + Pointer's own hold + break-off, all tuned to finish
+  // well inside Ambient's fixed 10s). kingDeathComplete is checked
+  // explicitly too, tying this to the actual gameplay event rather than
+  // just Ambient's timing. _customPoseActive itself is this method's
+  // per-character one-shot guard, so it's cheap to just re-check all 6
+  // every frame once past Ambient rather than needing a separate
+  // applied-everything flag.
+  private _applyGasCharacterPoses(dominant: number, beat: FateBeat): void {
+    if (dominant !== VOLATILE_GASSES_TYPE) return;
+    if (beat === FateBeat.Zoom || beat === FateBeat.Ambient) return;
+    if (!getGlobals(this.world).kingDeathComplete.peek()) return;
+    for (let slot = 0; slot < GAS_CHARACTER_POSES.length; slot++) {
+      const pose = GAS_CHARACTER_POSES[slot];
+      if (this._customPoseActive[pose.index]) continue;
+      const clip = this._gasCharacterClips[slot];
+      if (!clip) continue;
+      this._applyCustomPersonClip(pose.index, clip, pose.timeScale);
     }
   }
 
@@ -726,7 +987,7 @@ export class FateEventVfxSystem extends createSystem({
       blending: AdditiveBlending,
     });
     const geo = new PlaneGeometry(MARKER_SIZE, MARKER_SIZE);
-    for (let i = 0; i < NAMED_FIGURE_COUNT; i++) {
+    for (let i = 0; i < MAX_NAMED_FIGURES; i++) {
       const mesh = new Mesh(geo, material);
       mesh.visible = false;
       this._markerMeshes.push(mesh);
@@ -923,6 +1184,8 @@ export class FateEventVfxSystem extends createSystem({
       if (dominant === ORGANIC_MATTER_TYPE) this._pointUpTimer = POINT_UP_DURATION;
     }
 
+    this._applyGasCharacterPoses(dominant, this._fateEvents.getBeat());
+
     const positions = this._fateEvents.getSurfacePositions();
     const normals = this._fateEvents.getNormals();
     const count = this._fateEvents.getPersonCount();
@@ -971,7 +1234,17 @@ export class FateEventVfxSystem extends createSystem({
     // rather than a hard visibility toggle. Monotonic within a loop (see
     // PlanetSpinTransition.getProgress()), so no separate clamping needed
     // to prevent regression once fully formed.
-    const spinProgress = SPIN_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    // Past Constellations the civilization is always fully formed — Leg A is
+    // long over by then, so getSpinProgress() already returns 1 in normal
+    // play and this max() changes nothing. It only matters on a dev-menu
+    // jump straight to Fate Events (skipping Constellations, so Leg A never
+    // ran at all): PlanetSpinTransition.getProgress() reports 0 for "never
+    // started", which would otherwise leave every person scaled to 0 and the
+    // whole crowd invisible for a phase whose entire content is that crowd.
+    // Same dev-menu-skip safety-net idiom planet-seeding-vfx-system.ts's own
+    // startFateEventsTransition() already documents.
+    const rawSpinProgress = SPIN_ELIGIBLE_FROM.has(phase) ? this._planetSeeding.getSpinProgress() : 0;
+    const spinProgress = phase === Phase.Constellations ? rawSpinProgress : Math.max(rawSpinProgress, SPIN_ELIGIBLE_FROM.has(phase) ? 1 : 0);
     // 1.0 at Fate Events' own full PLANET_RADIUS, shrinking in lockstep the
     // rest of the time — keeps the crowd correctly sized relative to the
     // planet through Leg A's smaller intermediate radius and Leg C's later
@@ -979,7 +1252,30 @@ export class FateEventVfxSystem extends createSystem({
     // absolute size forever once formed.
     const radiusScale = this._planetSeeding.getLivePlanetRadius() / this._fateEvents.getPlanetRadius();
     const beat = this._fateEvents.getBeat();
-    const gasTurn = dominant === VOLATILE_GASSES_TYPE && phase === Phase.FateEvents ? this._gasTurnAmount(beat) : 0;
+    const isGasFateEvents = dominant === VOLATILE_GASSES_TYPE && phase === Phase.FateEvents;
+    // Starts counting the instant the King's death actually finishes (see
+    // globals.kingDeathComplete) rather than on Ambient's own beat-entry
+    // timing, so the crowd stays in its base outward-facing pose right up
+    // until he's actually dead. Sticky once started (never reset except on a
+    // fresh loop, see _resetAll) — keeps counting through later beats too, so
+    // the turn (and Pointer's later break-off) both persist into Explain/
+    // Collect/Payoff same as before.
+    if (this._crowdTurnElapsed < 0) {
+      if (dominant === VOLATILE_GASSES_TYPE && getGlobals(this.world).kingDeathComplete.peek()) {
+        this._crowdTurnElapsed = 0;
+      }
+    } else {
+      this._crowdTurnElapsed += delta;
+    }
+    const gasTurn = isGasFateEvents ? this._gasTurnAmount() : 0;
+    if (gasTurn > 0) {
+      // King/player world points — shared by everyone, computed once here
+      // rather than per-person inside the loop below. Each person then
+      // blends between the two per their OWN _gasFacingBlendFor(i).
+      this.camera.getWorldPosition(this._scratchGasFaceTarget);
+      const liveReach = this._planetSeeding.getLivePlanetRadius() + PERSON_SURFACE_OFFSET;
+      this._scratchKingPos.copy(this._scratchLiveCenter).addScaledVector(CROWD_CAP_DIRECTION, liveReach);
+    }
     for (let i = 0; i < this._personGroups.length; i++) {
       const group = this._personGroups[i];
       if (i >= maxVisible) {
@@ -992,6 +1288,13 @@ export class FateEventVfxSystem extends createSystem({
       group.scale.setScalar(formed * radiusScale);
 
       if (gasTurn > 0) {
+        // mix(king, player, facingBlend) — facingBlend 0 = facing the King
+        // (everyone starts here and, except Pointer, stays here forever), 1
+        // = facing the player (Pointer only, once it breaks off — see
+        // _gasFacingBlendFor).
+        const facingBlend = this._gasFacingBlendFor(i);
+        this._scratchGasPersonTarget.copy(this._scratchKingPos).lerp(this._scratchGasFaceTarget, facingBlend);
+
         // Recover this person's own outward "up" straight from their base
         // quaternion (it's exactly the normal that baseQuat's own
         // setFromUnitVectors(worldUp, normal) was built from) rather than
@@ -1001,18 +1304,30 @@ export class FateEventVfxSystem extends createSystem({
         // stale here (this loop runs before the one that positions people
         // this frame) — harmless given how slowly it actually moves.
         this._scratchGasUp.set(0, 1, 0).applyQuaternion(this._baseQuats[i]);
-        this.camera.getWorldPosition(this._scratchGasToPlayer);
-        this._scratchGasToPlayer.sub(group.position);
-        const alongUp = this._scratchGasToPlayer.dot(this._scratchGasUp);
-        this._scratchGasForward.copy(this._scratchGasToPlayer).addScaledVector(this._scratchGasUp, -alongUp);
+        this._scratchGasToTarget.copy(this._scratchGasPersonTarget).sub(group.position);
+        const alongUp = this._scratchGasToTarget.dot(this._scratchGasUp);
+        this._scratchGasForward.copy(this._scratchGasToTarget).addScaledVector(this._scratchGasUp, -alongUp);
         if (this._scratchGasForward.lengthSq() < 1e-6) this._scratchGasForward.set(0, 0, 1);
         this._scratchGasForward.normalize();
         this._scratchGasRight.crossVectors(this._scratchGasUp, this._scratchGasForward).normalize();
         this._scratchGasMatrix.makeBasis(this._scratchGasRight, this._scratchGasUp, this._scratchGasForward);
         this._scratchGasTargetQuat.setFromRotationMatrix(this._scratchGasMatrix);
         group.quaternion.copy(this._baseQuats[i]).slerp(this._scratchGasTargetQuat, gasTurn);
-      } else if (!group.quaternion.equals(this._baseQuats[i])) {
-        group.quaternion.copy(this._baseQuats[i]);
+      } else {
+        // General "turn to look at the player" for the Collect beat's
+        // ambient dwell interaction (see FateEventSystem.getTurnAmount) —
+        // only reached once gasTurn is 0, i.e. everyone before the Gas
+        // King-facing blend takes over (that mechanic owns orientation for
+        // the rest of the phase once it starts, see the branch above), which
+        // covers Soul/Organic entirely and Gas up until the King's death.
+        const turnAmount = beat === FateBeat.Collect ? this._fateEvents.getTurnAmount(i) : 0;
+        if (turnAmount > 0) {
+          this.camera.getWorldPosition(this._scratchTurnTarget);
+          this._computeFaceQuaternion(this._baseQuats[i], group.position, this._scratchTurnTarget, this._scratchTurnQuat);
+          group.quaternion.copy(this._baseQuats[i]).slerp(this._scratchTurnQuat, turnAmount);
+        } else if (!group.quaternion.equals(this._baseQuats[i])) {
+          group.quaternion.copy(this._baseQuats[i]);
+        }
       }
     }
 
@@ -1023,6 +1338,9 @@ export class FateEventVfxSystem extends createSystem({
 
     const active = this._fateEvents.getActiveMask();
     const lineIndex = this._fateEvents.getLineIndex();
+    // Live per-playthrough switch (see FateEventSystem.getNamedCount()'s own
+    // comment) — 2 for Soul/Organic, all of GAS_NAMED_COUNT for Gas.
+    const namedCount = this._fateEvents.getNamedCount();
 
     const bubblePull = 1 - Math.exp(-BUBBLE_EASE_RATE * delta);
     // Livelier idle bob for organics, sluggish for a gasses "ghost town" —
@@ -1037,6 +1355,15 @@ export class FateEventVfxSystem extends createSystem({
     for (let i = 0; i < count; i++) {
       this._normalVec.set(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
       this._scratchPos.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+      // Recomputed fresh every frame rather than cached once at _buildPeople()
+      // time — FateEventSystem can now rebuild `normals` per play() (Throne's
+      // semicircle vs. everyone else's cap, see its own _buildSurfaceLayout),
+      // which happens well after this system's one-time init(). A stale
+      // cached quaternion would leave a person's orientation matching
+      // whichever layout was active at boot instead of the current one, even
+      // though their (correctly live-tracked) position already moved to the
+      // new spot. Cheap at N_PEOPLE=10.
+      this._baseQuats[i].setFromUnitVectors(this._upAxis, this._normalVec);
 
       if (active[i] && !this._wasActive[i]) {
         this._wasActive[i] = 1;
@@ -1074,9 +1401,16 @@ export class FateEventVfxSystem extends createSystem({
       // (Beat 3), not proximity-triggered, so it has no hop to wait out.
       const isExplainerFigure = isExplain && i === EXPLAIN_FIGURE_INDEX;
       const bubbleMesh = this._bubbleMeshes[i];
+      // Ambient ("ghost-town"/idle) dialogue only ever advances while
+      // FateEventSystem's own _updateCollect is running (Beat 4/Collect) —
+      // once the beat moves on to Payoff, `active`/the current line just
+      // stay frozen at whatever they last were, with nothing to clear them.
+      // Without the phase check, a bubble still open at that moment would
+      // otherwise keep reading as "on" straight through the rest of Fate
+      // Events and into Launch. Explicitly off once Launch begins.
       const targetOpacity = isExplainerFigure
         ? this._fateEvents.getExplainerOpacity()
-        : peopleEnabled && active[i] && !jumping
+        : phase === Phase.FateEvents && peopleEnabled && active[i] && !jumping
           ? this._fateEvents.getBubbleOpacity(i)
           : 0;
       this._bubbleOpacity[i] += (targetOpacity - this._bubbleOpacity[i]) * bubblePull;
@@ -1107,11 +1441,12 @@ export class FateEventVfxSystem extends createSystem({
         bubbleMesh.quaternion.setFromUnitVectors(this._zAxis, this._faceDir);
       }
 
-      // Named figures only — see MARKER_* constants' own comment. targetOpacity
-      // > 0 means this exact frame is the one where that figure's own line
-      // actually starts showing (explainer reveal or ambient/paired dialogue),
-      // so that's the single moment "talked to" flips permanently true.
-      if (i < NAMED_FIGURE_COUNT) {
+      // Named figures only (i < namedCount — see MARKER_* constants' own
+      // comment). targetOpacity > 0 means this exact frame is the one where
+      // that figure's own line actually starts showing (explainer reveal or
+      // ambient/paired/named dialogue), so that's the single moment "talked
+      // to" flips permanently true.
+      if (i < namedCount) {
         if (!this._talkedTo[i] && targetOpacity > 0) this._talkedTo[i] = 1;
 
         const markerMesh = this._markerMeshes[i];
@@ -1170,19 +1505,29 @@ export class FateEventVfxSystem extends createSystem({
           dancing,
           true, // bob — ghosts float, always bobbing regardless of state
           time,
+          phase,
         );
+        const seedField = this._fateEvents.getSeedField();
+        const showSeeds = dominant === ORGANIC_MATTER_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase);
         this._updateCollectibles(
           this._seedMeshes,
           this._seedRimPhase,
-          this._fateEvents.getSeedField(),
-          dominant === ORGANIC_MATTER_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase),
+          seedField,
+          showSeeds,
           trail,
           samples,
           stride,
           false,
           false, // bob — seeds sit on the ground, no float
           time,
+          phase,
         );
+        // After _updateCollectibles — the blossom reads each seed mesh's
+        // fresh trail position as its plant's anchor, and hides the seed.
+        if (showSeeds && beat === FateBeat.Payoff && !this._seedBlossom.isTriggered()) {
+          this._seedBlossom.trigger(seedField.capturedT, seedField.states);
+        }
+        this._seedBlossom.update(delta, this._seedMeshes, showSeeds);
       }
       break; // exactly one comet entity, see comet-handoff-system.ts
     }
@@ -1196,19 +1541,62 @@ export class FateEventVfxSystem extends createSystem({
       this._payoffChimePlayed = true;
       playPayoffChime(this._audioListener, this.scene, this._scratchCometPos, 520);
     }
-    if (beat !== FateBeat.Payoff) this._payoffChimePlayed = false;
+    if (beat !== FateBeat.Payoff) {
+      this._payoffChimePlayed = false;
+      this._seedBlossom.reset(); // no-op unless a previous loop's blossom is still showing
+    }
   }
 
-  // 0-1 — how far into Gas's Beat 2.5 "turn to face the player" sub-beat
-  // (8-10s) we are; 0 before it starts, holds at 1 for the rest of the
-  // phase once it finishes (Explain/Collect/Payoff) rather than reverting —
-  // see this file's own GAS_TURN_* comment.
-  private _gasTurnAmount(beat: FateBeat): number {
-    if (beat === FateBeat.Zoom) return 0;
-    if (beat === FateBeat.Ambient) {
-      return smoothstep(clamp01((this._fateEvents.getBeatElapsed() - GAS_TURN_START) / GAS_TURN_DURATION));
-    }
-    return 1;
+  // See BLOOM_* constants' own comment.
+  private _onSeedBloom(rank: number, total: number, position: Vector3): void {
+    const t = total > 1 ? rank / (total - 1) : 1;
+    const speed = BLOOM_SPEED_MIN + (BLOOM_SPEED_MAX - BLOOM_SPEED_MIN) * t;
+    this._voiceSynth.playCatch(ORGANIC_MATTER_TYPE, position, speed);
+    this._twinkleSynth.playPickup(position, speed);
+    if (rank === total - 1) playPayoffChime(this._audioListener, this.scene, position, BLOOM_FINAL_CHIME_FREQ);
+  }
+
+  // Builds the quaternion that orients baseQuat's own local +Z toward
+  // targetPos, keeping baseQuat's own "up" (recovered from it directly, not
+  // assumed to be world +Y — see the Gas turn block's matching comment
+  // above) fixed, so a person keeps standing correctly on their own patch of
+  // the curved planet surface while turning to face targetPos. Same
+  // up/forward/right/makeBasis idiom as the Gas King-facing blend above,
+  // factored out here since the general player-turn case below needs it too
+  // without a King point to blend against.
+  private _computeFaceQuaternion(baseQuat: Quaternion, personPos: Vector3, targetPos: Vector3, out: Quaternion): void {
+    this._scratchTurnUp.set(0, 1, 0).applyQuaternion(baseQuat);
+    this._scratchTurnToTarget.copy(targetPos).sub(personPos);
+    const alongUp = this._scratchTurnToTarget.dot(this._scratchTurnUp);
+    this._scratchTurnForward.copy(this._scratchTurnToTarget).addScaledVector(this._scratchTurnUp, -alongUp);
+    if (this._scratchTurnForward.lengthSq() < 1e-6) this._scratchTurnForward.set(0, 0, 1);
+    this._scratchTurnForward.normalize();
+    this._scratchTurnRight.crossVectors(this._scratchTurnUp, this._scratchTurnForward).normalize();
+    this._scratchTurnMatrix.makeBasis(this._scratchTurnRight, this._scratchTurnUp, this._scratchTurnForward);
+    out.setFromRotationMatrix(this._scratchTurnMatrix);
+  }
+
+  // 0 = still standing in the base outward-facing pose, 1 = fully turned
+  // toward this frame's face target (see _gasFacingBlendFor for WHICH
+  // target — the same amount applies to everyone, but WHO they're turned
+  // toward differs per person). Driven by _crowdTurnElapsed, which only
+  // starts counting once the King has actually died (see update()'s own
+  // comment) rather than on Ambient's own beat-entry timing.
+  private _gasTurnAmount(): number {
+    if (this._crowdTurnElapsed < 0) return 0;
+    return smoothstep(clamp01(this._crowdTurnElapsed / GAS_KING_TURN_RAMP_SECONDS));
+  }
+
+  // 0 = facing the King, 1 = facing the player — only meaningful once
+  // _gasTurnAmount above has actually turned this person away from their
+  // base pose. Everyone except Pointer (EXPLAIN_FIGURE_INDEX) stays at 0
+  // (facing the King) forever once turned — Pointer alone breaks off toward
+  // the player after POINTER_KING_HOLD_SECONDS, since it's the one whose
+  // own line tells the player to go talk to everyone.
+  private _gasFacingBlendFor(i: number): number {
+    if (i !== EXPLAIN_FIGURE_INDEX) return 0;
+    const t = this._crowdTurnElapsed - GAS_KING_TURN_RAMP_SECONDS - POINTER_KING_HOLD_SECONDS;
+    return smoothstep(clamp01(t / GAS_TURN_DURATION));
   }
 
   // Organic matter's one-shot "point at the comet" pose, and Gas's Beat 2.5
@@ -1243,6 +1631,7 @@ export class FateEventVfxSystem extends createSystem({
 
     const armPull = 1 - Math.exp(-POINT_UP_EASE_RATE * delta);
     for (let i = 0; i < count; i++) {
+      if (this._customPoseActive[i]) continue; // Gas's own post-death cast pose owns this figure now, not the idle/point-up/wave overlay
       const bone = this._rightArmBones[i];
       if (!bone) continue; // still on the primitive placeholder — no real bone to pose yet
 
@@ -1346,6 +1735,7 @@ export class FateEventVfxSystem extends createSystem({
     dance: boolean,
     bob: boolean,
     time: number,
+    phase: Phase,
   ): void {
     if (!show) {
       for (const mesh of meshes) mesh.visible = false;
@@ -1354,6 +1744,21 @@ export class FateEventVfxSystem extends createSystem({
     const { positions, states, capturedField } = field;
     for (let i = 0; i < meshes.length; i++) {
       const mesh = meshes[i];
+
+      // A collectible left uncaptured once Fate Events ends (the phase's
+      // own timeoutSeconds safety net can force everyone through Beat 4
+      // before a player finds the very last one — see index.ts's
+      // Phase.FateEvents comment) has no reason to keep sitting there,
+      // still pulsing, on a planet that's now visibly receding into the
+      // Launch choice — despawn it here rather than let it linger all the
+      // way through Launch/Finale (COLLECTIBLE_VISIBLE_FROM's own comment
+      // is about keeping ALREADY-CAPTURED ones riding the tail visible
+      // that far, not these). Captured ones are unaffected — that branch
+      // below always sets its own mesh.visible = true regardless of phase.
+      if (states[i] !== GatherState.Captured && phase !== Phase.FateEvents) {
+        mesh.visible = false;
+        continue;
+      }
       mesh.visible = true;
 
       // uTime drives the ghost material's own wiggle vertex displacement
