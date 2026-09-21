@@ -65,3 +65,6 @@ coverage/
 public/gltf/generated/
 public/glxf/
 public/ui/
+# Blender files
+*.blend
+*.blend1
