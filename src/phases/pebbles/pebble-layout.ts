@@ -13,29 +13,38 @@ import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
 // rest of that ring is spaced evenly around it.
 const FIRST_GROUP_DIR: [number, number, number] = [0, 0, -1];
 
-const N_GROUPS = 9;
-const GROUP_SPACING_DEG = 360 / N_GROUPS; // 40°
-// Wider than half the spacing (20°) so neighboring groups' cones overlap a
-// little rather than leaving a hard-edged gap between them.
-const GROUP_HALF_ANGLE_DEG = 23;
+// Cut from 9 (and the overhead ring's own count below cut from 6) — at the
+// old spacing/half-angle, neighboring groups' cones actually overlapped
+// (40° spacing vs. a 23° half-angle leaves no gap at all), so a hand aimed
+// at one color's group would often already be in range of the adjacent
+// group's different color too. Fewer, narrower-coned groups with a real gap
+// between neighbors makes "go stand in front of this color" an actually
+// reliable way to avoid the others, while still keeping the "discover
+// scattered clusters around you" feel (as opposed to collapsing each color
+// into one contiguous wedge of the room).
+const N_GROUPS = 6;
+const GROUP_SPACING_DEG = 360 / N_GROUPS; // 60°
+// Well under half the spacing (30°) so neighboring groups' cones leave a
+// real gap between them instead of overlapping.
+const GROUP_HALF_ANGLE_DEG = 18;
 
-// A second, higher ring — six groups tilted UPPER_ELEVATION_DEG above the
-// horizon, offset in azimuth from the lower ring (see
-// UPPER_GROUP_AZIMUTH_OFFSET_DEG) so they sit between the lower groups
-// rather than stacking directly above them, reading as a distinct overhead
-// layer rather than a taller version of the same ring.
+// A second, higher ring — tilted UPPER_ELEVATION_DEG above the horizon,
+// offset in azimuth from the lower ring (see UPPER_GROUP_AZIMUTH_OFFSET_DEG)
+// so they sit between the lower groups rather than stacking directly above
+// them, reading as a distinct overhead layer rather than a taller version of
+// the same ring.
 const UPPER_ELEVATION_DEG = 55;
-const N_UPPER_GROUPS = 6;
-const UPPER_GROUP_SPACING_DEG = 360 / N_UPPER_GROUPS; // 60°
+const N_UPPER_GROUPS = 4;
+const UPPER_GROUP_SPACING_DEG = 360 / N_UPPER_GROUPS; // 90°
 const UPPER_GROUP_AZIMUTH_OFFSET_DEG = UPPER_GROUP_SPACING_DEG / 2;
 const UPPER_FIRST_GROUP_DIR: [number, number, number] = [
   0,
   Math.sin((UPPER_ELEVATION_DEG * Math.PI) / 180),
   -Math.cos((UPPER_ELEVATION_DEG * Math.PI) / 180),
 ];
-// Same overlap idea as GROUP_HALF_ANGLE_DEG, sized for this ring's own
-// wider per-group spacing (60° vs. the horizon ring's 40°).
-const UPPER_GROUP_HALF_ANGLE_DEG = 28;
+// Same real-gap idea as GROUP_HALF_ANGLE_DEG, sized for this ring's own
+// wider per-group spacing (90° vs. the horizon ring's 60°).
+const UPPER_GROUP_HALF_ANGLE_DEG = 24;
 
 export interface PebbleSpawnPoint {
   dir: Vector3;
@@ -51,10 +60,12 @@ function rotateAroundY(base: [number, number, number], degrees: number): Vector3
 }
 
 // Blue=0, Green=1, Red=2 — see pebble-type.ts's PEBBLE_TYPES. Cycling all
-// three colors across every group (15 total between both rings, still a
-// multiple of 3) keeps each color represented evenly in both the horizon
-// ring and the overhead ring, rather than one layer skewing toward one
-// color.
+// three colors across every group keeps each color represented in both the
+// horizon ring (6 groups, an exact multiple of 3 — perfectly even 2/2/2
+// split) and the overhead ring (4 groups — cycle continues from the horizon
+// ring's own count rather than restarting, so it's whichever color comes
+// next, not always the same one; not perfectly even, but only off by one
+// group, cosmetically unnoticeable).
 const GROUP_COLOR_CYCLE = [0, 1, 2];
 interface GroupDef {
   center: Vector3;

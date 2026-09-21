@@ -1,15 +1,15 @@
 import { AudioListener, PositionalAudio, Scene, Vector3 } from '@iwsdk/core';
 
 // Major triad + octave, ascending — the classic "unlock" shape.
-const NOTE_RATIOS = [1.0, 1.26, 1.5, 2.0];
-const NOTE_STAGGER = 0.09; // seconds between each note's start
+const NOTE_RATIOS = [1.0, 1.25, 1.5, 2.0, 2.5];
+const NOTE_STAGGER = 0.08; // seconds between each note's start
 const ROOT_FREQ = 520;
 const NOTE_ATTACK = 0.006;
 const NOTE_DECAY = 0.35;
 const NOTE_GAIN = 0.14;
 const REVERB_DURATION = 1.8;
 const REVERB_DECAY_EXPONENT = 2.6;
-const REVERB_SEND = 0.4;
+const REVERB_SEND = 0.55;
 
 function buildReverbImpulse(context: AudioContext): AudioBuffer {
   const length = Math.floor(context.sampleRate * REVERB_DURATION);
@@ -61,17 +61,24 @@ export class AchievementSynth {
       osc.type = 'sine';
       osc.frequency.value = ROOT_FREQ * NOTE_RATIOS[i];
 
+      // Inharmonic bell partial (~2.76x) rather than a plain octave — gives
+      // each note a glassy chime attack instead of a flat sine blip.
       const partial2 = context.createOscillator();
       partial2.type = 'sine';
-      partial2.frequency.value = ROOT_FREQ * NOTE_RATIOS[i] * 2;
+      partial2.frequency.value = ROOT_FREQ * NOTE_RATIOS[i] * 2.76;
+
+      // Later notes ring longer, so the arpeggio blooms into a lingering
+      // chord; the final note gets the longest tail.
+      const decay = NOTE_DECAY * (1 + i * 0.5);
 
       const g = context.createGain();
       g.gain.setValueAtTime(0, start);
       g.gain.linearRampToValueAtTime(NOTE_GAIN, start + NOTE_ATTACK);
-      g.gain.exponentialRampToValueAtTime(0.0001, start + NOTE_ATTACK + NOTE_DECAY);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + NOTE_ATTACK + decay);
 
       const partial2Gain = context.createGain();
-      partial2Gain.gain.value = 0.3;
+      partial2Gain.gain.setValueAtTime(0.25, start);
+      partial2Gain.gain.exponentialRampToValueAtTime(0.0001, start + NOTE_ATTACK + decay * 0.4);
 
       osc.connect(g);
       partial2.connect(partial2Gain);
@@ -79,9 +86,9 @@ export class AchievementSynth {
       g.connect(sum);
 
       osc.start(start);
-      osc.stop(start + NOTE_ATTACK + NOTE_DECAY + 0.05);
+      osc.stop(start + NOTE_ATTACK + decay + 0.05);
       partial2.start(start);
-      partial2.stop(start + NOTE_ATTACK + NOTE_DECAY + 0.05);
+      partial2.stop(start + NOTE_ATTACK + decay + 0.05);
     }
 
     const dry = context.createGain();
@@ -97,7 +104,8 @@ export class AchievementSynth {
     sound.position.copy(position);
     this._scene.add(sound);
 
-    const totalLifetime = (NOTE_RATIOS.length - 1) * NOTE_STAGGER + NOTE_ATTACK + NOTE_DECAY + 0.1;
+    const totalLifetime =
+      (NOTE_RATIOS.length - 1) * NOTE_STAGGER + NOTE_ATTACK + NOTE_DECAY * (1 + (NOTE_RATIOS.length - 1) * 0.5) + 0.1;
     setTimeout(() => {
       this._scene.remove(sound);
       sum.disconnect();

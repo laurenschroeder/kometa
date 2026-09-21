@@ -1,10 +1,12 @@
-import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
+import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { GatherableField, GatherHandInput } from '../../comet/gatherable-field.js';
-import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { HandAnchor, HandSide } from '../../comet/hand-anchor-component.js';
 import { AchievementSystem } from '../../core/achievement-system.js';
 import { getGlobals } from '../../core/globals.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import {
+  FATE_GAS_INTRO_TEXT,
   farewellMessage,
   FateDialogueEntry,
   fateEventsIntroMessage,
@@ -14,8 +16,8 @@ import {
   NAMED_FIGURES_BY_TYPE,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { DwellRiseSynth } from '../../vfx/audio/dwell-rise-synth.js';
-import { scatterOnSphereCap, scatterOnSphereCapEven, scatterSemicircleAroundPoint } from '../../vfx/geometry/sphere-scatter.js';
+import { PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
+import { scatterOnSphereCap, scatterOnSphereCapEven, scatterTwoRowSemicircle } from '../../vfx/geometry/sphere-scatter.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { CaptureEvent } from '../stardust/stardust-system.js';
@@ -47,7 +49,11 @@ const ORIGIN = new Vector3(0, 0, 0);
 // still leaves the sphere's single closest point (off in the
 // KING_EXCLUSION-side direction, nowhere near where anything is actually
 // rendered) comfortably outside camera near-clip range.
-export const PLANET_CENTER: [number, number, number] = [0, -0.35, -1.6];
+// Z brought in again from -1.6 (Y dropped from -0.35 to -0.45 alongside it):
+// the sphere's radius is 1.4, so its center must stay >1.4m from the player
+// or the camera ends up inside the planet — 1.52m here keeps ~0.12m of
+// clearance while putting the populated cap ~0.15m closer in depth.
+export const PLANET_CENTER: [number, number, number] = [0, -0.45, -1.15];
 export const PLANET_RADIUS = 1.4;
 export const CROWD_CAP_DIRECTION = new Vector3(0, 0.95, 0.2).normalize();
 export const N_PEOPLE = 10;
@@ -76,24 +82,31 @@ export const PLANT_EXCLUSION_HALF_ANGLE = CAP_HALF_ANGLE + (6 * Math.PI) / 180;
 // Collect beat win condition is purely "visit everyone" (see
 // VISIT_FRACTION_TO_COMPLETE), so its crowd benefits the most from more
 // room between neighbors.
-const THRONE_ARC_ANGLE = (32 * Math.PI) / 180;
+// Now two staggered rows (see scatterTwoRowSemicircle): front ring nearer the
+// King, back ring farther out (still inside CAP_HALF_ANGLE).
+const THRONE_FRONT_ARC_ANGLE = (22 * Math.PI) / 180;
+const THRONE_BACK_ARC_ANGLE = (38 * Math.PI) / 180;
 // Bumped from 0.3 — easier to trigger just by swinging/walking the comet
 // through the crowd instead of needing to land precisely on someone.
-const PROXIMITY_RADIUS = 0.45;
+// Tightened to a touch radius now that there's no dwell — colliding with the
+// person OR their star (see TALK_STAR_HEIGHT) triggers them instantly, so a
+// swipe shouldn't reach neighbours.
+const PROXIMITY_RADIUS = 0.15;
+// Height above a person's surface point (along their normal) the "talk to me"
+// star floats at — exported so FateEventVfxSystem draws it in the same spot
+// the collision test below checks. Lowered from PERSON_HEIGHT * 2.3.
+export const TALK_STAR_HEIGHT = PERSON_HEIGHT * 1.35;
+const STAR_TOUCH_RADIUS = 0.1;
+// Once triggered, a person stays "active" (bubble open, facing the player)
+// while the hand is within this wider radius, then LEAVE_GRACE_SECONDS after.
+const STAY_RADIUS = 0.45;
 // How long a person takes to turn from their base outward-facing pose to
-// look at the player once a hand is near (TURN_IN_SECONDS), and to turn
-// back once it leaves (TURN_OUT_SECONDS, a little slower — reads as
+// look at the player once triggered (TURN_IN_SECONDS), and to turn back
+// once the hand leaves (TURN_OUT_SECONDS, a little slower — reads as
 // settling back rather than snapping) — see _turnAmount/getTurnAmount().
-// _visited below is now gated on this actually reaching 1 rather than
-// firing the instant a hand grazes past (see PROXIMITY_RADIUS's own
-// "easier to trigger" comment above) — a comet just swinging/walking
-// through the crowd in one continuous pass no longer silently visits
-// everyone it happened to cross, since nobody has time to actually turn
-// and notice before it's already moved on. Bumped from 0.9 — that was too
-// quick to actually register as a dwell; now paired with its own rising
-// tone (see DwellRiseSynth/_updateDwellRiseAudio) so the wait reads as
-// "something building," same idiom as OrbitalLaunchSystem's CHARGE_SECONDS.
-const TURN_IN_SECONDS = 1.8;
+// Triggering itself is instant (no dwell); the bubble just waits for this
+// turn to finish so it opens once they're facing the player.
+const TURN_IN_SECONDS = 1.0;
 const TURN_OUT_SECONDS = 1.3;
 // Keeps the ambient crowd off the exact center point earth-situations-vfx-
 // system.ts's _buildKing reserves for the King (see its own comment) —
@@ -172,8 +185,15 @@ const NAMED_DWELL_THRESHOLD = 0.5;
 // Beat 4 never starts until Beat 2's zoom (Leg B) has fully settled the
 // planet there.
 const COLLECTIBLE_COUNT = 10;
-const COLLECTIBLE_SURFACE_OFFSET_MIN = 0.02;
-const COLLECTIBLE_SURFACE_OFFSET_MAX = 0.06;
+// Bumped from 0.02/0.06 — comparable to or smaller than a seed's own mesh
+// size (SEED_MESH's SEED_SIZE = 0.035 in fate-event-vfx-system.ts), and
+// nothing here orients a seed's mesh to the outward surface normal (unlike
+// e.g. growth-pool's planted flowers), so a seed's own body could extend
+// back past this offset and read as partly sunk into the planet depending
+// on its random rotation. Widened enough to clear that mesh size with
+// margin regardless of orientation.
+const COLLECTIBLE_SURFACE_OFFSET_MIN = 0.05;
+const COLLECTIBLE_SURFACE_OFFSET_MAX = 0.1;
 // Deliberately much tighter than StardustSystem's own attractRadius/
 // captureDistance (0.4/0.05) — these are scattered across the planet's
 // surface rather than floating in open space, so a generous attract radius
@@ -181,13 +201,16 @@ const COLLECTIBLE_SURFACE_OFFSET_MAX = 0.06;
 // without the player ever having to actually go find and reach for one.
 // Small enough that the hand needs to be right up against a specific
 // ghost/seed for it to start pulling in.
+// Attract radius == capture distance: no magnet pull or lingering, a
+// particle is captured (with its catch sound) the same frame the comet
+// touches it.
 const COLLECTIBLE_ATTRACT_RADIUS = 0.08;
-const COLLECTIBLE_CAPTURE_DISTANCE = 0.03;
+const COLLECTIBLE_CAPTURE_DISTANCE = 0.08;
 // Soul's ghosts are much bigger than seeds and their mesh origin sits at the
 // base of the tail, so a hand touching a ghost's body could still be outside
-// the seed-sized radius above — some only latched on after lingering.
+// the seed-sized radius above.
 const GHOST_ATTRACT_RADIUS = 0.12;
-const GHOST_CAPTURE_DISTANCE = 0.05;
+const GHOST_CAPTURE_DISTANCE = 0.12;
 const COLLECTIBLE_ATTRACT_RATE = 3.0;
 const COLLECTIBLE_CAPTURED_AGE_DECAY = 3.0;
 const COLLECTIBLE_CAPTURED_SPREAD_BASE = 0.01;
@@ -218,6 +241,18 @@ export enum FateBeat {
 }
 
 const AMBIENT_BEAT_SECONDS = 10;
+// Soul/Organic have no scripted ambient sequence to wait on (that's Gas's
+// king-death), so the explainer figure becomes triggerable almost as soon as
+// the planet arrives.
+const AMBIENT_NON_GAS_SECONDS = 1;
+// Gas's king-death starts this far into the Ambient beat at the earliest —
+// but see AMBIENT_GAS_DEATH_HOLD: it also waits for the intro notification
+// (FATE_GAS_INTRO_TEXT) to fade out first, and Ambient is held long enough
+// after that for the whole death sequence to play.
+export const GAS_DEATH_START_SECONDS = 3;
+// If the Gas intro notification somehow never finishes, Ambient still ends
+// after this long.
+const AMBIENT_GAS_FALLBACK_SECONDS = 25;
 // Longer hold than the ambient crowd's own BUBBLE_HOLD_SECONDS — this is the
 // one line every player must actually read, not a chatter line that's fine
 // to miss.
@@ -237,7 +272,13 @@ const EXPLAIN_FALLBACK_SECONDS = 30;
 // phaseComplete only fires this far in — the rest keeps playing on into
 // Phase.Launch as the comet departs, same precedent as CrownRise/GhostRise
 // persisting past their own triggering phase.
-const PAYOFF_HOLD_SECONDS = 7;
+const PAYOFF_HOLD_SECONDS = 1;
+// The wrist Continue button unlocks once this fraction of Beat 4's collect
+// target (see getCollectProgress01) is done — short of the full collection,
+// so the player can move on without chasing every last figure. Finishing
+// the whole collection still plays Payoff and earns its achievement, then
+// advances by itself as before — Continue only shortcuts to Payoff.
+const CONTINUE_COLLECT_FRACTION = 0.5;
 
 // Gameplay for Fate Events: a big planet appears near the player, populated
 // with N_PEOPLE placeholder figures scattered across its near-facing surface
@@ -256,7 +297,15 @@ export class FateEventSystem extends createSystem({
   private _planetSeeding!: PlanetSeedingVfxSystem;
 
   private _beat: FateBeat = FateBeat.Zoom;
+  // _payoffByCollecting is true only when Payoff was reached by finishing
+  // the collection (which is what earns the type's achievement), not by
+  // pressing the wrist Continue button early (see continueNow).
+  private _payoffByCollecting = false;
+  private _payoffAchievementDone = false;
   private _beatTimer = 0;
+  // Beat-timer value at which Gas's king-death sequence started, or -1 if it
+  // hasn't yet (see the Ambient branch of update()).
+  private _gasDeathStartedAt = -1;
 
   private _surfacePositions!: Float32Array;
   private _normals!: Float32Array;
@@ -281,9 +330,13 @@ export class FateEventSystem extends createSystem({
   // reaching 1 (see _updateCollect) rather than firing the instant a hand
   // grazes past.
   private _turnAmount!: Float32Array;
-  // Which person (if any) the dwell-rise tone is currently voicing — see
-  // _updateDwellRiseAudio. -1 when nobody is currently mid-turn.
-  private _risingPersonIndex = -1;
+  // 1 once a hand has touched this person's body or star (see _trigger) —
+  // hides their star and, in Collect, is what counts as a "visit". Reset
+  // each play().
+  private _triggered!: Uint8Array;
+  // Fired by _trigger, drained each frame by FateEventVfxSystem to play the
+  // talk-trigger cue — same produce/drain shape as _collectCaptureEvents.
+  private _talkTriggerEvents: CaptureEvent[] = [];
   // Random per-play rotation into this._dialogue.entries — see
   // getDialogueLinesFor(). Guarantees every ambient crowd member gets a
   // distinct entry this playthrough (no two people say the same thing) and,
@@ -299,12 +352,6 @@ export class FateEventSystem extends createSystem({
   // stop() to decide who (if anyone) gets the farewell message.
   private _namedDwell!: Float32Array;
 
-  // Own AudioListener, same reason every other generative-audio system in
-  // this codebase has one (see e.g. OrbitalLaunchSystem's own comment) —
-  // drives the dwell-rise tone (see _updateDwellRiseAudio/DwellRiseSynth).
-  private _audioListener!: AudioListener;
-  private _dwellRiseSynth!: DwellRiseSynth;
-  private _scratchRisingPos!: Vector3;
   private _scratchCamPos!: Vector3;
 
   private _dialogue!: FateDialogueEntry;
@@ -315,6 +362,21 @@ export class FateEventSystem extends createSystem({
   // has actually been near EXPLAIN_FIGURE_INDEX, then holds/fades on its
   // own timeline regardless of whether they wander off mid-read.
   private _explainTriggered = false;
+  // Soul/Organic follow-up: after the scripted explainer line, touching the
+  // explainer figure again says the next unsaid line of the dialogue's
+  // entries (flattened) until they run out. -1 timer = nothing showing.
+  private _followupLines: string[] = [];
+  private _followupNext = 0;
+  private _followupText = '';
+  private _followupTimer = -1;
+  private _touchingExplainerPrev = false;
+  // This playthrough's arrival intro line (see update()'s Zoom branch).
+  private _introText = '';
+  // Soul ghosts / Organic seeds stay hidden until the player has talked to
+  // the explainer figure (or Collect begins regardless) — see
+  // getCollectiblesRevealElapsed().
+  private _collectiblesRevealed = false;
+  private _collectiblesRevealElapsed = 0;
   private _explainElapsed = 0;
 
   // Beat 4's Soul/Organic collectible fields (Gas instead reuses the
@@ -337,6 +399,11 @@ export class FateEventSystem extends createSystem({
 
   private _scratchHandPos!: Vector3;
   private _scratchHandVel!: Vector3;
+  // Which hand currently holds the comet, refreshed each _updateCollect()
+  // hand-position pass — read by the _visited edge below (a separate,
+  // per-person loop with no entity of its own) so it knows which controller
+  // to buzz.
+  private _currentHand: string = HandSide.Left;
 
   init(): void {
     this._planetSeeding = this.world.getSystem(PlanetSeedingVfxSystem)!;
@@ -353,6 +420,7 @@ export class FateEventSystem extends createSystem({
     this._lineTimer = new Float32Array(N_PEOPLE);
     this._visited = new Uint8Array(N_PEOPLE);
     this._turnAmount = new Float32Array(N_PEOPLE);
+    this._triggered = new Uint8Array(N_PEOPLE);
     this._namedDwell = new Float32Array(NAMED_FIGURE_COUNT);
 
     this._dialogue = getFateDialogue(null);
@@ -362,13 +430,7 @@ export class FateEventSystem extends createSystem({
     this._scratchHandPos = new Vector3();
     this._scratchHandVel = new Vector3();
     this._hand = { position: new Vector3(), speed: 0, seen: false };
-    this._scratchRisingPos = new Vector3();
     this._scratchCamPos = new Vector3();
-
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
-    this._dwellRiseSynth = new DwellRiseSynth();
-    this._dwellRiseSynth.build(this._audioListener, this.scene);
 
     // KING_EXCLUSION_HALF_ANGLE passed here too (previously omitted) — without
     // it a graveyard ghost or organic seed could land dead in the crowd cap's
@@ -476,12 +538,13 @@ export class FateEventSystem extends createSystem({
       // see FateEventVfxSystem._updateLivePositions) slots with copies of
       // the last real one.
       const visibleCount = VISIBLE_PEOPLE_BY_TYPE[VOLATILE_GASSES_TYPE];
-      const { positions, normals } = scatterSemicircleAroundPoint(
+      const { positions, normals } = scatterTwoRowSemicircle(
         visibleCount,
         center,
         PLANET_RADIUS,
         CROWD_CAP_DIRECTION,
-        THRONE_ARC_ANGLE,
+        THRONE_FRONT_ARC_ANGLE,
+        THRONE_BACK_ARC_ANGLE,
       );
       this._surfacePositions = new Float32Array(N_PEOPLE * 3);
       this._normals = new Float32Array(N_PEOPLE * 3);
@@ -553,9 +616,10 @@ export class FateEventSystem extends createSystem({
     // Every type now gets its own intro line here (NOTIFICATION_COPY[Phase.
     // FateEvents] is empty — see fateEventsIntroMessage's own comment),
     // replacing the old shared-generic-line-plus-Gas-only-supplement split.
-    const notifications = this.world.getSystem(NotificationHudSystem);
-    const { text, holdSeconds } = fateEventsIntroMessage(dominantType);
-    notifications?.notify(text, holdSeconds);
+    // The intro line is no longer fired here — it plays once the planet has
+    // finished zooming in (see update()'s Zoom branch), and Ambient/its
+    // interactions wait for it to finish.
+    this._introText = fateEventsIntroMessage(dominantType).text;
 
     this._active.fill(0);
     this._awayTimer.fill(0);
@@ -564,11 +628,16 @@ export class FateEventSystem extends createSystem({
     this._visited.fill(0);
     this._visitedCount = 0;
     this._turnAmount.fill(0);
-    this._dwellRiseSynth.stop();
-    this._risingPersonIndex = -1;
+    this._triggered.fill(0);
+    this._talkTriggerEvents.length = 0;
     this._namedDwell.fill(0);
     this._explainTriggered = false;
     this._explainElapsed = 0;
+    this._followupLines = this._dialogue.entries.flat();
+    this._followupNext = 0;
+    this._followupText = '';
+    this._followupTimer = -1;
+    this._touchingExplainerPrev = false;
     this._dialogueOffset = Math.floor(Math.random() * this._dialogue.entries.length);
 
     // Beat 4's collectible fields were built once at init() (before this
@@ -587,6 +656,11 @@ export class FateEventSystem extends createSystem({
 
     this._beat = FateBeat.Zoom;
     this._beatTimer = 0;
+    this._gasDeathStartedAt = -1;
+    this._collectiblesRevealed = false;
+    this._collectiblesRevealElapsed = 0;
+    this._payoffByCollecting = false;
+    this._payoffAchievementDone = false;
 
     // Primary trigger for Leg B — the final grow/zoom-in from wherever
     // Constellations' spin transition (Leg A) left the planet, to
@@ -618,13 +692,42 @@ export class FateEventSystem extends createSystem({
 
   update(delta: number): void {
     this._beatTimer += delta;
+    if (this._collectiblesRevealed) this._collectiblesRevealElapsed += delta;
 
     if (this._beat === FateBeat.Zoom) {
-      if (!this._planetSeeding.isFateTransitionActive()) this._enterBeat(FateBeat.Ambient);
+      if (!this._planetSeeding.isFateTransitionActive()) {
+        const { text, holdSeconds } = fateEventsIntroMessage(getGlobals(this.world).dominantPebbleType.peek());
+        this.world.getSystem(NotificationHudSystem)?.notify(text, holdSeconds);
+        this._enterBeat(FateBeat.Ambient);
+      }
       return;
     }
     if (this._beat === FateBeat.Ambient) {
-      if (this._beatTimer >= AMBIENT_BEAT_SECONDS) {
+      // Soul/Organic: people only become interactive (Explain's yellow-rim
+      // objective) once the arrival intro line has finished.
+      if (
+        getGlobals(this.world).dominantPebbleType.peek() !== VOLATILE_GASSES_TYPE &&
+        !this.world.getSystem(NotificationHudSystem)?.hasFinished(this._introText) &&
+        this._beatTimer < AMBIENT_GAS_FALLBACK_SECONDS
+      ) {
+        return;
+      }
+      // Gas: the death starts once the intro notification has finished (see
+      // EarthSituationsVfxSystem), so hold Ambient until the rest of the
+      // sequence has had its usual time after that start.
+      if (getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE) {
+        if (this._gasDeathStartedAt < 0 && this.world.getSystem(NotificationHudSystem)?.hasFinished(FATE_GAS_INTRO_TEXT)) {
+          this._gasDeathStartedAt = Math.max(this._beatTimer, GAS_DEATH_START_SECONDS);
+        }
+        if (this._gasDeathStartedAt < 0 && this._beatTimer < AMBIENT_GAS_FALLBACK_SECONDS) return;
+      }
+      const ambientEnd =
+        this._gasDeathStartedAt >= 0
+          ? Math.max(AMBIENT_BEAT_SECONDS, this._gasDeathStartedAt + (AMBIENT_BEAT_SECONDS - GAS_DEATH_START_SECONDS))
+          : getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE
+            ? AMBIENT_BEAT_SECONDS
+            : AMBIENT_NON_GAS_SECONDS;
+      if (this._beatTimer >= ambientEnd) {
         // Gas skips the scripted Explain beat entirely — every person is
         // already an equally "named," gold-rimmed, must-talk-to figure (see
         // GAS_NAMED_COUNT), so there's no single explainer to wait on before
@@ -655,14 +758,22 @@ export class FateEventSystem extends createSystem({
       // threshold. Only one of the three names any given run, since only one
       // dominant type is ever active; seeing all three means playing through
       // with each type across separate loops.
-      const dominant = getGlobals(this.world).dominantPebbleType.peek();
-      const id =
-        dominant === SOUL_DUST_TYPE
-          ? 'soul-collector'
-          : dominant === ORGANIC_MATTER_TYPE
-            ? 'green-thumb'
-            : 'faced-the-mob';
-      this.world.getSystem(AchievementSystem)?.unlock(id);
+      // Only when Payoff was reached by finishing the collection — a player
+      // who continued early at CONTINUE_COLLECT_FRACTION didn't earn it.
+      if (!this._payoffAchievementDone) {
+        this._payoffAchievementDone = true;
+        if (this._payoffByCollecting) {
+          const dominant = getGlobals(this.world).dominantPebbleType.peek();
+          const id =
+            dominant === SOUL_DUST_TYPE
+              ? 'soul-collector'
+              : dominant === ORGANIC_MATTER_TYPE
+                ? 'green-thumb'
+                : 'faced-the-mob';
+          this.world.getSystem(AchievementSystem)?.unlock(id);
+        }
+      }
+      // Payoff's own finale keeps playing on into Launch either way.
       getGlobals(this.world).phaseComplete.value = true;
     }
   }
@@ -676,29 +787,44 @@ export class FateEventSystem extends createSystem({
   // getExplainerOpacity(). EXPLAIN_FALLBACK_SECONDS is the absolute safety
   // net for a player who never approaches at all.
   private _updateExplain(delta: number): void {
+    let touching = false;
     let near = false;
+    this._hand.seen = false;
     for (const entity of this.queries.hands.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
+      const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
+      this._scratchHandVel.fromArray(velView);
+      this._hand.position.fromArray(posView);
+      this._hand.speed = this._scratchHandVel.length();
+      this._hand.seen = true;
       this._scratchHandPos.fromArray(posView);
-      const dx = this._surfacePositions[EXPLAIN_FIGURE_INDEX * 3] - this._scratchHandPos.x;
-      const dy = this._surfacePositions[EXPLAIN_FIGURE_INDEX * 3 + 1] - this._scratchHandPos.y;
-      const dz = this._surfacePositions[EXPLAIN_FIGURE_INDEX * 3 + 2] - this._scratchHandPos.z;
-      if (dx * dx + dy * dy + dz * dz <= PROXIMITY_RADIUS * PROXIMITY_RADIUS) {
-        near = true;
-        break;
-      }
+      this._currentHand = entity.getValue(HandAnchor, 'hand') as string;
+      if (this._isTouchingPerson(EXPLAIN_FIGURE_INDEX)) touching = true;
+      if (this._distSqToPerson(EXPLAIN_FIGURE_INDEX, PERSON_HEIGHT * 0.5) <= STAY_RADIUS * STAY_RADIUS) near = true;
     }
+    if (touching && !this._triggered[EXPLAIN_FIGURE_INDEX]) this._trigger(EXPLAIN_FIGURE_INDEX);
     // Drives the explainer figure's own bob animation too (see
     // FateEventVfxSystem), same "jumps when you're near" feedback the
     // ambient crowd already gives — a small non-verbal cue that they've
     // noticed you, right as their line is about to appear.
-    this._active[EXPLAIN_FIGURE_INDEX] = near ? 1 : 0;
+    this._active[EXPLAIN_FIGURE_INDEX] = this._triggered[EXPLAIN_FIGURE_INDEX] && (touching || near) ? 1 : 0;
+    this._updateTurn(this.getVisiblePeopleCount(), delta);
 
-    if (!this._explainTriggered && near) {
+    if (!this._explainTriggered && this._triggered[EXPLAIN_FIGURE_INDEX]) {
       this._explainTriggered = true;
+      this._collectiblesRevealed = true;
       this._explainElapsed = 0;
     }
     if (this._explainTriggered) this._explainElapsed += delta;
+
+    // Ghosts/seeds become visible the instant the explainer is triggered
+    // (see _collectiblesRevealed), so they must be grabbable from that same
+    // moment too, not only once the Collect beat starts.
+    if (this._collectiblesRevealed) {
+      const dominant = getGlobals(this.world).dominantPebbleType.peek();
+      if (dominant === SOUL_DUST_TYPE) this._graveyardField.step(this._hand, delta);
+      else if (dominant === ORGANIC_MATTER_TYPE) this._seedField.step(this._hand, delta);
+    }
 
     const readDone = this._explainTriggered && this._explainElapsed >= EXPLAIN_BEAT_SECONDS;
     const timedOut = this._beatTimer >= EXPLAIN_FALLBACK_SECONDS;
@@ -716,6 +842,7 @@ export class FateEventSystem extends createSystem({
     const visibleCount = this.getVisiblePeopleCount();
 
     this._hand.seen = false;
+    let touchingExplainer = false;
     for (const entity of this.queries.hands.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
@@ -724,16 +851,21 @@ export class FateEventSystem extends createSystem({
       this._hand.speed = this._scratchHandVel.length();
       this._hand.seen = true;
       this._scratchHandPos.fromArray(posView);
+      this._currentHand = entity.getValue(HandAnchor, 'hand') as string;
+      if (this._isTouchingPerson(EXPLAIN_FIGURE_INDEX)) touchingExplainer = true;
 
       for (let i = 0; i < visibleCount; i++) {
-        const dx = this._surfacePositions[i * 3] - this._scratchHandPos.x;
-        const dy = this._surfacePositions[i * 3 + 1] - this._scratchHandPos.y;
-        const dz = this._surfacePositions[i * 3 + 2] - this._scratchHandPos.z;
-        const near = dx * dx + dy * dy + dz * dz <= PROXIMITY_RADIUS * PROXIMITY_RADIUS;
+        // Touching the person's body OR their star triggers instantly — no
+        // dwell. Once triggered they stay active while the hand remains
+        // within STAY_RADIUS (then LEAVE_GRACE_SECONDS), so a bubble isn't
+        // cut off the moment the comet drifts a little way off.
+        const touching = this._isTouchingPerson(i);
+        if (touching && !this._triggered[i]) this._trigger(i);
+        const near =
+          this._triggered[i] &&
+          (touching || this._distSqToPerson(i, PERSON_HEIGHT * 0.5) <= STAY_RADIUS * STAY_RADIUS);
 
         if (near) {
-          // _visited no longer flips here on first contact — see the
-          // _turnAmount dwell pass below, right after this hand loop.
           // Re-approaching after leaving (active was 0) replays the whole
           // dialogue sequence from its first line, instead of staying
           // frozen wherever isLastLine last left it — so a bubble can be
@@ -753,29 +885,30 @@ export class FateEventSystem extends createSystem({
       }
     }
 
-    // Turns each visible person toward/away from the player in step with
-    // _active[i] (see TURN_IN_SECONDS/TURN_OUT_SECONDS) — FateEventVfxSystem
-    // reads _turnAmount to actually animate the orientation. _visited only
-    // flips once a person has fully turned to face the player, not on first
-    // contact — see PROXIMITY_RADIUS's own comment on why that used to make
-    // a single sweep through the crowd silently visit everyone it crossed.
-    for (let i = 0; i < visibleCount; i++) {
-      const target = this._active[i] ? 1 : 0;
-      if (this._turnAmount[i] < target) {
-        this._turnAmount[i] = Math.min(target, this._turnAmount[i] + delta / TURN_IN_SECONDS);
-      } else if (this._turnAmount[i] > target) {
-        this._turnAmount[i] = Math.max(target, this._turnAmount[i] - delta / TURN_OUT_SECONDS);
-      }
-      if (!this._visited[i] && this._turnAmount[i] >= 1) {
-        this._visited[i] = 1;
-        this._visitedCount++;
-      }
-    }
-    this._updateDwellRiseAudio(visibleCount);
+    this._updateTurn(visibleCount, delta);
 
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
     if (dominant === SOUL_DUST_TYPE) this._graveyardField.step(this._hand, delta);
     else if (dominant === ORGANIC_MATTER_TYPE) this._seedField.step(this._hand, delta);
+
+    if (dominant !== VOLATILE_GASSES_TYPE) {
+      // Re-touching the explainer (rising edge, and only once the previous
+      // follow-up line has finished) says the next unsaid line, until out.
+      if (this._followupTimer >= 0) {
+        this._followupTimer += delta;
+        if (this._followupTimer >= BUBBLE_CYCLE_SECONDS) this._followupTimer = -1;
+      }
+      if (
+        touchingExplainer &&
+        !this._touchingExplainerPrev &&
+        this._followupTimer < 0 &&
+        this._followupNext < this._followupLines.length
+      ) {
+        this._followupText = this._followupLines[this._followupNext++];
+        this._followupTimer = 0;
+      }
+      this._touchingExplainerPrev = touchingExplainer;
+    }
 
     // Every visible person — named or ambient — now progresses and holds on
     // their own assigned line/sequence's last line rather than wrapping
@@ -815,58 +948,81 @@ export class FateEventSystem extends createSystem({
     } else {
       collectDone = this._seedField.totalCaptured >= this._seedField.count;
     }
-    if (collectDone) this._enterBeat(FateBeat.Payoff);
+    if (collectDone) {
+      this._payoffByCollecting = true;
+      this._enterBeat(FateBeat.Payoff);
+    }
   }
 
-  // Drives DwellRiseSynth's single shared voice — whoever is currently
-  // furthest into their own turn-in (active, but _turnAmount not yet at 1)
-  // is who it voices, same "one voice, pick the most relevant candidate"
-  // idiom as OrbitalLaunchSystem's own charge tone (only one zone can
-  // charge there too). Silent whenever nobody is currently mid-turn.
-  private _updateDwellRiseAudio(visibleCount: number): void {
-    let best = -1;
-    let bestAmount = -1;
+  // Turns each visible person toward/away from the player in step with
+  // _active[i] (see TURN_IN_SECONDS/TURN_OUT_SECONDS) — FateEventVfxSystem
+  // reads _turnAmount to actually animate the orientation.
+  private _updateTurn(visibleCount: number, delta: number): void {
     for (let i = 0; i < visibleCount; i++) {
-      if (this._active[i] && this._turnAmount[i] < 1 && this._turnAmount[i] > bestAmount) {
-        bestAmount = this._turnAmount[i];
-        best = i;
+      const target = this._active[i] ? 1 : 0;
+      if (this._turnAmount[i] < target) {
+        this._turnAmount[i] = Math.min(target, this._turnAmount[i] + delta / TURN_IN_SECONDS);
+      } else if (this._turnAmount[i] > target) {
+        this._turnAmount[i] = Math.max(target, this._turnAmount[i] - delta / TURN_OUT_SECONDS);
       }
     }
+  }
 
-    if (best < 0) {
-      if (this._risingPersonIndex >= 0) {
-        this._dwellRiseSynth.stop();
-        this._risingPersonIndex = -1;
-      }
-      return;
-    }
+  // Squared distance from the hand (_scratchHandPos) to a point `height`
+  // above person i's surface point along their normal.
+  private _distSqToPerson(i: number, height: number): number {
+    const dx = this._surfacePositions[i * 3] + this._normals[i * 3] * height - this._scratchHandPos.x;
+    const dy = this._surfacePositions[i * 3 + 1] + this._normals[i * 3 + 1] * height - this._scratchHandPos.y;
+    const dz = this._surfacePositions[i * 3 + 2] + this._normals[i * 3 + 2] * height - this._scratchHandPos.z;
+    return dx * dx + dy * dy + dz * dz;
+  }
 
-    this._scratchRisingPos.set(
-      this._surfacePositions[best * 3],
-      this._surfacePositions[best * 3 + 1],
-      this._surfacePositions[best * 3 + 2],
+  // Hand is colliding with person i's body, or their "talk to me" star while
+  // it's still showing (named figures only, until triggered).
+  private _isTouchingPerson(i: number): boolean {
+    if (this._distSqToPerson(i, PERSON_HEIGHT * 0.5) <= PROXIMITY_RADIUS * PROXIMITY_RADIUS) return true;
+    return (
+      i < this.getNamedCount() &&
+      !this._triggered[i] &&
+      this._distSqToPerson(i, TALK_STAR_HEIGHT) <= STAR_TOUCH_RADIUS * STAR_TOUCH_RADIUS
     );
-    if (this._risingPersonIndex !== best) {
-      this._risingPersonIndex = best;
-      this._dwellRiseSynth.start(this._scratchRisingPos);
+  }
+
+  // First contact with person i: instant, no dwell. Hides their star (via
+  // getTriggered), queues the trigger cue for FateEventVfxSystem, and — for
+  // Gas — counts as a visit.
+  private _trigger(i: number): void {
+    this._triggered[i] = 1;
+    this._talkTriggerEvents.push({
+      x: this._surfacePositions[i * 3] + this._normals[i * 3] * PERSON_HEIGHT * 0.5,
+      y: this._surfacePositions[i * 3 + 1] + this._normals[i * 3 + 1] * PERSON_HEIGHT * 0.5,
+      z: this._surfacePositions[i * 3 + 2] + this._normals[i * 3 + 2] * PERSON_HEIGHT * 0.5,
+      speed: 0,
+    });
+    if (getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE && !this._visited[i]) {
+      this._visited[i] = 1;
+      this._visitedCount++;
     }
-    this._dwellRiseSynth.update(bestAmount, this._scratchRisingPos);
+    this.world.getSystem(HapticsSystem)?.pulse(this._currentHand, HapticPattern.MediumPulse);
   }
 
   private _enterBeat(beat: FateBeat): void {
-    // Leaving Collect (the only beat _updateDwellRiseAudio ever runs in) —
-    // stop it explicitly rather than leaving a voice ringing if this fires
-    // while someone happened to still be mid-turn.
-    if (this._beat === FateBeat.Collect && beat !== FateBeat.Collect) {
-      this._dwellRiseSynth.stop();
-      this._risingPersonIndex = -1;
-    }
+    // Collect can't start without the collectibles being out (e.g. Explain
+    // timed out without the player ever talking to the figure).
+    if (beat >= FateBeat.Collect) this._collectiblesRevealed = true;
     this._beat = beat;
     this._beatTimer = 0;
   }
 
   // Read-only accessors for FateEventVfxSystem/EarthSituationsVfxSystem —
   // callers must not mutate.
+  // Seconds since the Soul ghosts / Organic seeds were revealed (the player
+  // talked to the explainer, or Collect began), or -1 while they're still
+  // hidden. FateEventVfxSystem keeps them hidden until this is >= 0 and
+  // rises the ghosts up out of the ground over the first couple of seconds.
+  getCollectiblesRevealElapsed(): number {
+    return this._collectiblesRevealed ? this._collectiblesRevealElapsed : -1;
+  }
   getBeat(): FateBeat {
     return this._beat;
   }
@@ -918,6 +1074,30 @@ export class FateEventSystem extends createSystem({
     const events = this._collectCaptureEvents;
     this._collectCaptureEvents = [];
     return events;
+  }
+  // Same drain shape as drainCollectCaptureEvents, for first-contact talk
+  // triggers (see _trigger) — plays the instant "you got their attention" cue.
+  drainTalkTriggerEvents(): readonly CaptureEvent[] {
+    if (this._talkTriggerEvents.length === 0) return this._talkTriggerEvents;
+    const events = this._talkTriggerEvents;
+    this._talkTriggerEvents = [];
+    return events;
+  }
+  // Sticky per-person "already talked to" mask — hides the star.
+  getTriggeredMask(): Uint8Array {
+    return this._triggered;
+  }
+  // Whether person i is what the player should do NEXT — drives the yellow
+  // rim (white otherwise). Explain: the explainer figure until they've been
+  // touched. Gas Collect: every person not yet visited. Soul/Organic Collect's
+  // objective is the seeds/ghosts (they highlight themselves), not people.
+  isObjectiveTarget(i: number): boolean {
+    if (this._triggered[i]) return false;
+    if (this._beat === FateBeat.Explain) return i === EXPLAIN_FIGURE_INDEX;
+    if (this._beat === FateBeat.Collect) {
+      return getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE && i < this.getVisiblePeopleCount();
+    }
+    return false;
   }
   // Drives both the jump animation and speech-bubble visibility.
   getActiveMask(): Uint8Array {
@@ -987,6 +1167,18 @@ export class FateEventSystem extends createSystem({
   getExplainerText(): string {
     return this._dialogue.explainerLine ?? '';
   }
+  // Soul/Organic follow-up line (see _followupLines) — text and fade curve.
+  getFollowupText(): string {
+    return this._followupText;
+  }
+  getFollowupOpacity(): number {
+    const t = this._followupTimer;
+    if (t < 0) return 0;
+    if (t < BUBBLE_FADE_IN_SECONDS) return t / BUBBLE_FADE_IN_SECONDS;
+    if (t < BUBBLE_FADE_IN_SECONDS + BUBBLE_HOLD_SECONDS) return 1;
+    const outT = t - BUBBLE_FADE_IN_SECONDS - BUBBLE_HOLD_SECONDS;
+    return outT < BUBBLE_FADE_OUT_SECONDS ? 1 - outT / BUBBLE_FADE_OUT_SECONDS : 0;
+  }
   getExplainerOpacity(): number {
     // Timed from _explainElapsed (since the player was first seen near
     // them — see _updateExplain), not _beatTimer — the bubble shouldn't
@@ -1021,6 +1213,28 @@ export class FateEventSystem extends createSystem({
     return getGlobals(this.world).dominantPebbleType.peek() === VOLATILE_GASSES_TYPE
       ? GAS_NAMED_COUNT
       : NAMED_FIGURE_COUNT;
+  }
+  // 0-1 readiness for the wrist Continue button (see PhaseConfig.continue) —
+  // unlocks at CONTINUE_COLLECT_FRACTION of Beat 4's collect target. Reads 0
+  // until Beat 4 starts, and stays 1 through Payoff.
+  getContinueReadiness01(): number {
+    if (this._beat === FateBeat.Payoff) return 1;
+    return Math.min(1, this.getCollectProgress01() / CONTINUE_COLLECT_FRACTION);
+  }
+  // GameDirector's timeout for this phase: if the player is mid-collection
+  // (or already in Payoff), play Payoff instead of cutting straight to Launch
+  // — the phase then ends through Payoff's own hold like any other finish.
+  // Timing out earlier than Collect (Zoom/Ambient/Explain) just advances.
+  // See PhaseConfig.onTimeout.
+  onTimeout(): boolean {
+    if (this._beat === FateBeat.Collect) this._enterBeat(FateBeat.Payoff);
+    return this._beat === FateBeat.Payoff;
+  }
+  // Continue button pressed — jumps from Collect straight into Payoff,
+  // whose own hold then ends the phase, so its climax still lands before the
+  // player departs.
+  continueNow(): void {
+    if (this._beat === FateBeat.Collect) this._enterBeat(FateBeat.Payoff);
   }
   // 0-1 overall Beat-4 "collect" progress for HandProgressHudSystem's wrist
   // bar — same per-type win metric _updateCollect's own collectDone check

@@ -1,6 +1,12 @@
 import { BufferGeometry, Group, Mesh, Object3D } from '@iwsdk/core';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { computeFitScale, FALLBACK_GEO, FALLBACK_MAT, type FbxFieldTransform } from './fbx-field-loader.js';
+import {
+  computeFitScale,
+  FALLBACK_GEO,
+  FALLBACK_MAT,
+  normalizeGeometryToUnitRadius,
+  type FbxFieldTransform,
+} from './fbx-field-loader.js';
 import { extractMeshIslands } from './obj-island-extractor.js';
 
 const loader = new OBJLoader();
@@ -97,6 +103,48 @@ export function buildObjNamedGroupField(
   });
 
   return container;
+}
+
+// One cached load per (url, meshName, normalize) — for pulling a SINGLE
+// named mesh's geometry out of a multi-object OBJ export (e.g. an asset
+// sheet combining several unrelated props as sibling `o`/`g` declarations in
+// one file) as a plain BufferGeometry, rather than a scattered field
+// (buildObjNamedGroupField above) or a full multi-island split
+// (loadObjLargestIslands below). `normalize` defaults to the box-center-
+// relative normalizeGeometryToUnitRadius — pass
+// normalizeGeometryToUnitRadiusFromOrigin (fbx-field-loader.ts) instead for a
+// mesh whose origin is already deliberately placed by the artist. Resolves
+// null (never rejects) if the file fails to load or the named object isn't
+// found/has no faces — same graceful-degradation idiom as every other loader
+// in this file.
+const namedGeometryCache = new Map<string, Promise<BufferGeometry | null>>();
+export function loadObjMeshGeometry(
+  url: string,
+  meshName: string,
+  normalize: (geo: BufferGeometry) => void = normalizeGeometryToUnitRadius,
+): Promise<BufferGeometry | null> {
+  const key = `${url}|${meshName}|${normalize === normalizeGeometryToUnitRadius ? 'box' : 'custom'}`;
+  let promise = namedGeometryCache.get(key);
+  if (!promise) {
+    promise = loadObjFile(url).then((root) => {
+      if (!root) return null;
+      const found = root.getObjectByName(meshName);
+      if (!found || !hasVisibleGeometry(found)) {
+        console.warn(`[obj-field-loader] '${meshName}' not found (or has no faces) in '${url}'.`);
+        return null;
+      }
+      let mesh: Mesh | null = null;
+      found.traverse((child) => {
+        if (!mesh && child instanceof Mesh) mesh = child;
+      });
+      if (!mesh) return null;
+      const geo = ((mesh as Mesh).geometry as BufferGeometry).clone();
+      normalize(geo);
+      return geo;
+    });
+    namedGeometryCache.set(key, promise);
+  }
+  return promise;
 }
 
 // One cached extraction per (url, group list, count) — the union-find pass

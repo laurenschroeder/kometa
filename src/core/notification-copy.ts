@@ -40,6 +40,11 @@ export interface NotificationCopy {
   // per line so a previous message's tint can't leak onto the next one's
   // text elements.
   lineColors?: (readonly [number, number, number] | null)[];
+  // Seconds after the message begins that each line starts fading in,
+  // index-matched against text's lines. Omit for the HUD's default even
+  // stagger. Use when other things (e.g. Pebbles' field reveals) are timed
+  // against specific lines.
+  lineStartSeconds?: readonly number[];
 }
 
 // Exported so ConstellationsSystem can dismiss this exact message the
@@ -52,6 +57,35 @@ export const VISIT_STARS_TEXT = 'Why not visit those nearby stars? The people on
 // player actually gathers their first stardust — see its own use of
 // NotificationHudSystem.dismissByText() and Phase.Stardust's own entry
 // below, same "hold until X" idiom as VISIT_STARS_TEXT above.
+// Exported so ConstellationsVfxSystem can reveal the constellation the moment
+// this (the last message before VISIT_STARS_TEXT) has finished — the
+// VISIT_STARS_TEXT hint then follows CONSTELLATION_HINT_DELAY_SECONDS later.
+export const CONSTELLATIONS_PRE_HINT_TEXT = 'What a nice looking planet.';
+const CONSTELLATION_HINT_DELAY_SECONDS = 2;
+
+// Pebbles' "Three paths call to you" intro is paced as: a path's line fades
+// in, PEBBLE_INTRO_WAIT_SECONDS later that path's pebbles appear, then
+// another PEBBLE_INTRO_WAIT_SECONDS later the next path's line fades in.
+// Shared with PebbleWeavingSystem, which reveals each type's pebbles at
+// PEBBLE_TYPE_REVEAL_SECONDS. Line 0 is the generic "Three paths" line; lines
+// 1-3 name soul dust/organic matter/volatile gasses in that order.
+const PEBBLE_INTRO_WAIT_SECONDS = 2;
+const PEBBLE_INTRO_LINE_FADE_SECONDS = 0.5; // matches NotificationHudSystem's FADE_SECONDS
+const PEBBLE_INTRO_FIRST_PATH_LINE_START = 2;
+const PEBBLE_INTRO_PATH_STEP =
+  PEBBLE_INTRO_LINE_FADE_SECONDS + PEBBLE_INTRO_WAIT_SECONDS + PEBBLE_INTRO_WAIT_SECONDS;
+export const PEBBLE_INTRO_LINE_START_SECONDS: readonly number[] = [
+  0,
+  PEBBLE_INTRO_FIRST_PATH_LINE_START,
+  PEBBLE_INTRO_FIRST_PATH_LINE_START + PEBBLE_INTRO_PATH_STEP,
+  PEBBLE_INTRO_FIRST_PATH_LINE_START + PEBBLE_INTRO_PATH_STEP * 2,
+];
+export const PEBBLE_TYPE_REVEAL_SECONDS: readonly [number, number, number] = [
+  PEBBLE_INTRO_LINE_START_SECONDS[1] + PEBBLE_INTRO_LINE_FADE_SECONDS + PEBBLE_INTRO_WAIT_SECONDS,
+  PEBBLE_INTRO_LINE_START_SECONDS[2] + PEBBLE_INTRO_LINE_FADE_SECONDS + PEBBLE_INTRO_WAIT_SECONDS,
+  PEBBLE_INTRO_LINE_START_SECONDS[3] + PEBBLE_INTRO_LINE_FADE_SECONDS + PEBBLE_INTRO_WAIT_SECONDS,
+];
+
 export const STARDUST_INTRO_TEXT = 'You are stardust unformed. Move your hand around to gather yourself into being.';
 
 // Exported so PlanetSeedingSystem can hold the planet at its far-away
@@ -59,7 +93,20 @@ export const STARDUST_INTRO_TEXT = 'You are stardust unformed. Move your hand ar
 // NotificationHudSystem.hasShown()), rather than starting its float-toward-
 // the-player ease the instant Seeding begins regardless of whether the
 // player has actually been told to go look for it yet.
-export const SEEDING_INTRO_TEXT = 'Take a spin around this planet. Linger near its surface to seed it with stardust.';
+export const SEEDING_INTRO_TEXT = 'Take a spin around this planet. Linger near its surface to seed it with stardust and leave your mark.';
+
+// The wrist Continue button (ContinueButtonSystem) already announces itself
+// with a chime, haptic pulse and glow when it unlocks — set this true to ALSO
+// show CONTINUE_READY_TEXT as a HUD notification at that moment. Off by
+// default since the audiovisual cue on the hand is usually enough.
+export const CONTINUE_NOTIFICATIONS_ENABLED = false;
+export const CONTINUE_READY_TEXT = 'Continue whenever you are ready.';
+
+// Stardust's introduction to the Continue button — the button itself stays
+// hidden in Stardust until this message has started showing (see
+// ContinueButtonSystem), so it pops up right as the player is told about it.
+export const CONTINUE_INTRO_TEXT =
+  "Take your time here. Whenever you're ready to move onto the next Phase, use this Continue button.";
 
 // Every phase gets a sequence (most are one message) — NotificationHudSystem
 // queues them, so a multi-entry sequence plays as consecutive messages, each
@@ -79,12 +126,17 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
     {
       text: STARDUST_INTRO_TEXT,
       holdSeconds: 60,
-      minHoldSeconds: 5.4,
+      minHoldSeconds: 7.4,
       delaySeconds: 3,
     },
-    { text: 'The faster you swing, the further you go.', holdSeconds: 5.5, delaySeconds: 2 },
+    { text: 'The faster you swing, the further the comet goes. Your comet collects the stardust it hits.', holdSeconds: 5.5, delaySeconds: 3 },
     {
       text: 'If you want to control the comet with a different hand, pinch it (or pull trigger on it) with the hand you want it to follow.',
+      holdSeconds: 5,
+      delaySeconds: 12,
+    },
+    {
+      text: CONTINUE_INTRO_TEXT,
       holdSeconds: 5,
       delaySeconds: 12,
     },
@@ -92,12 +144,16 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Pebbles]: [
     {
       text: 'Three paths call to you\nthe blue forms of souls\nthe green pulse of living things\nthe red spectacle of volatile gasses.',
-      holdSeconds: 5.5,
+      // Hold starts once the last line is fully visible; the last type's
+      // pebbles appear 2.5s after that line starts, so leave a few seconds
+      // after that to take them in.
+      holdSeconds: 6,
       lineColors: [null, PEBBLE_TYPES[0].color, PEBBLE_TYPES[1].color, PEBBLE_TYPES[2].color],
+      lineStartSeconds: PEBBLE_INTRO_LINE_START_SECONDS,
     },
     {
-      text: 'What you gather will not just change yourself, but affect other planets you come into contact with.',
-      holdSeconds: 6.5,
+      text: "Collect what you'd like to bring along with you.",
+      holdSeconds: 4.5,
     },
 
   ],
@@ -105,7 +161,7 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   [Phase.Seeding]: [
     {
       text: SEEDING_INTRO_TEXT,
-      holdSeconds: 4,
+      holdSeconds: 8,
     },
   ],
   // Constellations onward: holds bumped up from their original values —
@@ -118,9 +174,13 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
       text: 'A whole ecosystem has developed, thanks to the unique stardust you seeded the planet with.',
       holdSeconds: 5.5,
     },
-    { text: "What a nice looking planet.", holdSeconds: 3 },
+    { text: CONSTELLATIONS_PRE_HINT_TEXT, holdSeconds: 3 },
     {
       text: VISIT_STARS_TEXT,
+      // The constellation appears the moment the message above finishes
+      // (see ConstellationsVfxSystem's reveal gate), then this hint follows
+      // after this gap.
+      delaySeconds: CONSTELLATION_HINT_DELAY_SECONDS,
       // Generously long — this one is meant to stay up until the player
       // actually touches their first star, not fade out on its own clock.
       // ConstellationsSystem calls NotificationHudSystem.dismissByText()
@@ -179,9 +239,9 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
 // win-condition-triggered one, called directly via
 // NotificationHudSystem.notify() (same pattern AchievementSystem uses).
 export const STARDUST_WIN_SEQUENCE: NotificationCopy[] = [
-  { text: 'You have so much stardust!', holdSeconds: 2.8 },
-  { text: "Now you're ready to grow even bigger..", holdSeconds: 3 },
-  { text: 'But be warned. What you choose to gather next will shape the comet you become.', holdSeconds: 4 },
+  { text: 'You have so much stardust!', holdSeconds: 3.8 },
+  { text: "Let's gather more, and grow even bigger..", holdSeconds: 4 },
+  { text: 'Be warned. What you choose to gather next will shape the comet you become.', holdSeconds: 5 },
 ];
 
 // Pebbles' completion message needs the dominant-type name interpolated in,
@@ -197,7 +257,7 @@ export function pebbleCompletionMessage(typeName: string): NotificationCopy {
 // not-yet-started constellation's path.
 export function constellationSpottedMessage(name: string): NotificationCopy {
   return {
-    text: `The creatures of this planet have spied you near the ${name} constellation…`,
+    text: `Creatures on this planet have spied you near the ${name} constellation..`,
     holdSeconds: 6,
   };
 }
@@ -228,7 +288,7 @@ const CELESTIAL_SYMBOL_LINES: Record<string, (name: string) => string> = {
 export function celestialSymbolFlavorMessage(name: string): NotificationCopy | null {
   const flavor = CELESTIAL_SYMBOL_LINES[name]?.(name);
   if (!flavor) return null;
-  return { text: flavor, holdSeconds: 5 };
+  return { text: flavor, holdSeconds: 8 };
 }
 
 // holdSeconds is a generous fallback cap, not the real hold time — this is
@@ -243,8 +303,8 @@ export function celestialSymbolFlavorMessage(name: string): NotificationCopy | n
 export function celestialSymbolMessage(name: string): NotificationCopy {
   return {
     text: `It's been realized, you are crowned the celestial symbol of ${name}.`,
-    holdSeconds: 40,
-    delaySeconds: 3,
+    holdSeconds: 8,
+    delaySeconds: 1,
   };
 }
 
@@ -252,21 +312,26 @@ export function celestialSymbolMessage(name: string): NotificationCopy {
 // replaces NOTIFICATION_COPY[Phase.FateEvents], now empty) so every type
 // gets its own Fate Events intro line matching its actual mission, instead
 // of one shared generic blurb.
+// Exported so EarthSituationsVfxSystem can hold Gas's king-death sequence until
+// this message has fully faded out (NotificationHudSystem.hasFinished()).
+export const FATE_GAS_INTRO_TEXT =
+  'It seems you have arrived at a bad time..';
+
 const FATE_EVENTS_INTRO_BY_TYPE: NotificationCopy[] = [
   // soul dust — the graveyard/ghost-gathering vignette.
   {
-    text: 'The soul dust you gathered sense something interesting on this planet.',
+    text: 'The soul dust you gathered sense something interesting nearby..',
     holdSeconds: 6,
   },
   // organic matter — the seed-gathering vignette.
   {
-    text: 'This planet has intelligent life, and they understand who you are. They have something for you.',
+    text: 'This planet has intelligent life, and they understand your mission.',
     holdSeconds: 6.2,
   },
   // volatile gasses — the king's-death/blame vignette (was the old
   // Gas-only fateEventsGasIntroMessage, unchanged).
   {
-    text: "Your comet burns red across their sky tonight. Lucky for them, they will soon need someone to blame.",
+    text: FATE_GAS_INTRO_TEXT,
     holdSeconds: 6.5,
   },
 ];
@@ -351,35 +416,26 @@ export const FATE_DIALOGUE: Record<string, FateDialogueEntry> = {
   // the 2 named figures); this pool is sized to exactly match.
   Shepherd: {
     entries: [
-      ['WOOF WOOF WOOF WOOF'],
-      ['ruff ruff'],
-      ["That's not a good omen, that's just Gary's dog again."],
-      ['It followed the comet. Or it followed a squirrel. Hard to say.'],
-      ['WOOF.', 'Is that you Rover?', 'Bark once for yes', 'the comet is destiny.'],
-      ["I've seen that dog steal three sandwiches this week. I don't trust its judgment."],
-      ['He\'s been staring at the sky for twenty minutes. He does that for garbage trucks too.'],
+      ['What are these strange alien souls I see in your tail?'],
+      ['Take good care of our souls.'],
+      ['Bring them somewhere interesting.'],
+
     ],
-    pairedLine: "You've brought so many alien souls to visit us!",
+    pairedLine: "What are these strange alien souls I see in your tail?",
     explainerLine:
-      "We have many detached souls here, too. Collect them so they can join you on your travels.",
+      "We have so many detached souls here. Collect them so they can join you on your travels.",
   },
   // organic matter — VISIBLE_PEOPLE_BY_TYPE[1] = N_PEOPLE (10), so 8
   // ambient slots; this pool is sized to match.
   Harvest: {
     entries: [
-      ['rustle rustle rustle'],
-      ['creeeeeak'],
-      ['shhhhhh'],
-      ["It's just wind. But sure, let's make it a prophecy."],
-      ["This tree has been 'communicating' since I was a kid. It's just old."],
-      ['Every civilization eventually decides a tree is talking to them. Ours just picked this one.'],
-      ["The tree creaked. We're calling that a message now."],
-      ["It's been doing that since before the comet showed up, but sure."],
-      ['Third new species this decade. We\'ve stopped trying to explain it.'],
+      ['The beauty of the planet all started with your stardust. We want to pass it on.'],
+      ['Maybe these plants can take root on a distant planet'],
+
     ],
     pairedLine: 'The beauty of the planet all started with your stardust. We want to return the favor.',
     explainerLine:
-      'Take seeds from our best plants and spread them around this universe.',
+      'Take these seeds from our best plants and spread them around this universe.',
   },
   // volatile gasses — every one of VISIBLE_PEOPLE_BY_TYPE[2]'s 6 visible
   // people gets a namedLine below (see GAS_CHARACTER_NAMES), so this pool is
@@ -508,15 +564,15 @@ export const FINAL_CHOICE_MESSAGE: NotificationCopy = {
 const LAUNCH_INTRO_BY_TYPE: NotificationCopy[] = [
   {
     text: 'The souls you gathered are quiet now, riding with you. You can choose to orbit close to home, or carry them on forever.',
-    holdSeconds: 7.5,
+    holdSeconds: 9.5,
   },
   {
     text: 'The seeds are packed in tight, waiting for new ground. Would you like to orbit this planet and keep and eye on things, or scatter them further out into the universe?',
-    holdSeconds: 7.5,
+    holdSeconds: 9.5,
   },
   {
     text: "They've already started telling stories about the comet that took their king. Take on the role of curse-bringer orbiting this planet forever, or continue on into the universe?",
-    holdSeconds: 8,
+    holdSeconds: 10,
   },
 ];
 export function launchIntroMessage(dominantType: number): NotificationCopy {
@@ -597,7 +653,7 @@ export function finaleMessage(
       : 'A life spent gathering and delivering space dust carries you onward, for whatever comes next.';
   const typeColor = PEBBLE_TYPES[dominantType]?.color ?? null;
   return [
-    { text: meaning, holdSeconds: 7, lineColors: [typeColor] },
-    { text: closing, holdSeconds: 5, lineColors: [typeColor] },
+    { text: meaning, holdSeconds: 9, lineColors: [typeColor] },
+    { text: closing, holdSeconds: 8, lineColors: [typeColor] },
   ];
 }

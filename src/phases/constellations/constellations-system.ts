@@ -1,7 +1,9 @@
 import { createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { AchievementSystem } from '../../core/achievement-system.js';
 import { getGlobals } from '../../core/globals.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import { Phase } from '../../core/phase.js';
 import {
   celestialSymbolFlavorMessage,
@@ -10,7 +12,9 @@ import {
   VISIT_STARS_TEXT,
 } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
+import { ConstellationsVfxSystem } from './constellations-vfx-system.js';
 import {
+  CONSTELLATION_REACH_SHIFT,
   generateConstellationLayout,
   placeConstellationAnchorsAroundPlanet,
 } from '../../vfx/geometry/constellation-path.js';
@@ -115,6 +119,13 @@ export class ConstellationsSystem extends createSystem({
     // ConstellationsVfxSystem uses for its own _anchorDir.
     const center = new Vector3(...INTERMEDIATE_PLANET_CENTER);
     const awayDirs = anchors.map((a) => new Vector3(...a).sub(center).normalize());
+    // Pulled toward the player so stars are within arm's reach (see
+    // CONSTELLATION_REACH_SHIFT) — after awayDirs, which stay planet-relative.
+    for (const a of anchors) {
+      a[0] += CONSTELLATION_REACH_SHIFT[0];
+      a[1] += CONSTELLATION_REACH_SHIFT[1];
+      a[2] += CONSTELLATION_REACH_SHIFT[2];
+    }
     this._starPositions = [];
     this._starTraced = [];
     this._tracedCount = [];
@@ -239,6 +250,15 @@ export class ConstellationsSystem extends createSystem({
       }
       return;
     }
+    // Stars can't be touched/"spied" before they're actually visible — the
+    // reveal (ConstellationsVfxSystem's own _revealed) lags a beat behind
+    // this phase becoming active (waits on the planet-seeding spin
+    // transition + the "visit those stars" hint actually showing), so
+    // without this gate an early touch could fire the spied notification
+    // while the stars are still hidden, jumping it ahead of — and garbling
+    // — the phase-entry notification queue.
+    if (!this.world.getSystem(ConstellationsVfxSystem)?.isRevealed()) return;
+
     const def = CONSTELLATION_SETS[this._activeType][this._activeSlot];
     const notifications = this.world.getSystem(NotificationHudSystem);
     const stars = this._starPositions[this._activeType][this._activeSlot];
@@ -258,6 +278,9 @@ export class ConstellationsSystem extends createSystem({
 
         traced[s] = 1;
         this._tracedCount[this._activeType][this._activeSlot]++;
+        this.world
+          .getSystem(HapticsSystem)
+          ?.pulse(entity.getValue(HandAnchor, 'hand') as string, HapticPattern.LightTick);
 
         if (!this._startedNotified[this._activeType][this._activeSlot]) {
           this._startedNotified[this._activeType][this._activeSlot] = true;
@@ -279,22 +302,26 @@ export class ConstellationsSystem extends createSystem({
           // the trace finishes (and EarthSituationsVfxSystem's crown-rise
           // cinematic begins — see its own isComplete() edge) — no longer
           // waiting on the crown to actually land (see this file's own top
-          // comment). notifyNext unshifts, so calling celestialSymbolMessage
-          // FIRST then celestialSymbolFlavorMessage SECOND is what makes the
-          // flavor line end up displaying first; celestialSymbolMessage's own
-          // delaySeconds is what then holds its reveal back a few seconds
-          // after the flavor line fades, rather than cutting straight into
-          // it, and it still stays up (see its own comment) through the rest
-          // of the crown-rise cinematic until crownLanded dismisses it below.
+          // comment).
           getGlobals(this.world).celestialSymbol.value = def.name;
+          // Display order: flavor myth-beat ("…it's fitting") first, then the
+          // "you are crowned" reveal (8s). Queued together as one ordered
+          // sequence so the order can't flip depending on whether the HUD
+          // happened to be idle. The crown only lands once the reveal has
+          // faded (see EarthSituationsVfxSystem's landing gate); the Fate
+          // Events intro then plays on arrival at the planet.
+          const flavor = celestialSymbolFlavorMessage(def.name);
           const { text, holdSeconds, delaySeconds } = celestialSymbolMessage(def.name);
           this._crownedMessageText = text;
-          notifications?.notifyNext(text, holdSeconds, delaySeconds);
-
-          const flavor = celestialSymbolFlavorMessage(def.name);
-          if (flavor) notifications?.notifyNext(flavor.text, flavor.holdSeconds);
+          notifications?.notifyNextSequence([
+            ...(flavor ? [{ text: flavor.text, holdSeconds: flavor.holdSeconds }] : []),
+            { text, holdSeconds, delaySeconds },
+          ]);
 
           this._completed = true;
+          // The same positive completion cue Stardust/Pebbles play on finishing.
+          this.world.getSystem(AchievementSystem)?.playSuccessChime();
+          this.world.getSystem(HapticsSystem)?.pulseBoth(HapticPattern.CelebratoryBurst);
           break;
         }
       }

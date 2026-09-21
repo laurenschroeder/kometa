@@ -17,6 +17,33 @@ export interface PhaseConfig {
   // regardless of phaseComplete. Omit to rely purely on the win condition
   // (globals.phaseComplete, set by one of this phase's own systems).
   timeoutSeconds?: number;
+  // Opts this phase into the Continue button (ContinueButtonSystem).
+  // Omit for phases that shouldn't have one (Launch, Finale, ArtTest).
+  continue?: PhaseContinueConfig;
+  // Clears any gameplay state this phase leaves behind for always-on
+  // systems to read (e.g. a finished run's swirl fields). Called for every
+  // defined phase by returnToMenu(), since a stop()'d phase system isn't
+  // play()'d again — and so never resets itself — until the next Start.
+  reset?: () => void;
+  // Called once when this phase's timeoutSeconds elapses (not on a win
+  // condition). Return true to take over the ending yourself — the director
+  // then stays in this phase and won't time it out again, so the phase must
+  // finish via globals.phaseComplete (e.g. after playing an ending
+  // sequence). Return false/omit to advance immediately as usual.
+  onTimeout?: () => boolean;
+}
+
+export interface PhaseContinueConfig {
+  // 0-1 readiness: the button warms as this rises and unlocks once it
+  // reaches 1. Each phase maps its own progress onto this, so its "lower
+  // threshold" lives next to that phase's other tuning constants.
+  getReadiness01(): number;
+  // Optional tint for the button's fill (hex string); null/absent = default gold.
+  getColorHex?(): string | null;
+  // Called once when the player presses the unlocked button — should run
+  // the phase's own completion path (which ends by setting
+  // globals.phaseComplete).
+  onContinue(): void;
 }
 
 // Cycles the game through Phase.PHASE_ORDER. A phase advances the instant
@@ -35,6 +62,8 @@ export class GameDirectorSystem extends createSystem({}) {
   private _elapsedInPhase = 0;
   private _started = false;
   private _warnedMissing = new Set<Phase>();
+  // Set once a phase's onTimeout() took over its ending — see PhaseConfig.onTimeout.
+  private _timeoutHandled = false;
 
   // Called from index.ts once per phase, in any order, after that phase's
   // own systems are registered — immediately stop()s them so call order
@@ -48,12 +77,18 @@ export class GameDirectorSystem extends createSystem({}) {
     for (const system of config.systems) system.stop();
   }
 
+  // The active phase's Continue-button hooks, or undefined if it has none.
+  getContinueConfig(phase: Phase): PhaseContinueConfig | undefined {
+    return this._phases.get(phase)?.continue;
+  }
+
   // Call once, after every definePhase(), to enter globals.gamePhase's
   // current value (Phase.Stardust at a fresh boot).
   start(): void {
     if (this._started) return;
     this._started = true;
     this._elapsedInPhase = 0;
+    this._timeoutHandled = false;
     const { gamePhase } = getGlobals(this.world);
     this._playPhase(gamePhase.value);
     console.info(`[GameDirector] started at '${gamePhase.value}'`);
@@ -74,8 +109,14 @@ export class GameDirectorSystem extends createSystem({}) {
 
     this._elapsedInPhase += delta;
     const wonByCondition = globals.phaseComplete.value;
-    const wonByTimeout =
-      config.timeoutSeconds !== undefined && this._elapsedInPhase >= config.timeoutSeconds;
+    let wonByTimeout =
+      !this._timeoutHandled &&
+      config.timeoutSeconds !== undefined &&
+      this._elapsedInPhase >= config.timeoutSeconds;
+    if (wonByTimeout && config.onTimeout?.()) {
+      this._timeoutHandled = true;
+      wonByTimeout = false;
+    }
 
     if (wonByCondition || wonByTimeout) {
       this._transition(phase, nextPhase(phase), wonByCondition ? 'winCondition' : 'timeout');
@@ -99,6 +140,7 @@ export class GameDirectorSystem extends createSystem({}) {
     this._stopPhase(from);
     globals.phaseComplete.value = false;
     this._elapsedInPhase = 0;
+    this._timeoutHandled = false;
     globals.gamePhase.value = to;
     this._playPhase(to);
 
@@ -126,9 +168,11 @@ export class GameDirectorSystem extends createSystem({}) {
     if (!this._started) return;
     const globals = getGlobals(this.world);
     this._stopPhase(globals.gamePhase.value);
+    for (const config of this._phases.values()) config.reset?.();
     globals.phaseComplete.value = false;
     globals.gameStarted.value = false;
     this._elapsedInPhase = 0;
+    this._timeoutHandled = false;
     globals.gamePhase.value = Phase.Stardust;
     this._started = false;
     console.info('[GameDirector] returned to main menu');

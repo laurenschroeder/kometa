@@ -1,5 +1,5 @@
 import { AssetType, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
-import { ArtTestSystem } from './phases/art-test/art-test-system.js';
+import { ART_TEST_ENABLED, ArtTestSystem } from './phases/art-test/art-test-system.js';
 import { ArtTestVfxSystem } from './phases/art-test/art-test-vfx-system.js';
 import { CometAudioSystem } from './comet/comet-audio-system.js';
 import { CometAutopilotSystem } from './comet/comet-autopilot-system.js';
@@ -13,9 +13,14 @@ import { HandAnchor, HandSide } from './comet/hand-anchor-component.js';
 import { AchievementSystem } from './core/achievement-system.js';
 import { BackgroundMusicSystem } from './core/background-music-system.js';
 import { bootstrapGlobals } from './core/globals.js';
+import { DevJumpSystem } from './core/dev-jump-system.js';
+import { DevPerfLoggerSystem } from './core/dev-perf-logger.js';
 import { GameDirectorSystem } from './core/game-director-system.js';
+import { HapticsSystem } from './core/haptics-system.js';
+import { ContinueButtonSystem } from './core/continue-button-system.js';
 import { HandProgressHudSystem } from './core/hand-progress-hud-system.js';
 import { HudText, NotificationHudSystem } from './core/notification-hud-system.js';
+import { GameButton, GameSpan } from './core/ui-font-kit.js';
 import { Phase } from './core/phase.js';
 import { PhaseMenuSystem } from './core/phase-menu-system.js';
 import { StarfieldSystem } from './core/starfield-system.js';
@@ -29,7 +34,7 @@ import { FateEventSystem } from './phases/fate-events/fate-event-system.js';
 import { FateEventVfxSystem } from './phases/fate-events/fate-event-vfx-system.js';
 import { EndRunMenuSystem } from './phases/finale/end-run-menu-system.js';
 import { FinaleSystem } from './phases/finale/finale-system.js';
-import { OrbitalLaunchSystem } from './phases/orbital-launch/orbital-launch-system.js';
+import { LAUNCH_TIMEOUT_SECONDS, OrbitalLaunchSystem } from './phases/orbital-launch/orbital-launch-system.js';
 import { OrbitalLaunchVfxSystem } from './phases/orbital-launch/orbital-launch-vfx-system.js';
 import { PebbleCometPresentationSystem } from './phases/pebbles/pebble-comet-presentation-system.js';
 import { PebbleFieldVfxSystem } from './phases/pebbles/pebble-field-vfx-system.js';
@@ -41,26 +46,31 @@ import { StardustVfxSystem } from './phases/stardust/stardust-vfx-system.js';
 
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
   assets: {
-    beepchat1: { url: '/textures/beepchat1.png', type: AssetType.Texture },
-    beepchat2: { url: '/textures/beepchat2.png', type: AssetType.Texture },
-    beepchat3: { url: '/textures/beepchat3.png', type: AssetType.Texture },
-    beepchat4: { url: '/textures/beepchat4.png', type: AssetType.Texture },
-    smile1: { url: '/textures/Sprite-0001.png', type: AssetType.Texture },
-    smile2: { url: '/textures/Sprite-0002.png', type: AssetType.Texture },
+    // Comet head decal, keyed by dominant pebble type (see PEBBLE_TYPES) —
+    // replaces the old beepchat/smile expression-cycling face.
+    faceSoul: { url: '/textures/faceSoul.png', type: AssetType.Texture },
+    faceOrganic: { url: '/textures/faceOrganic.png', type: AssetType.Texture },
+    faceGas: { url: '/textures/faceGas.png', type: AssetType.Texture },
+    // Also used by Fate Events' marker sprites (MARKER_TEXTURE_KEY), so it
+    // stays in the manifest even with Art Test off.
+    starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture },
     // Art Test only (see ArtTestVfxSystem) — billboarded pebble/star sprite
-    // treatments.
+    // treatments. Skipped entirely while ART_TEST_ENABLED is off: ~5 MB of
+    // download and tens of MB of GPU texture memory nothing else reads.
     // PNGs (transparent) — swapped from the original opaque JPEGs so the
     // billboard shader's alpha channel actually has something to read.
-    fabricGhost1: { url: '/textures/fabricghosts1.png', type: AssetType.Texture },
-    fabricGhost2: { url: '/textures/fabricghosts2.png', type: AssetType.Texture },
-    fabricGhost3: { url: '/textures/fabricghosts3.png', type: AssetType.Texture },
-    fabricGhost4: { url: '/textures/fabricghosts4.png', type: AssetType.Texture },
-    starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture },
-    rocksPhotos: { url: '/textures/rocks.png', type: AssetType.Texture },
-    rocksPhotosBW: { url: '/textures/rockBW.png', type: AssetType.Texture },
-    glitter1: { url: '/textures/glitter.png', type: AssetType.Texture },
-    glitter2: { url: '/textures/glitter2.png', type: AssetType.Texture },
-    dustLand: { url: '/audio/dust-land.wav', type: AssetType.Audio },
+    ...(ART_TEST_ENABLED
+      ? {
+          fabricGhost1: { url: '/textures/fabricghosts1.png', type: AssetType.Texture },
+          fabricGhost2: { url: '/textures/fabricghosts2.png', type: AssetType.Texture },
+          fabricGhost3: { url: '/textures/fabricghosts3.png', type: AssetType.Texture },
+          fabricGhost4: { url: '/textures/fabricghosts4.png', type: AssetType.Texture },
+          rocksPhotos: { url: '/textures/rocks.png', type: AssetType.Texture },
+          rocksPhotosBW: { url: '/textures/rockBW.png', type: AssetType.Texture },
+          glitter1: { url: '/textures/glitter.png', type: AssetType.Texture },
+          glitter2: { url: '/textures/glitter2.png', type: AssetType.Texture },
+        }
+      : {}),
     backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
     // Quill-authored, baked vertex-cache animation exported as glTF morph
     // targets (no rig) — see EarthSituationsVfxSystem's own bee comment for
@@ -84,12 +94,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     grabbing: false,
     physics: false,
     sceneUnderstanding: false,
-    // <hudtext> in ui/notification-hud.uikitml — a custom kit tag (not
-    // plain <span>) so the "hud" font-family registration can be baked in
-    // via defaultOverrides at true component-construction time. See
-    // HudText's own comment: setting fontFamilies via setProperties() on
-    // an already-built element doesn't retroactively reshape its glyphs.
-    spatialUI: { kits: { hudtext: HudText } },
+    // hudtext: notification-hud.uikitml's custom tag (see HudText's own
+    // comment for why it needs to be a kit at all). span/button: applies
+    // the same "hud" font-family registration to every other .uikitml
+    // file's plain <span>/<button> text, project-wide, without touching
+    // each file's markup — see ui-font-kit.ts.
+    spatialUI: { kits: { hudtext: HudText, span: GameSpan, button: GameButton } },
   },
 }).then((world) => {
   bootstrapGlobals(world);
@@ -147,7 +157,13 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // priority 10) and CometCaught (added by CometHandoffSystem, priority
     // 9) — must run after both, same visual-sync band as
     // PebbleCometPresentationSystem.
-    .registerSystem(CometAudioSystem, { priority: 21 });
+    .registerSystem(CometAudioSystem, { priority: 21 })
+    // Same comet-tag subscriptions as CometAudioSystem just above (see its
+    // own comment) plus every other phase's direct pulse()/pulseBoth() calls
+    // — grouped right after it since both are "one system per feedback
+    // modality." No new components to register (reuses CometSnapped/
+    // CometReleased/CometCaught).
+    .registerSystem(HapticsSystem, { priority: 22 });
 
   // There's exactly one comet, defaulting to the right hand — see
   // CometHandoffSystem for how it switches (passive drift after 2s with
@@ -162,6 +178,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // before those systems execute later in the same pass.
   world.registerSystem(GameDirectorSystem, { priority: 0 });
   const director = world.getSystem(GameDirectorSystem)!;
+
+  // MCP/agent-testing hook — see dev-jump-system.ts's own comment. Registered
+  // right after GameDirectorSystem (which it looks up via getSystem in init())
+  // and before director.start(), same as PhaseMenuSystem below.
+  world.registerSystem(DevJumpSystem, { priority: 0 });
+  world.registerSystem(DevPerfLoggerSystem, { priority: 0 });
 
   // Left-hand-pinch dev menu — jumps directly to any phase. Registered after
   // GameDirectorSystem (which it looks up via getSystem in its own init()).
@@ -207,8 +229,12 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   world
     .registerSystem(StardustSystem, { priority: 30 })
     .registerSystem(StardustVfxSystem, { priority: 32 });
+  const stardust = world.getSystem(StardustSystem)!;
   director.definePhase(Phase.Stardust, {
-    systems: [world.getSystem(StardustSystem)!],
+    systems: [stardust],
+    reset: () => stardust.resetRun(),
+    // Timing out plays the stardust win sequence before moving on.
+    onTimeout: () => stardust.onTimeout(),
     // Bumped from 90 — StardustSystem's own two-stage swirl finale (Stage A
     // up to 60s, Stage B up to +30s more) plus the win-sequence notification
     // playback (~13s) can now total more than the old timeout on a slow/idle
@@ -216,15 +242,28 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // at all. Bumped again from 150 — a struggling player (steep effective
     // bar once both swirl stages are counted) was cutting it too close to
     // this safety net.
-    timeoutSeconds: 180,
+    timeoutSeconds: 240,
+    continue: {
+      getReadiness01: () => stardust.getContinueReadiness01(),
+      onContinue: () => stardust.continueNow(),
+    },
   });
 
   world
     .registerSystem(PebbleWeavingSystem, { priority: 30 })
     .registerSystem(PebbleFieldVfxSystem, { priority: 32 });
+  const pebbles = world.getSystem(PebbleWeavingSystem)!;
   director.definePhase(Phase.Pebbles, {
-    systems: [world.getSystem(PebbleWeavingSystem)!, world.getSystem(PebbleFieldVfxSystem)!],
-    timeoutSeconds: 180,
+    systems: [
+      world.getSystem(PebbleWeavingSystem)!,
+      world.getSystem(PebbleFieldVfxSystem)!,
+    ],
+    timeoutSeconds: 240,
+    continue: {
+      getReadiness01: () => pebbles.getProgress01(),
+      getColorHex: () => pebbles.getDominantColorHex(),
+      onContinue: () => pebbles.triggerCompletion(),
+    },
   });
 
   // PlanetSeedingVfxSystem is registered but, like StardustVfxSystem, never
@@ -240,14 +279,19 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   world
     .registerSystem(PlanetSeedingSystem, { priority: 30 })
     .registerSystem(PlanetSeedingVfxSystem, { priority: 32 });
+  const seeding = world.getSystem(PlanetSeedingSystem)!;
   director.definePhase(Phase.Seeding, {
-    systems: [world.getSystem(PlanetSeedingSystem)!],
+    systems: [seeding],
+    continue: {
+      getReadiness01: () => seeding.getContinueReadiness01(),
+      onContinue: () => seeding.continueNow(),
+    },
     // Bumped from 150 — PlanetSeedingSystem's own COVERAGE_WIN_FRACTION now
     // requires the ENTIRE grid colored (was 0.7), not just most of it (see
     // its own comment); this safety net needed matching headroom. 180 -> 240
     // when the grid doubled to 80 cells (see planet-stain-material.ts's
     // MAX_SPLATS).
-    timeoutSeconds: 240,
+    timeoutSeconds: 300,
   });
 
   // ConstellationsVfxSystem is registered but, like StardustVfxSystem/
@@ -284,8 +328,15 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   world
     .registerSystem(FateEventSystem, { priority: 30 })
     .registerSystem(FateEventVfxSystem, { priority: 32 });
+  const fateEvents = world.getSystem(FateEventSystem)!;
   director.definePhase(Phase.FateEvents, {
-    systems: [world.getSystem(FateEventSystem)!],
+    systems: [fateEvents],
+    // Timing out mid-collection still plays the payoff before moving on.
+    onTimeout: () => fateEvents.onTimeout(),
+    continue: {
+      getReadiness01: () => fateEvents.getContinueReadiness01(),
+      onContinue: () => fateEvents.continueNow(),
+    },
     // Bumped from 65 — the phase is now a fixed 5-beat sequence (Zoom 6s +
     // Ambient 10s + Explain ~5.3s + Collect, gameplay-paced + Payoff's own
     // ~7s hold before phaseComplete — see fate-event-system.ts's FateBeat)
@@ -317,6 +368,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // above running after every priority-30 phase system despite being
   // registered earlier in this file.
   world.registerSystem(CometAutopilotSystem, { priority: 12 });
+  const launch = world.getSystem(OrbitalLaunchSystem)!;
   director.definePhase(Phase.Launch, {
     systems: [world.getSystem(OrbitalLaunchSystem)!, world.getSystem(OrbitalLaunchVfxSystem)!],
     // Bumped from 30 — too tight against OrbitalLaunchSystem's own notify-
@@ -328,8 +380,17 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // timeout (this value) could fire first and force an immediate detach
     // via OrbitalLaunchSystem.stop()'s fallback, cutting the buildup
     // sequence off mid-playback. 55 leaves real room to notice/aim/hold.
-    timeoutSeconds: 55,
+    // No Continue button here: choose a destiny or time out (see
+    // OrbitalLaunchSystem.stop()'s 'indecisive' achievement).
+    timeoutSeconds: LAUNCH_TIMEOUT_SECONDS,
+    // A committed player's launch buildup finishes before the phase ends.
+    onTimeout: () => launch.onTimeout(),
   });
+
+  // Wrist-worn Continue button (replaces the progress bar below, which is
+  // now disabled — see CONTINUE_BUTTON_ENABLED / HAND_PROGRESS_HUD_ENABLED).
+  // Looks up GameDirectorSystem for each phase's PhaseConfig.continue hooks.
+  world.registerSystem(ContinueButtonSystem, { priority: 34 });
 
   // Wrist-worn progress bar, on whichever hand isn't holding the comet —
   // always-on/self-gated (see its own class comment), not GameDirector-
@@ -356,14 +417,19 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // Dev-only art-comparison sandbox (see Phase.ArtTest's own comment) —
   // reachable only via PhaseMenuSystem's dev menu (btn-art-test), never
   // through normal play/looping since Phase.ArtTest isn't in PHASE_ORDER.
-  world
-    .registerSystem(ArtTestSystem, { priority: 30 })
-    .registerSystem(ArtTestVfxSystem, { priority: 32 });
-  director.definePhase(Phase.ArtTest, {
-    systems: [world.getSystem(ArtTestSystem)!, world.getSystem(ArtTestVfxSystem)!],
-    // No timeoutSeconds — a dev tool should never auto-advance out from
-    // under whoever's using it; leaving is always a manual dev-menu jump.
-  });
+  // See ART_TEST_ENABLED's own comment — currently off, skipped entirely
+  // (not registered/defined at all) rather than just disabled, since this
+  // is the single largest sandbox in the codebase.
+  if (ART_TEST_ENABLED) {
+    world
+      .registerSystem(ArtTestSystem, { priority: 30 })
+      .registerSystem(ArtTestVfxSystem, { priority: 32 });
+    director.definePhase(Phase.ArtTest, {
+      systems: [world.getSystem(ArtTestSystem)!, world.getSystem(ArtTestVfxSystem)!],
+      // No timeoutSeconds — a dev tool should never auto-advance out from
+      // under whoever's using it; leaving is always a manual dev-menu jump.
+    });
+  }
 
   // director.start() is deliberately NOT called here — StartMenuSystem
   // calls it once the Start button is dwell-selected, gating the whole

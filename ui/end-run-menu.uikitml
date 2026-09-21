@@ -5,10 +5,10 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    background-color: #09090b;
+    background-color: #000000;
     border-color: #ffffff;
     border-width: 0.15;
-    border-radius: 2;
+    border-radius: 0;
   }
 
   .title {

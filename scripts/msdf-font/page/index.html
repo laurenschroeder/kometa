@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8" /></head>
+<body>
+<script type="module">
+import { MSDF } from './msdf-generator/index.js';
+
+window.runGen = async (opts) => {
+  const msdf = new MSDF();
+  await msdf.initialize();
+  const req = await fetch('./font.ttf');
+  const ab = await req.arrayBuffer();
+  const fontBuffer = new Uint8Array(ab);
+
+  const result = await msdf.generate({
+    font: fontBuffer,
+    charset: opts.charset,
+    fontSize: opts.fontSize,
+    textureSize: opts.textureSize,
+    fieldRange: opts.fieldRange,
+    fixOverlaps: true,
+  });
+
+  await msdf.dispose();
+  window.__result = result;
+  window.__done = true;
+};
+</script>
+</body>
+</html>

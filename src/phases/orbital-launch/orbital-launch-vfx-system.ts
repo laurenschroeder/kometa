@@ -29,8 +29,8 @@ const NEBULA_SPIN_SPEED = 0.15; // rad/s
 // actually committed to a path. 1/s exponential ease.
 const NEBULA_FADE_EASE_RATE = 1.2;
 
-const LABEL_WIDTH = 0.28;
-const LABEL_HEIGHT = 0.1;
+const LABEL_WIDTH = 0.42;
+const LABEL_HEIGHT = 0.15;
 const LABEL_GAP = 0.15; // above the zone sphere
 
 // Charge-up cue while a zone is being held (see OrbitalLaunchSystem's
@@ -166,7 +166,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     zone.visible = false;
     this.world.createTransformEntity(zone);
 
-    const texture = drawLabel(text);
+    const texture = drawLabel(text, 0);
     const labelMat = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
     const label = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), labelMat);
     label.position.set(center.x, center.y + LABEL_OFFSET_Y, center.z);

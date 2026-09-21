@@ -1,5 +1,16 @@
 import { createSystem } from '@iwsdk/core';
 
+// Kill switch for the whole dev-only art-comparison sandbox (ArtTestSystem +
+// ArtTestVfxSystem + Phase.ArtTest's registration + its dev-menu button) —
+// flip back to true to bring it back; nothing else needs to change. See
+// index.ts's own use (skips registering/defining the phase entirely, not
+// just no-opping it — this sandbox is the single largest file in the
+// codebase at 2,500+ lines, so skipping registration avoids paying for it
+// at all while it's off) and PhaseMenuSystem's own use (hides/disables the
+// now-dead-end "Art Test" button rather than leaving it reachable to
+// nothing).
+export const ART_TEST_ENABLED = false;
+
 // Ordered to match ArtTestVfxSystem's own variant-building order — index
 // here is exactly the index that system toggles visible.
 export const ART_TEST_VARIANT_LABELS: readonly string[] = [

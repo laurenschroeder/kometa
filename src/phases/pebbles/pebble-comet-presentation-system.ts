@@ -10,7 +10,6 @@ import {
   InstancedMesh,
   Matrix4,
   Mesh,
-  NearestFilter,
   Points,
   Quaternion,
   ShaderMaterial,
@@ -22,8 +21,8 @@ import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
-import { COMET_HEAD, HAZE, HAZE_GAS, hexToRgb, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
-import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
+import { COMET_HEAD, HAZE, hexToRgb, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
+import { loadFbxMeshesByName } from '../../vfx/geometry/fbx-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
@@ -32,14 +31,24 @@ import {
   kGasCloudMat,
   kOrganicGlitterMat,
   kSoulIslandMat,
-  PEBBLE_ISLAND_OBJ_GROUPS,
-  PEBBLE_ISLAND_OBJ_MAX_COUNT,
-  PEBBLE_ISLAND_OBJ_URL,
+  PEBBLE_ISLAND_MESH_NAMES,
+  PEBBLE_ISLAND_MESH_URL,
   SOUL_SIZE_MULTIPLIER,
 } from '../../vfx/shaders/pebble-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
 import { makeToonRimDecalMaterial } from '../../vfx/shaders/toon-rim-material.js';
-import { PEBBLE_TYPES } from './pebble-type.js';
+
+// Comet head decal textures, indexed to line up with PEBBLE_TYPES (0 = soul,
+// 1 = organic, 2 = gas) — resolved lazily since AssetManager isn't populated
+// yet at module load (mirrors kHeadGeo/kOrganicGeos being built eagerly here
+// while asset-backed textures wait for first use).
+let kFaceTextures: Texture[] | null = null;
+export function getFaceTextures(): Texture[] {
+  if (!kFaceTextures) {
+    kFaceTextures = ['faceSoul', 'faceOrganic', 'faceGas'].map((k) => AssetManager.getTexture(k)!);
+  }
+  return kFaceTextures;
+}
 
 // ── chapter-2-specific tuning (unchanged from the original comet-system.ts) ─
 const N_PEBBLES = 260;
@@ -49,20 +58,20 @@ const EXP_DECAY_H = 1.4;
 // Head radius (real world-space meters) — smaller than the pebbles' largest
 // near-head size so it reads as part of the rock cluster, not a big clean
 // orb looming over it.
-const HEAD_RADIUS = 0.024;
+// Exported so PebbleChoiceBubbleSystem can size its own preview head
+// relative to the real in-hand comet's own head (see that file's own
+// BUBBLE_HEAD_RADIUS comment).
+export const HEAD_RADIUS = 0.024;
 // Below this speed, velocity direction is noisy/undefined, so the head just
 // holds its last orientation instead of snapping to an arbitrary default.
 const FACING_SPEED_EPSILON_SQ = 0.0004;
-// Speed-based face selection: slow cycles the first pair of textures at
-// ~1.2 Hz, fast cycles the second pair at ~3 Hz (time * 2.0 in both cases —
-// 0.5s per expression).
-const FACE_CYCLE_SPEED_THRESHOLD = 1.5;
 
 // PEBBLE_TYPES' own index order doubles as the render-style dispatch key —
 // see pebble-field-vfx-system.ts's identical convention.
 const TYPE_SOUL = 0;
 const TYPE_ORGANIC = 1;
 const TYPE_GAS = 2;
+const TYPE_NONE = 255; // slot not shown (more slots than collected pebbles)
 
 const N_ORGANIC_VARIANTS = 6;
 const kOrganicGeos: BufferGeometry[] = Array.from({ length: N_ORGANIC_VARIANTS }, () => buildOrganicGeometry());
@@ -106,15 +115,14 @@ const HEAD_PALETTE = {
   rimColor: hexToRgb(WHITE),
 };
 const HAZE_COLOR: [number, number, number] = hexToRgb(HAZE);
-// Warm red/orange, same family as GAS_CLOUD_COLOR — the trail reads as
-// visibly ominous for the whole rest of the playthrough once gas locks in
-// as dominant, not just during Fate Events (see the dominantPebbleType
-// subscribe below, mirroring the head's own retint-on-lock-in pattern).
-const HAZE_COLOR_GAS: [number, number, number] = hexToRgb(HAZE_GAS);
 
 // Precomputed once at module load — zero runtime cost, shared across every
-// PebbleCometPresentationSystem-managed comet.
-const kHeadGeo = buildOrganicGeometry();
+// PebbleCometPresentationSystem-managed comet. Exported so
+// PebbleChoiceBubbleSystem can build its own independent head-preview mesh
+// from the same geometry/shader without duplicating construction — the real
+// comet head stays hidden throughout Pebbles (see HIDDEN_DURING_PHASES), so
+// that system needs its own instance rather than reusing a visible one.
+export const kHeadGeo = buildOrganicGeometry();
 
 const kHazeMat = makePointSpriteMaterial({
   color: HAZE_COLOR,
@@ -122,24 +130,20 @@ const kHazeMat = makePointSpriteMaterial({
   depthWrite: false,
   transparent: true,
 });
-function makeHeadMat(): ShaderMaterial {
-  return makeToonRimDecalMaterial(HEAD_PALETTE);
-}
-
-// Maps a pebble's fixed random roll (see CometVisual.pebbleTypeRoll) to one
-// of the three type indices, weighted by the current globals.pebbleTypeWeights
-// split — same technique a loot table uses to pick from weighted buckets.
-function typeForRoll(roll: number, weights: [number, number, number]): number {
-  const w0 = weights[0];
-  const w1 = w0 + weights[1];
-  return roll < w0 ? TYPE_SOUL : roll < w1 ? TYPE_ORGANIC : TYPE_GAS;
+// `faceSizeMultiplier` forwards straight to makeToonRimDecalMaterial's own
+// sizeMultiplier — callers showing the head at a much smaller scale (e.g.
+// PebbleChoiceBubbleSystem's own preview) can ask for a bigger face decal so
+// it still reads clearly, without affecting the real in-hand comet's own
+// default (1x) call.
+export function makeHeadMat(faceSizeMultiplier = 1): ShaderMaterial {
+  return makeToonRimDecalMaterial(HEAD_PALETTE, faceSizeMultiplier);
 }
 
 interface CometVisual {
   pebbleField: RadialField;
   pebbleSizes: Float32Array;
   pebbleRot: Quaternion[];
-  // Each pebble's fixed random roll in [0, 1) — see typeForRoll. Combined
+  // Each pebble's fixed random roll in [0, 1) — see _recomputeTypesForVisual. Combined
   // with the CURRENT globals.pebbleTypeWeights, decides pebbleType.
   pebbleTypeRoll: Float32Array;
   // Current type per slot (0/1/2) — recomputed by _recomputeTypesForVisual
@@ -158,11 +162,11 @@ interface CometVisual {
   // (soulBucket/soulLocal go from "1 placeholder bucket" to "N islands").
   soulBucket: Uint8Array;
   soulLocal: Uint16Array;
-  soulExtraScale: Float32Array; // 1 until islands load, then 1/islandRadius per slot
+  soulExtraScale: Float32Array; // always 1 — loadFbxMeshesByName pre-normalizes every island to unit radius
   soulWigglePhase: Float32Array;
   soulMeshes: InstancedMesh[];
   soulMeshEntities: Entity[];
-  // Guards the async loadObjLargestIslands().then() callback against this
+  // Guards the async loadFbxMeshesByName().then() callback against this
   // visual having been destroyed (comet entity disqualified) while the
   // (shared, cached) load was still in flight.
   destroyed: boolean;
@@ -183,7 +187,6 @@ interface CometVisual {
   headMesh: Mesh;
   headMat: ShaderMaterial;
   headMeshEntity: Entity;
-  faceTextures: Texture[];
 }
 
 // Phases where the pebble/head body hasn't "formed" yet and stays hidden —
@@ -245,29 +248,20 @@ export class PebbleCometPresentationSystem extends createSystem({
         this._applyVisibility();
 
         if (phase === Phase.Seeding) {
-          // Retint every comet head from HEAD_PALETTE's near-black default
-          // to the player's majority pebble color, right as the body first
-          // becomes visible — same "retint on Seeding entry" pattern
-          // PlanetSeedingVfxSystem uses for the moons. Unrelated to the
-          // pebble-body art-style split above — the head is always the same
-          // decal mesh regardless of type.
-          const dominant = getGlobals(this.world).dominantPebbleType.peek();
-          const color = PEBBLE_TYPES[dominant].color;
+          // Swaps every comet head's face decal to the player's majority
+          // pebble type, right as the body first becomes visible — same
+          // "retint on Seeding entry" TIMING PlanetSeedingVfxSystem's own
+          // moons use, just for the face texture only now. Body color stays
+          // HEAD_PALETTE's fixed near-black COMET_HEAD permanently (see that
+          // constant's own comment) — it used to also retint toward the
+          // majority pebble color here, but a saturated body washed out
+          // against the face decal; black keeps the face the one thing that
+          // actually stands out on the head.
+          const faceTex = getFaceTextures()[getGlobals(this.world).dominantPebbleType.peek()];
           for (const visual of this._visuals.values()) {
-            (visual.headMat.uniforms.uBodyColor.value as Vector3).set(...color);
+            visual.headMat.uniforms.uFaceTex.value = faceTex;
           }
         }
-      }),
-    );
-
-    // Live for the whole playthrough, independent of gamePhase — retints
-    // the shared haze material's uColor uniform the moment gas locks in as
-    // dominant (safe to mutate live: there's only ever one active comet per
-    // playthrough, see comet-handoff-system.ts).
-    this.cleanupFuncs.push(
-      getGlobals(this.world).dominantPebbleType.subscribe((dominant) => {
-        const color = dominant === TYPE_GAS ? HAZE_COLOR_GAS : HAZE_COLOR;
-        (kHazeMat.uniforms.uColor.value as Vector3).set(...color);
       }),
     );
 
@@ -283,12 +277,12 @@ export class PebbleCometPresentationSystem extends createSystem({
     // throughout Chapter 2 itself (see HIDDEN_DURING_PHASES), so there's no
     // visible pop.
     this.cleanupFuncs.push(
-      getGlobals(this.world).pebbleTypeWeights.subscribe((weights) => this._applyTypeWeights(weights)),
+      getGlobals(this.world).pebbleTypeCounts.subscribe((counts) => this._applyTypeCounts(counts)),
     );
   }
 
-  private _applyTypeWeights(weights: [number, number, number]): void {
-    for (const visual of this._visuals.values()) this._recomputeTypesForVisual(visual, weights);
+  private _applyTypeCounts(counts: [number, number, number]): void {
+    for (const visual of this._visuals.values()) this._recomputeTypesForVisual(visual, counts);
   }
 
   // Recomputes which type each of the N_PEBBLES slots currently is, then
@@ -301,8 +295,21 @@ export class PebbleCometPresentationSystem extends createSystem({
   // just stopped being (say) organic would otherwise keep showing its stale
   // last-real-scale organic instance forever, since _placeInstancedPebbles
   // only ever writes to the CURRENTLY active structure per slot.
-  private _recomputeTypesForVisual(visual: CometVisual, weights: [number, number, number]): void {
-    for (let i = 0; i < N_PEBBLES; i++) visual.pebbleType[i] = typeForRoll(visual.pebbleTypeRoll[i], weights);
+  private _recomputeTypesForVisual(visual: CometVisual, counts: [number, number, number]): void {
+    // Exactly the collected pebbles are shown: the first `total` slots, each
+    // assigned a type by its roll's rank among them so the per-type counts
+    // match what was gathered. Remaining slots stay hidden (TYPE_NONE).
+    const total = Math.min(N_PEBBLES, counts[0] + counts[1] + counts[2]);
+    const shown: number[] = [];
+    for (let i = 0; i < total; i++) shown.push(i);
+    shown.sort((a, b) => visual.pebbleTypeRoll[a] - visual.pebbleTypeRoll[b]);
+    visual.pebbleType.fill(TYPE_NONE);
+    const shownTotal = counts[0] + counts[1] + counts[2];
+    for (let rank = 0; rank < shown.length; rank++) {
+      // Scaled when capped (more collected than slots) so proportions hold.
+      const r = shownTotal > N_PEBBLES ? (rank / shown.length) * shownTotal : rank;
+      visual.pebbleType[shown[rank]] = r < counts[0] ? TYPE_SOUL : r < counts[0] + counts[1] ? TYPE_ORGANIC : TYPE_GAS;
+    }
 
     this._scratchScale.setScalar(0);
     for (let i = 0; i < N_PEBBLES; i++) {
@@ -464,20 +471,10 @@ export class PebbleCometPresentationSystem extends createSystem({
     hazePoints.visible = this._visible;
     const hazePointsEntity = this.world.createTransformEntity(hazePoints);
 
-    // Face textures (already resolved by the AssetManifest in index.ts).
-    // NOTE: preserved exactly as the original prototype — the array pulls
-    // beepchat3/4 + smile1/2, not beepchat1/2, despite the speed-cycling
-    // comment below implying a "slow" pair vs a "fast" pair; this is
-    // pre-existing behavior carried over verbatim, not a new choice.
-    const faceTextures = ['beepchat3', 'beepchat4', 'smile1', 'smile2'].map((k) => {
-      const tex = AssetManager.getTexture(k)!;
-      tex.magFilter = NearestFilter;
-      tex.minFilter = NearestFilter;
-      return tex;
-    });
-
+    // Starts on the soul face — retinted to whichever type is actually
+    // dominant once that's known (see the Seeding-entry block in init()).
     const headMat = makeHeadMat();
-    headMat.uniforms.uFaceTex.value = faceTextures[0];
+    headMat.uniforms.uFaceTex.value = getFaceTextures()[0];
     const headMesh = new Mesh(kHeadGeo, headMat);
     headMesh.name = 'comet-head';
     headMesh.scale.setScalar(HEAD_RADIUS);
@@ -518,85 +515,80 @@ export class PebbleCometPresentationSystem extends createSystem({
       headMesh,
       headMat,
       headMeshEntity,
-      faceTextures,
     };
     this._visuals.set(entity.index, visual);
 
-    const initialWeights = getGlobals(this.world).pebbleTypeWeights.peek();
-    this._recomputeTypesForVisual(visual, initialWeights);
+    this._recomputeTypesForVisual(visual, getGlobals(this.world).pebbleTypeCounts.peek());
 
-    loadObjLargestIslands(PEBBLE_ISLAND_OBJ_URL, PEBBLE_ISLAND_OBJ_GROUPS, PEBBLE_ISLAND_OBJ_MAX_COUNT).then(
-      (islands) => {
-        if (visual.destroyed) return;
-        if (islands.length === 0) {
-          console.warn(
-            `[PebbleCometPresentationSystem] no mesh islands found under ${PEBBLE_ISLAND_OBJ_GROUPS.join('/')} in '${PEBBLE_ISLAND_OBJ_URL}' — keeping the primitive placeholder soul pebbles.`,
-          );
-          return;
-        }
-        for (const e of visual.soulMeshEntities) {
-          // Same reasoning as pebble-field-vfx-system.ts's identical swap:
-          // the placeholder's own geometry isn't shared with anything else,
-          // unlike kSoulIslandMat — dispose it explicitly (e.dispose()
-          // isn't safe here, it would also free the SHARED material).
-          (e.object3D as InstancedMesh).geometry.dispose();
-          e.destroy();
-        }
+    loadFbxMeshesByName(PEBBLE_ISLAND_MESH_URL, PEBBLE_ISLAND_MESH_NAMES).then((rawIslands) => {
+      if (visual.destroyed) return;
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
+      if (islands.length === 0) {
+        console.warn(
+          `[PebbleCometPresentationSystem] none of [${PEBBLE_ISLAND_MESH_NAMES.join(', ')}] found in '${PEBBLE_ISLAND_MESH_URL}' — keeping the primitive placeholder soul pebbles.`,
+        );
+        return;
+      }
+      for (const e of visual.soulMeshEntities) {
+        // Same reasoning as pebble-field-vfx-system.ts's identical swap:
+        // the placeholder's own geometry isn't shared with anything else,
+        // unlike kSoulIslandMat — dispose it explicitly (e.dispose()
+        // isn't safe here, it would also free the SHARED material).
+        (e.object3D as InstancedMesh).geometry.dispose();
+        e.destroy();
+      }
 
-        const islandCount = islands.length;
-        const capacity = Math.ceil(N_PEBBLES / islandCount);
-        const newMeshes: InstancedMesh[] = [];
-        const newEntities: Entity[] = [];
-        for (let islandIdx = 0; islandIdx < islandCount; islandIdx++) {
-          // .clone() — loadObjLargestIslands caches and returns these SAME
-          // geometry objects to every caller requesting this (url, groups,
-          // count) key (art-test's own "8 islands" variants, Fate Events'
-          // placeholder crowd, and pebble-field-vfx-system.ts all ask for
-          // the same 8 islands); setAttribute() below mutates the geometry
-          // directly, so without cloning, each caller's per-instance
-          // buffers would stomp on every other caller's already-built mesh
-          // sharing that object.
-          const geo = islands[islandIdx].clone();
-          geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(capacity).fill(0.7), 1));
-          geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(capacity * 3), 3));
-          geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(capacity), 1));
-          geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array(capacity), 1));
-          const mesh = new InstancedMesh(geo, kSoulIslandMat, capacity);
-          mesh.name = `comet-soul-island-${islandIdx}`;
-          mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-          mesh.frustumCulled = false;
-          zeroInstanceMatrices(mesh, capacity);
-          mesh.visible = this._visible;
-          newEntities.push(this.world.createTransformEntity(mesh));
-          newMeshes.push(mesh);
-        }
+      const islandCount = islands.length;
+      const capacity = Math.ceil(N_PEBBLES / islandCount);
+      const newMeshes: InstancedMesh[] = [];
+      const newEntities: Entity[] = [];
+      for (let islandIdx = 0; islandIdx < islandCount; islandIdx++) {
+        // .clone() — loadFbxMeshesByName caches and returns these SAME
+        // geometry objects to every caller requesting this (url, names,
+        // normalize) key (pebble-field-vfx-system.ts asks for the same set);
+        // setAttribute() below mutates the geometry directly, so without
+        // cloning, each caller's per-instance buffers would stomp on every
+        // other caller's already-built mesh sharing that object.
+        const geo = islands[islandIdx].clone();
+        geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(capacity).fill(0.7), 1));
+        geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(capacity * 3), 3));
+        geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(capacity), 1));
+        geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array(capacity), 1));
+        const mesh = new InstancedMesh(geo, kSoulIslandMat, capacity);
+        mesh.name = `comet-soul-island-${islandIdx}`;
+        mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+        mesh.frustumCulled = false;
+        zeroInstanceMatrices(mesh, capacity);
+        mesh.visible = this._visible;
+        newEntities.push(this.world.createTransformEntity(mesh));
+        newMeshes.push(mesh);
+      }
 
-        for (let i = 0; i < N_PEBBLES; i++) {
-          const islandIdx = i % islandCount;
-          const local = Math.floor(i / islandCount);
-          visual.soulBucket[i] = islandIdx;
-          visual.soulLocal[i] = local;
-          const islandRadius =
-            islands[islandIdx].boundingSphere && islands[islandIdx].boundingSphere!.radius > 1e-6
-              ? islands[islandIdx].boundingSphere!.radius
-              : 1;
-          visual.soulExtraScale[i] = 1 / islandRadius;
-          const phaseAttr = newMeshes[islandIdx].geometry.getAttribute('aWigglePhase') as InstancedBufferAttribute;
-          phaseAttr.setX(local, visual.soulWigglePhase[i]);
-        }
-        for (const mesh of newMeshes) {
-          (mesh.geometry.getAttribute('aWigglePhase') as InstancedBufferAttribute).needsUpdate = true;
-        }
+      for (let i = 0; i < N_PEBBLES; i++) {
+        const islandIdx = i % islandCount;
+        const local = Math.floor(i / islandCount);
+        visual.soulBucket[i] = islandIdx;
+        visual.soulLocal[i] = local;
+        // loadFbxMeshesByName already normalizes every geometry to exactly
+        // unit bounding-sphere radius (see its own comment) — unlike the old
+        // OBJ islands' arbitrary native scan scale, no runtime
+        // boundingSphere-based correction is needed here.
+        visual.soulExtraScale[i] = 1;
+        const phaseAttr = newMeshes[islandIdx].geometry.getAttribute('aWigglePhase') as InstancedBufferAttribute;
+        phaseAttr.setX(local, visual.soulWigglePhase[i]);
+      }
+      for (const mesh of newMeshes) {
+        (mesh.geometry.getAttribute('aWigglePhase') as InstancedBufferAttribute).needsUpdate = true;
+      }
 
-        visual.soulMeshes = newMeshes;
-        visual.soulMeshEntities = newEntities;
-        // Re-clear + reassign so soul slots (now living at new
-        // mesh/local-index homes) get a correct scale on the very next
-        // frame instead of showing whatever stale matrix the fresh
-        // InstancedMeshes happen to start with.
-        this._recomputeTypesForVisual(visual, getGlobals(this.world).pebbleTypeWeights.peek());
-      },
-    );
+      visual.soulMeshes = newMeshes;
+      visual.soulMeshEntities = newEntities;
+      // Re-clear + reassign so soul slots (now living at new
+      // mesh/local-index homes) get a correct scale on the very next
+      // frame instead of showing whatever stale matrix the fresh
+      // InstancedMeshes happen to start with.
+      this._recomputeTypesForVisual(visual, getGlobals(this.world).pebbleTypeCounts.peek());
+    });
   }
 
   private _destroyVisual(entity: Entity): void {
@@ -656,11 +648,6 @@ export class PebbleCometPresentationSystem extends createSystem({
         visual.headMesh.rotateZ(Math.PI);
       }
 
-      const speed = Math.sqrt(velLenSq);
-      const cycleIdx = Math.floor(time * 2.0) % 2;
-      const faceIdx = speed >= FACE_CYCLE_SPEED_THRESHOLD ? 2 + cycleIdx : cycleIdx;
-      visual.headMat.uniforms.uFaceTex.value = visual.faceTextures[faceIdx];
-
       this._placeInstancedPebbles(trail, samples, stride, visual);
       sampleTrailField(
         trail,
@@ -690,6 +677,7 @@ export class PebbleCometPresentationSystem extends createSystem({
 
     for (let i = 0; i < N_PEBBLES; i++) {
       const type = pebbleType[i];
+      if (type === TYPE_NONE) continue;
       sampleTrailOffset(
         trail,
         samples,

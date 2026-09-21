@@ -8,7 +8,6 @@ import {
   PanelDocument,
   PanelUI,
   Quaternion,
-  UIKit,
   Vector3,
 } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
@@ -16,7 +15,8 @@ import { ACHIEVEMENTS } from './achievement-list.js';
 import { isUnlocked } from './achievement-store.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
-import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, PokeCubeButton } from '../vfx/ui/poke-button.js';
+import { HapticPattern, HapticsSystem } from './haptics-system.js';
+import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, LOWER_CUBE_HEIGHT, PokeCubeButton } from '../vfx/ui/poke-button.js';
 
 // Start no longer uses a dwell button — pinching with BOTH hands at once
 // (select on controllers, pinch on hand tracking — same gesture
@@ -26,10 +26,6 @@ import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, PokeCubeButton } from '../v
 // false-trigger it. Kept as a parallel fast-path alongside the Start cube
 // below, not replaced by it.
 const DOUBLE_PINCH_HOLD_SECONDS = 0.35;
-// Gentle pulse on the hint text while waiting — same "flash while inviting
-// interaction" idiom as ConstellationsVfxSystem's untouched-star flash.
-const START_HINT_PULSE_FREQ = 0.6; // Hz
-const START_HINT_MIN_OPACITY = 0.45;
 
 // A fresh XR session (headset just donned, hand often still near the face)
 // ignores all poke-hold accumulation for this long before any cube can
@@ -37,6 +33,13 @@ const START_HINT_MIN_OPACITY = 0.45;
 // mid-session choosing "Main Menu" doesn't need re-guarding. Shared across
 // every cube row in this system (main/achievements/settings).
 const IGNORE_POKE_SECONDS = 1.5;
+
+const PANEL_OFFSET_Y = 0.15;
+const PANEL_OFFSET_Z = -0.8;
+const PANEL_MAX_HEIGHT = 0.6;
+// The achievements page's own Back cube sits at the standard reachable
+// CUBE_DISTANCE but lower than the other rows (LOWER_CUBE_HEIGHT, about 3
+// inches), so it clears the taller four-column achievement list above it.
 
 type MenuPage = 'main' | 'achievements' | 'settings';
 
@@ -77,7 +80,6 @@ export class StartMenuSystem extends createSystem({
   private _passthroughButton!: PokeCubeButton;
   private _notificationsButton!: PokeCubeButton;
 
-  private _startHintEl: UIKit.Component<any> | null = null;
   private _startAction: (() => void) | null = null;
   private _pinchHoldSeconds = 0;
   private _startTriggered = false;
@@ -99,6 +101,7 @@ export class StartMenuSystem extends createSystem({
   private _scratchQuat = new Quaternion();
   private _scratchEuler = new Euler();
   private _scratchCamPos = new Vector3();
+  private _scratchPokePos = new Vector3();
 
   init(): void {
     // GameDirectorSystem must be registered before this system (see
@@ -130,12 +133,15 @@ export class StartMenuSystem extends createSystem({
     this._panelObject = entity.object3D!;
     this._panelObject.visible = true;
 
-    entity.addComponent(PanelUI, { config: '/ui/start-menu.json', maxWidth: 0.7, maxHeight: 0.6 });
+    entity.addComponent(PanelUI, { config: '/ui/start-menu.json', maxWidth: 1.0, maxHeight: PANEL_MAX_HEIGHT });
     // View-locked, same as NotificationHudSystem — this is the first thing
     // the player sees, so it shouldn't require hunting around for it.
     entity.addComponent(Follower, {
       target: this.player.head,
-      offsetPosition: [0, 0, -0.8],
+      // Raised above eye height (vs. the cube rows' own CUBE_HEIGHT, which
+      // sits slightly below) so the title/hint text clears the nearer
+      // poke-cube row instead of being visually crowded by it.
+      offsetPosition: [0, PANEL_OFFSET_Y, PANEL_OFFSET_Z],
       behavior: FollowBehavior.FaceTarget,
       tolerance: 0.02,
       speed: 6,
@@ -145,7 +151,9 @@ export class StartMenuSystem extends createSystem({
     this._mainRow = this._buildCubeRow(['Achievements', 'Start', 'Settings']);
     [this._achievementsButton, this._startButton, this._settingsButton] = this._mainRow.buttons;
 
-    this._achievementsRow = this._buildCubeRow(['Back']);
+    // Same distance as every other row, but lower — see the comment above
+    // PANEL_MAX_HEIGHT.
+    this._achievementsRow = this._buildCubeRow(['Back'], [0, LOWER_CUBE_HEIGHT, -CUBE_DISTANCE]);
     this._achievementsRow.rootObject.visible = false;
     for (const button of this._achievementsRow.buttons) button.setEnabled(false);
 
@@ -170,32 +178,49 @@ export class StartMenuSystem extends createSystem({
         const doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
         this._docRef = doc;
 
-        this._startHintEl = doc.getElementById('start-hint');
         this._startAction = () => {
           this._recenterToHead();
           this._director.start();
           getGlobals(this.world).gameStarted.value = true;
-          this._panelObject.visible = false;
-          for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
-            row.rootObject.visible = false;
-            for (const button of row.buttons) button.setEnabled(false);
-          }
+          this._hideAll();
         };
       },
       true,
     );
   }
 
+  private _hideAll(): void {
+    this._panelObject.visible = false;
+    for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
+      row.rootObject.visible = false;
+      for (const button of row.buttons) button.setEnabled(false);
+    }
+  }
+
+  // DevJumpSystem (MCP test hook) skips the Start button, so without this the
+  // cube rows' flourish meshes (12 x ~8.9K tris) stay drawn in front of the
+  // player for the whole test — inflating any perf reading taken after a
+  // dev-jump. Same hide the real Start press does.
+  dismissForDevJump(): void {
+    this._hideAll();
+  }
+
   // Builds one Follower-driven row of poke-cubes, centered around local
-  // x=0 (see cubeRowOffsets) — the same shared layout every screen in this
-  // menu uses (main/achievements/settings), just with a different button
-  // count/labels each time.
-  private _buildCubeRow(labels: string[]): CubeRow {
+  // x=0 (see cubeRowOffsets) — the same shared layout, at the same standard
+  // CUBE_HEIGHT/CUBE_DISTANCE spot, every screen in this menu uses (main/
+  // achievements/settings), just with a different button count/labels each
+  // time — see `offsetPosition`'s own default. Overridable, but nothing
+  // currently overrides it (the achievements row's Back cube used to, see
+  // git history, until that read as too far to comfortably reach).
+  private _buildCubeRow(
+    labels: string[],
+    offsetPosition: [number, number, number] = [0, CUBE_HEIGHT, -CUBE_DISTANCE],
+  ): CubeRow {
     const rootEntity = this.world.createTransformEntity();
     const rootObject = rootEntity.object3D!;
     rootEntity.addComponent(Follower, {
       target: this.player.head,
-      offsetPosition: [0, CUBE_HEIGHT, -CUBE_DISTANCE],
+      offsetPosition,
       behavior: FollowBehavior.FaceTarget,
       tolerance: 0.02,
       speed: 6,
@@ -219,26 +244,41 @@ export class StartMenuSystem extends createSystem({
     // snaps their fill to 0 synchronously, so there's nothing left for a
     // hidden button's own update() to do.
     if (this._page === 'main') {
-      if (this._startAction && this._startButton.update(delta, pokeReady)) this._startAction();
-      if (this._achievementsButton.update(delta, pokeReady)) this._openPage('achievements');
-      if (this._settingsButton.update(delta, pokeReady)) this._openPage('settings');
+      if (this._startAction && this._firedPoke(this._startButton, delta, pokeReady)) this._startAction();
+      if (this._firedPoke(this._achievementsButton, delta, pokeReady)) this._openPage('achievements');
+      if (this._firedPoke(this._settingsButton, delta, pokeReady)) this._openPage('settings');
     } else if (this._page === 'achievements') {
-      if (this._achievementsRow.buttons[0].update(delta, pokeReady)) this._openPage('main');
+      if (this._firedPoke(this._achievementsRow.buttons[0], delta, pokeReady)) this._openPage('main');
     } else if (this._page === 'settings') {
-      if (this._passthroughButton.update(delta, pokeReady)) {
+      if (this._firedPoke(this._passthroughButton, delta, pokeReady)) {
         const globals = getGlobals(this.world);
         globals.passthroughEnabled.value = !globals.passthroughEnabled.value;
         this._passthroughButton.setLabel(this._passthroughLabel(globals.passthroughEnabled.value));
       }
-      if (this._notificationsButton.update(delta, pokeReady)) {
+      if (this._firedPoke(this._notificationsButton, delta, pokeReady)) {
         const globals = getGlobals(this.world);
         globals.notificationsEnabled.value = !globals.notificationsEnabled.value;
         this._notificationsButton.setLabel(this._notificationsLabel(globals.notificationsEnabled.value));
       }
-      if (this._settingsRow.buttons[2].update(delta, pokeReady)) this._openPage('main');
+      if (this._firedPoke(this._settingsRow.buttons[2], delta, pokeReady)) this._openPage('main');
     }
 
-    this._updateStartPinch(delta, time);
+    this._updateStartPinch(delta);
+  }
+
+  // Runs a poke-cube button's own update() and, on the exact frame it fires,
+  // buzzes whichever controller poked it — see HapticsSystem.resolvePokeHand
+  // for how "whichever" is guessed (PokeInteractable/Pressed carry no
+  // pointer/hand info of their own).
+  private _firedPoke(button: PokeCubeButton, delta: number, pokeReady: boolean): boolean {
+    const fired = button.update(delta, pokeReady);
+    if (fired) {
+      button.group.getWorldPosition(this._scratchPokePos);
+      const haptics = this.world.getSystem(HapticsSystem);
+      const hand = haptics?.resolvePokeHand(this._scratchPokePos);
+      if (hand) haptics?.pulse(hand, HapticPattern.MediumPulse);
+    }
+    return fired;
   }
 
   private _activeRow(): CubeRow {
@@ -255,15 +295,11 @@ export class StartMenuSystem extends createSystem({
   }
 
   // Both hands pinching (select) at once, held briefly, starts the game —
-  // see DOUBLE_PINCH_HOLD_SECONDS's own comment.
-  private _updateStartPinch(delta: number, time: number): void {
+  // see DOUBLE_PINCH_HOLD_SECONDS's own comment. Kept as a parallel fast
+  // path even though its on-screen hint text was removed (per direct
+  // feedback — the poke-and-hold Start cube is the discoverable path now).
+  private _updateStartPinch(delta: number): void {
     if (this._startTriggered || !this._startAction || this._page !== 'main') return;
-
-    if (this._startHintEl) {
-      const pulse = 0.5 + 0.5 * Math.sin(time * START_HINT_PULSE_FREQ * Math.PI * 2);
-      const opacity = START_HINT_MIN_OPACITY + (1 - START_HINT_MIN_OPACITY) * pulse;
-      this._startHintEl.setProperties({ opacity } as Record<string, unknown>);
-    }
 
     const leftPinching = this.input.xr.gamepads.left?.getSelecting() ?? false;
     const rightPinching = this.input.xr.gamepads.right?.getSelecting() ?? false;
@@ -272,6 +308,7 @@ export class StartMenuSystem extends createSystem({
       this._pinchHoldSeconds += delta;
       if (this._pinchHoldSeconds >= DOUBLE_PINCH_HOLD_SECONDS) {
         this._startTriggered = true;
+        this.world.getSystem(HapticsSystem)?.pulseBoth(HapticPattern.MediumPulse);
         this._startAction();
       }
     } else {

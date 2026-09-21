@@ -1,4 +1,3 @@
-import { montserrat } from '@pmndrs/msdfonts';
 import {
   AudioListener,
   createSystem,
@@ -16,16 +15,7 @@ import { NOTIFICATION_COPY } from './notification-copy.js';
 import { Phase } from './phase.js';
 import { hexToRgb, NOTIFICATION_TEXT_DEFAULT } from '../vfx/color/color-scheme.js';
 import { playNotificationChime } from '../vfx/audio/notification-chime.js';
-
-// Stand-in for the requested Carrois Gothic SC: this project's panels
-// render text via GPU bitmap-font (MSDF) atlases, which arbitrary web
-// fonts can't be loaded into directly — they need a pre-generated MSDF
-// atlas (image + JSON), normally produced by a Docker/Google-Fonts-API
-// build step unavailable here. Montserrat (bold, geometric) is the closest
-// bundled @pmndrs/msdfonts option to Carrois Gothic SC's sturdy, all-caps-
-// friendly look. Swapping in a real Carrois Gothic SC atlas later means
-// changing just this one import + registration.
-const HUD_FONT_FAMILIES = { hud: montserrat };
+import { HUD_FONT_FAMILIES } from '../vfx/fonts/font-registry.js';
 
 // A `fontFamilies` value only takes effect if present at component
 // construction time (setProperties() on an already-built Text/Container
@@ -62,6 +52,11 @@ export class HudText extends UIKit.Container {
   }
 }
 
+// Where the HUD sits relative to the head [x, y, z] in metres — y is the
+// vertical position (0 = eye level, more negative = lower); see README
+// "Notification position". Exported so things pinned just below the box (the
+// Continue button) can key off it.
+export const NOTIFICATION_HUD_OFFSET: [number, number, number] = [0, -0.12, -0.4];
 const HUD_BOX_ID = 'hud-box';
 // One HudText slot per potential line (see ui/notification-hud.uikitml) —
 // a message's text is split on '\n' (see NotificationCopy's own comment)
@@ -94,6 +89,7 @@ type QueueEntry = {
   delaySeconds: number;
   minHoldSeconds: number;
   lineColors?: (readonly [number, number, number] | null)[];
+  lineStartSeconds?: readonly number[];
   onComplete?: () => void;
 };
 
@@ -123,6 +119,10 @@ export class NotificationHudSystem extends createSystem({
   // How many of _textEls the current message actually uses — the rest stay
   // hidden. Set fresh each _pump().
   private _lineCount = 1;
+  // Per-line fade-in start times for the current message (see
+  // NotificationCopy.lineStartSeconds) — null/short falls back to an even
+  // i * LINE_STAGGER_SECONDS.
+  private _lineStartSeconds: readonly number[] | undefined;
   private _active = false;
   private _state = FadeState.Idle;
   private _elapsed = 0;
@@ -161,6 +161,9 @@ export class NotificationHudSystem extends createSystem({
   // hasShown(). Cleared alongside _bootTriggered in resetBootTrigger(), the
   // same "a fresh run started" signal.
   private _shownTexts = new Set<string>();
+  // Same idea as _shownTexts, but only once a message has fully faded back
+  // out — see hasFinished().
+  private _finishedTexts = new Set<string>();
 
   // Soft "pop" played every time a message actually appears (see
   // _beginShow) — positioned at the HUD panel's own live world position
@@ -194,7 +197,8 @@ export class NotificationHudSystem extends createSystem({
       // world geometry, e.g. Fate Events' planet) could pass between the
       // player and the panel and occlude it. Closer reduces how often
       // anything else fits in that gap.
-      offsetPosition: [0, -0.22, -0.4],
+      // Y (middle value) is the vertical position — see README "Notification position".
+      offsetPosition: NOTIFICATION_HUD_OFFSET,
       behavior: FollowBehavior.FaceTarget,
       tolerance: 0.02,
       speed: 6,
@@ -320,6 +324,7 @@ export class NotificationHudSystem extends createSystem({
   resetBootTrigger(): void {
     this._bootTriggered = false;
     this._shownTexts.clear();
+    this._finishedTexts.clear();
   }
 
   // True once a notify() call for this exact text has actually started
@@ -331,6 +336,13 @@ export class NotificationHudSystem extends createSystem({
   // guess at when the message would have appeared.
   hasShown(text: string): boolean {
     return this._shownTexts.has(text);
+  }
+  // True once a message with this exact text has shown AND fully faded out
+  // (cleared alongside hasShown()) — for sequencing something to happen the
+  // moment a message is gone, e.g. revealing the constellation right before
+  // its own hint message appears.
+  hasFinished(text: string): boolean {
+    return this._finishedTexts.has(text);
   }
 
   private _maybeTriggerBoot(): void {
@@ -345,7 +357,7 @@ export class NotificationHudSystem extends createSystem({
     const sequence = NOTIFICATION_COPY[phase];
     if (!sequence) return;
     for (const entry of sequence) {
-      this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0, entry.lineColors, undefined, entry.minHoldSeconds ?? 0);
+      this.notify(entry.text, entry.holdSeconds, entry.delaySeconds ?? 0, entry.lineColors, undefined, entry.minHoldSeconds ?? 0, entry.lineStartSeconds);
     }
   }
 
@@ -370,8 +382,9 @@ export class NotificationHudSystem extends createSystem({
     lineColors?: (readonly [number, number, number] | null)[],
     onComplete?: () => void,
     minHoldSeconds = 0,
+    lineStartSeconds?: readonly number[],
   ): void {
-    this._queue.push({ text, holdSeconds, delaySeconds, minHoldSeconds, lineColors, onComplete });
+    this._queue.push({ text, holdSeconds, delaySeconds, minHoldSeconds, lineColors, lineStartSeconds, onComplete });
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -392,6 +405,19 @@ export class NotificationHudSystem extends createSystem({
     minHoldSeconds = 0,
   ): void {
     this._queue.unshift({ text, holdSeconds, delaySeconds, minHoldSeconds, lineColors, onComplete });
+    if (this._state === FadeState.Idle) this._pump();
+  }
+
+  // Puts several messages at the FRONT of the queue in the given order (first
+  // entry plays first), then pumps once. Calling notifyNext() repeatedly
+  // can't guarantee order: when the HUD is idle the first call starts showing
+  // immediately (so later calls queue behind it), but when it's busy each
+  // call unshifts ahead of the last — the same calls give opposite orders.
+  notifyNextSequence(entries: { text: string; holdSeconds: number; delaySeconds?: number }[]): void {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const { text, holdSeconds, delaySeconds = 0 } = entries[i];
+      this._queue.unshift({ text, holdSeconds, delaySeconds, minHoldSeconds: 0 });
+    }
     if (this._state === FadeState.Idle) this._pump();
   }
 
@@ -417,6 +443,7 @@ export class NotificationHudSystem extends createSystem({
     this._shownTexts.add(next.text);
     const lines = next.text.split('\n');
     this._lineCount = Math.min(lines.length, MAX_LINES);
+    this._lineStartSeconds = next.lineStartSeconds;
     for (let i = 0; i < MAX_LINES; i++) {
       const el = this._textEls[i];
       if (!el) continue;
@@ -451,7 +478,11 @@ export class NotificationHudSystem extends createSystem({
   // visible. A single-line message reduces to plain FADE_SECONDS, unchanged
   // from before staggered lines existed.
   private _inDurationSeconds(): number {
-    return FADE_SECONDS + Math.max(0, this._lineCount - 1) * LINE_STAGGER_SECONDS;
+    return FADE_SECONDS + this._lineStart(this._lineCount - 1);
+  }
+
+  private _lineStart(i: number): number {
+    return (this._lineStartSeconds?.[i] ?? Math.max(0, i) * LINE_STAGGER_SECONDS);
   }
 
   update(delta: number): void {
@@ -482,7 +513,7 @@ export class NotificationHudSystem extends createSystem({
       const boxT = Math.min(1, this._elapsed / FADE_SECONDS);
       this._setBoxOpacity(boxT);
       for (let i = 0; i < this._lineCount; i++) {
-        const lineT = Math.min(1, Math.max(0, (this._elapsed - i * LINE_STAGGER_SECONDS) / FADE_SECONDS));
+        const lineT = Math.min(1, Math.max(0, (this._elapsed - this._lineStart(i)) / FADE_SECONDS));
         this._textEls[i]?.setProperties({ opacity: lineT });
       }
       if (this._elapsed >= this._inDurationSeconds()) {
@@ -506,6 +537,7 @@ export class NotificationHudSystem extends createSystem({
         this._state = FadeState.Idle;
         const finished = this._current;
         this._current = null;
+        if (finished) this._finishedTexts.add(finished.text);
         finished?.onComplete?.();
         // onComplete may itself have called notify()/notifyNext() (state is
         // Idle right now, so that call already self-pumped) — only pump here

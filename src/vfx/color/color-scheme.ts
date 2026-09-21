@@ -88,6 +88,13 @@ export const PERSON_BODY: HexColor = '#152635';
 // ── Notification HUD (notification-hud-system.ts) ─────────────────────────
 export const NOTIFICATION_TEXT_DEFAULT: HexColor = WHITE;
 
+// ── Poke buttons (poke-button.ts) ──────────────────────────────────────────
+// The charged-fill diamond/flourish accent — replaces the old plain
+// CUBE_ACCENT blue (0x3f7fff, matched to ui/*.uikitml's now-removed
+// .dwell-fill CSS) now that the button template uses real gold-toned
+// ornamentation (flourish.obj) instead of a flat UI-blue square.
+export const UI_GOLD: HexColor = '#ffd933';
+
 // ── Hand progress HUD (hand-progress-hud-system.ts) ────────────────────────
 // Warm target the wrist bar's track border eases toward as a phase nears
 // completion — starts at the track's own plain white border.

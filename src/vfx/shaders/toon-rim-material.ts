@@ -672,9 +672,33 @@ export function makeToonRimSkinnedMaterial(
 // this file's other variants — the comet head needs to be retinted after
 // construction, to the player's majority pebble color once Seeding begins
 // (see PebbleCometPresentationSystem's gamePhase subscribe).
-export function makeToonRimDecalMaterial(palette: ToonRimPalette): ShaderMaterial {
+// Cutout is driven by the decal texture's own alpha channel (soft-edged via
+// smoothstep for antialiasing), and the decal's own shaded RGB is shown
+// directly (not flattened to a fixed highlight color) — matches the current
+// faceSoul/faceOrganic/faceGas decals, which are real shaded art on a
+// transparent background. This replaced an earlier luma-based cutout built
+// for the old beepchat/smile decals (dark line-art on an opaque light
+// background, displayed as a flat near-white highlight color rather than
+// the line art's own color); that approach read the new white-on-
+// transparent decals as invisible, since white content has high luma just
+// like the old textures' background did.
+// How much of the head's local Y/Z extent the decal's own [0,1] UV square
+// covers — bigger number = smaller decal, since a bigger multiplier reaches
+// UV 1.0 at a smaller position offset. 3.0 keeps the decal roughly within a
+// quarter of the front hemisphere's diameter — "like one face of a cube" on
+// a rounded head, rather than the old 1.0 (no scale), which stretched the
+// image across the whole visible front of the head.
+const FACE_DECAL_SCALE = 3.0;
+
+// `sizeMultiplier` scales the decal's own on-surface footprint — since a
+// BIGGER FACE_DECAL_SCALE means a SMALLER decal (see that constant's own
+// comment), a caller asking for a 2x bigger face passes sizeMultiplier=2 and
+// this divides it in, rather than callers having to know/invert that
+// relationship themselves.
+export function makeToonRimDecalMaterial(palette: ToonRimPalette, sizeMultiplier = 1): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+  const decalScale = FACE_DECAL_SCALE / sizeMultiplier;
 
   const vertexShader = `
     varying vec3 vViewNormal;
@@ -684,7 +708,10 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette): ShaderMateria
 
     void main() {
       vLocalPos = position;
-      vDecalUV = vec2(0.5 + position.z * 0.5, 0.5 - position.y * 0.5);
+      vDecalUV = vec2(
+        0.5 + position.z * 0.5 * ${decalScale.toFixed(4)},
+        0.5 - position.y * 0.5 * ${decalScale.toFixed(4)}
+      );
       vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
       vViewNormal = normalize(normalMatrix * normal);
       vViewDir    = normalize(-mvPosition.xyz);
@@ -708,10 +735,16 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette): ShaderMateria
       ${OUTLINE_GLSL}
       float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
 
-      vec4  face   = texture2D(uFaceTex, vDecalUV);
-      float luma   = dot(face.rgb, vec3(0.299, 0.587, 0.114));
-      float isFace = 1.0 - smoothstep(0.12, 0.38, luma);
-      vec3  col     = mix(uBodyColor, vec3(0.90, 0.97, 1.00), isFace * 0.96);
+      // Outside the shrunk decal square (see FACE_DECAL_SCALE), vDecalUV
+      // falls outside [0,1] — clamp before sampling (always sample, no
+      // branching around texture2D, so derivatives stay well-defined) and
+      // zero the contribution via inBounds instead.
+      vec2  clampedUV = clamp(vDecalUV, 0.0, 1.0);
+      vec4  face      = texture2D(uFaceTex, clampedUV);
+      float inBounds  = step(0.0, vDecalUV.x) * step(vDecalUV.x, 1.0)
+                       * step(0.0, vDecalUV.y) * step(vDecalUV.y, 1.0);
+      float isFace = smoothstep(0.3, 0.7, face.a) * inBounds;
+      vec3  col     = mix(uBodyColor, face.rgb, isFace * 0.96);
 
       col = mix(col, ${vec3Glsl(palette.rimColor)}, outline);
       gl_FragColor = vec4(col, 1.0);

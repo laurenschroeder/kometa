@@ -50,18 +50,22 @@ import {
 } from '../../vfx/geometry/animated-person.js';
 import {
   convertZUpToYUp,
+  loadFbxAllMeshes,
   loadFbxMeshesByName,
+  normalizeGeometryToUnitRadius,
   normalizeGeometryToUnitRadiusFromOrigin,
 } from '../../vfx/geometry/fbx-field-loader.js';
+import { loadObjMeshGeometry } from '../../vfx/geometry/obj-field-loader.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
+import { fontReady, labelFont, roundRectPath } from '../../vfx/textures/canvas-label.js';
 import { SOUL_ISLAND_PALETTE } from '../../vfx/shaders/pebble-material.js';
 import {
   makeToonRimFlatMaterial,
   makeToonRimInstancedWigglyLiveRimMaterial,
   makeToonRimSkinnedMaterial,
 } from '../../vfx/shaders/toon-rim-material.js';
-import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
+import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE, VOLATILE_GASSES, WHITE } from '../../vfx/color/color-scheme.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import {
@@ -70,6 +74,7 @@ import {
   FateBeat,
   FateEventSystem,
   GAS_NAMED_COUNT,
+  TALK_STAR_HEIGHT,
   NAMED_FIGURE_COUNT,
 } from './fate-event-system.js';
 import { SeedBlossom } from './seed-blossom.js';
@@ -110,7 +115,11 @@ const BUBBLE_CANVAS_H = 250;
 // one-way "found them" signal, not a repeating reminder.
 const MARKER_TEXTURE_KEY = 'starIllustration';
 const MARKER_SIZE = 0.11;
-const MARKER_HEIGHT = PERSON_HEIGHT * 2.3;
+// Star height itself now lives in FateEventSystem (TALK_STAR_HEIGHT) so the
+// touch test and this mesh agree on where the star is.
+// Default (non-objective) rim — matches makeToonRimSkinnedMaterial's own
+// [1,1,1] default the shared crowd material uses.
+const NORMAL_RIM_COLOR: [number, number, number] = [1, 1, 1];
 const MARKER_PULSE_FREQ = 0.8; // Hz — gentle, same "flash while inviting interaction" idiom as the start menu's own pinch hint
 const MARKER_PULSE_MIN_SCALE = 0.85;
 const BUBBLE_LINE_HEIGHT = 34;
@@ -141,6 +150,10 @@ const PLANET_ARRIVAL_ELIGIBLE_FROM = new Set<Phase>([
 // GatherableFields shouldn't render at all until Fate Events actually
 // starts (see _updateCollectibles's `show` argument below).
 const COLLECTIBLE_VISIBLE_FROM = new Set<Phase>([Phase.FateEvents, Phase.Launch, Phase.Finale]);
+// Ghosts rise out of the ground beneath their gravestone over this long,
+// each starting up to GHOST_RISE_STAGGER_SECONDS after the first.
+const GHOST_RISE_SECONDS = 2.5;
+const GHOST_RISE_STAGGER_SECONDS = 2;
 
 // Same reasoning/same phase set as PLANET_ARRIVAL_ELIGIBLE_FROM, guarding
 // getSpinProgress() the same way — Leg A (the spin transition) only ever
@@ -271,8 +284,40 @@ const GAS_CHARACTER_POSES: GasCharacterPose[] = [
 // widened to match so five-times-bigger icons don't overlap once attached.
 const SKULL_FLIGHT_DURATION = 3.0;
 const SKULL_RING_RADIUS = 0.12;
-const SKULL_SIZE = 0.15;
-const SKULL_CANVAS_SIZE = 96;
+// Pushes the attach ring behind the comet along its direction of travel
+// (opposite CometBody.velocity) so the icons trail like the rest of the
+// tail instead of forming a halo that can swing in front of the head.
+const SKULL_BACK_OFFSET = 0.1;
+// Low-poly skull (replaced the 11.8 MB skull.obj, which parsed down to
+// thousands of triangles per skull). Exported loader so
+// EarthSituationsVfxSystem's own 3D "comet = skull" banner (Beat 5) shares the
+// exact same geometry and orientation fix instead of loading a second copy.
+const SKULL_FBX_URL = '/medium/skull.fbx';
+let skullGeometryPromise: Promise<BufferGeometry | null> | null = null;
+export function loadSkullGeometry(): Promise<BufferGeometry | null> {
+  if (!skullGeometryPromise) {
+    // Third correction attempt for orientation, backed by two real in-headset
+    // reports on the old OBJ: rotateX180 read a quarter-turn off (edge-on),
+    // rotateXPositive90 was "better but upside down" — i.e. -90° about X,
+    // which is convertZUpToYUp's own rotation. NOT re-verified for the FBX
+    // export — flag if it reads sideways/upside-down.
+    skullGeometryPromise = loadFbxAllMeshes(SKULL_FBX_URL, 1, (geo) => {
+      convertZUpToYUp(geo);
+      normalizeGeometryToUnitRadius(geo);
+    }).then((geos) => geos[0] ?? null);
+  }
+  return skullGeometryPromise;
+}
+// Box-center-normalized radius (see loadObjMeshGeometry's default normalize
+// — no "rests on a surface" origin requirement here, unlike the King's
+// crown/tiara, since this flies in a ring around the comet). 1/3 of the
+// original 0.075 (itself matched to the flat quad it replaced) — that read
+// too large in-headset.
+export const SKULL_RADIUS = 0.025;
+// The volatile-gasses type color (see color-scheme.ts) — no imported texture
+// map, just this toon-rim body color, same shader every other prop in this
+// file uses.
+export const SKULL_COLOR = hexToRgb(VOLATILE_GASSES);
 
 const enum SkullState {
   Hidden,
@@ -359,7 +404,13 @@ const IDENTITY_MAT4 = new Matrix4();
 // normalizeGeometryToUnitRadiusFromOrigin (not the box-center-relative
 // normalizer) is the correct fit here — see that function's own comment.
 const BLOB_PEOPLE_URL = '/medium/blobpeople.fbx';
-const GHOST_MESH_NAMES = ['BlobGhost', 'ghost', 'simpleGhost'] as const;
+// 'ghost' deliberately excluded — that node in blobpeople.fbx is still the
+// old undecimated virtualpebble island (54,542 tris), not a real ghost
+// shape; picking it (~1/3 of the time, see _buildGhostMeshes below) blew the
+// triangle budget the same way the old soul-island pebbles did. Use
+// 'simpleGhost' for both slots until a second lightweight ghost variant
+// exists.
+const GHOST_MESH_NAMES = ['BlobGhost', 'simpleGhost'] as const;
 // Organic's own seed collectibles — same file, same "ground origin at the
 // base" authoring convention as the ghost shapes above (confirmed by
 // directly parsing the file), so normalizeGeometryToUnitRadiusFromOrigin is
@@ -386,15 +437,6 @@ const BLOOM_SPEED_MIN = 0.2;
 const BLOOM_SPEED_MAX = 1.8;
 const BLOOM_FINAL_CHIME_FREQ = 520;
 
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
 
 function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   const words = text.split(' ');
@@ -439,52 +481,6 @@ function stampSoulIslandInstanceAttrs(geo: BufferGeometry): void {
   geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(3), 3));
   geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array([0]), 1));
   geo.setAttribute('aWigglePhase', new InstancedBufferAttribute(new Float32Array([Math.random()]), 1));
-}
-
-// Drawn as canvas primitives, not a fillText('☠', ...) glyph — a Unicode
-// glyph is only as good as whatever font the browser happens to resolve
-// 'sans-serif' to, and this one was silently rendering as nothing (missing-
-// glyph) in at least this environment. Same "drawn object, not a font's
-// problem" fix earth-situations-vfx-system.ts's own banner skull already
-// uses (see its _drawSkull), just filled red instead of bone-white — Gas's
-// skull symbols read as a hot, angry red flying at the player, not a pale
-// death's-head.
-function buildSkullTexture(): CanvasTexture {
-  const s = SKULL_CANVAS_SIZE;
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = s;
-  const ctx = canvas.getContext('2d')!;
-  const cx = s / 2;
-  const cy = s / 2;
-  const radius = s * 0.42;
-
-  ctx.fillStyle = '#e0201a';
-  ctx.beginPath();
-  ctx.arc(cx, cy - radius * 0.15, radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx - radius * 0.55, cy + radius * 0.15);
-  ctx.quadraticCurveTo(cx, cy + radius * 1.05, cx + radius * 0.55, cy + radius * 0.15);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = 'rgba(20, 4, 4, 0.9)';
-  ctx.beginPath();
-  ctx.arc(cx - radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(cx + radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx, cy + radius * 0.05);
-  ctx.lineTo(cx - radius * 0.12, cy + radius * 0.32);
-  ctx.lineTo(cx + radius * 0.12, cy + radius * 0.32);
-  ctx.closePath();
-  ctx.fill();
-  for (let i = -1; i <= 1; i++) {
-    ctx.fillRect(cx + i * radius * 0.22 - radius * 0.03, cy + radius * 0.55, radius * 0.06, radius * 0.22);
-  }
-  return new CanvasTexture(canvas);
 }
 
 // Renders FateEventSystem's simulation state: the big planet's N
@@ -600,6 +596,7 @@ export class FateEventVfxSystem extends createSystem({
   private _bubbleOpacity!: Float32Array;
   private _lastLineIndex!: Int16Array;
   private _explainerDrawn = false;
+  private _followupDrawn = '';
 
   // "Talk to me" markers, one per built named-figure slot (MAX_NAMED_
   // FIGURES) — see MARKER_* constants' own comment.
@@ -676,6 +673,7 @@ export class FateEventVfxSystem extends createSystem({
   private _camFwd!: Vector3;
   private _scratchTrailPos!: Vector3;
   private _scratchCometPos!: Vector3;
+  private _scratchCometBack!: Vector3;
 
   // "Voice" blip on activation — reuses PebbleSynth's own red/harsh,
   // green/earthy, blue/heavenly character split (see pebble-synth.ts)
@@ -728,6 +726,7 @@ export class FateEventVfxSystem extends createSystem({
     this._camFwd = new Vector3();
     this._scratchTrailPos = new Vector3();
     this._scratchCometPos = new Vector3();
+    this._scratchCometBack = new Vector3();
 
     this._audioListener = new AudioListener();
     this.player.head.add(this._audioListener);
@@ -1024,17 +1023,27 @@ export class FateEventVfxSystem extends createSystem({
     }
   }
 
+  // Instant-visible small-sphere placeholder per slot (same graceful-
+  // degradation idiom as _buildGhostMeshes below), swapped for the real
+  // skull.obj model — one shared toon-rim material, no imported texture map
+  // — the moment (if ever) it resolves.
   private _buildSkulls(): void {
     const count = this._fateEvents.getPersonCount();
-    const geo = new PlaneGeometry(SKULL_SIZE, SKULL_SIZE);
-    const texture = buildSkullTexture();
+    const material = makeToonRimFlatMaterial(SKULL_COLOR);
+    const placeholderGeo = new SphereGeometry(SKULL_RADIUS, 8, 6);
     for (let i = 0; i < count; i++) {
-      const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
-      const mesh = new Mesh(geo, material);
+      const mesh = new Mesh(placeholderGeo, material);
       mesh.visible = false;
       this._skullMeshes.push(mesh);
       this.world.createTransformEntity(mesh);
     }
+    loadSkullGeometry().then((geo) => {
+      if (!geo) return;
+      for (const mesh of this._skullMeshes) {
+        mesh.geometry = geo;
+        mesh.scale.setScalar(SKULL_RADIUS);
+      }
+    });
   }
 
   // Beat 4's Soul ghosts, one InstancedMesh (count=1) per slot rather than a
@@ -1063,12 +1072,13 @@ export class FateEventVfxSystem extends createSystem({
   // Starts every slot with a placeholder sphere (visible/functional
   // immediately, same graceful-degradation idiom every other FBX consumer in
   // this codebase uses), then — once blobpeople.fbx resolves — swaps each
-  // slot's geometry to a clone of one of the three real ghost shapes, picked
-  // at random per slot (~1/3 each, same uniform-random-pick idiom
+  // slot's geometry to a clone of one of the real ghost shapes (see
+  // GHOST_MESH_NAMES's own comment on why 'ghost' itself is excluded),
+  // picked at random per slot (same uniform-random-pick idiom
   // PLANT_PALETTE/PEBBLE_COLORED_PALETTE already use elsewhere rather than a
-  // strict round-robin partition). Falls back to whichever of the three
-  // names actually resolved (or leaves the placeholder spheres alone if none
-  // did) rather than failing all-or-nothing on one bad name.
+  // strict round-robin partition). Falls back to whichever name actually
+  // resolved (or leaves the placeholder spheres alone if none did) rather
+  // than failing all-or-nothing on one bad name.
   private _buildGhostMeshes(target: Mesh[], count: number): void {
     this._ghostRimPhase = new Float32Array(count);
     for (let i = 0; i < count; i++) {
@@ -1174,10 +1184,15 @@ export class FateEventVfxSystem extends createSystem({
     // BreathingIdle.fbx resolves and _swapToAnimatedPeople runs (see its own
     // comment). Must run BEFORE _updateSituations below so that method's
     // point-up/wave overlay composes on top of THIS frame's fresh idle pose
-    // rather than last frame's. Cheap at N_PEOPLE=10 — always safe to run
-    // regardless of visibility, same reasoning _updateLivePositions below
-    // already uses.
-    for (const mixer of this._mixers) mixer?.update(delta);
+    // rather than last frame's. Skipped for hidden figures — each is a
+    // 28-bone skeleton, and a hidden one (Soul/Organic show only one figure,
+    // and everyone is hidden until the Leg A spin forms them) has no one to
+    // see its idle loop. group.visible here is last frame's value (it's
+    // re-set further down), which at worst delays a figure's first animated
+    // frame by one.
+    for (let i = 0; i < this._mixers.length; i++) {
+      if (this._personGroups[i].visible) this._mixers[i]?.update(delta);
+    }
 
     if (this._constellations.isComplete() && !this._wasComplete) {
       this._wasComplete = true;
@@ -1320,7 +1335,8 @@ export class FateEventVfxSystem extends createSystem({
         // King-facing blend takes over (that mechanic owns orientation for
         // the rest of the phase once it starts, see the branch above), which
         // covers Soul/Organic entirely and Gas up until the King's death.
-        const turnAmount = beat === FateBeat.Collect ? this._fateEvents.getTurnAmount(i) : 0;
+        const turnAmount =
+          beat === FateBeat.Collect || beat === FateBeat.Explain ? this._fateEvents.getTurnAmount(i) : 0;
         if (turnAmount > 0) {
           this.camera.getWorldPosition(this._scratchTurnTarget);
           this._computeFaceQuaternion(this._baseQuats[i], group.position, this._scratchTurnTarget, this._scratchTurnQuat);
@@ -1368,7 +1384,6 @@ export class FateEventVfxSystem extends createSystem({
       if (active[i] && !this._wasActive[i]) {
         this._wasActive[i] = 1;
         this._jumpElapsed[i] = 0; // triggers the one-shot hop below
-        if (peopleEnabled) this._voiceSynth.playPickup(dominant, this._scratchPos, VOICE_BLIP_FIXED_SPEED);
       } else if (!active[i]) {
         this._wasActive[i] = 0;
       }
@@ -1408,9 +1423,17 @@ export class FateEventVfxSystem extends createSystem({
       // Without the phase check, a bubble still open at that moment would
       // otherwise keep reading as "on" straight through the rest of Fate
       // Events and into Launch. Explicitly off once Launch begins.
+      // Soul/Organic's lone visible figure, after the scripted explainer:
+      // re-touching them says the next unsaid entries line (see
+      // FateEventSystem.getFollowupText).
+      const isFollowupFigure = !isExplain && !peopleEnabled && i === EXPLAIN_FIGURE_INDEX;
       const targetOpacity = isExplainerFigure
         ? this._fateEvents.getExplainerOpacity()
-        : phase === Phase.FateEvents && peopleEnabled && active[i] && !jumping
+        : isFollowupFigure
+          ? phase === Phase.FateEvents
+            ? this._fateEvents.getFollowupOpacity()
+            : 0
+          : phase === Phase.FateEvents && peopleEnabled && active[i] && !jumping
           ? this._fateEvents.getBubbleOpacity(i)
           : 0;
       this._bubbleOpacity[i] += (targetOpacity - this._bubbleOpacity[i]) * bubblePull;
@@ -1422,6 +1445,12 @@ export class FateEventVfxSystem extends createSystem({
           this._drawBubbleText(i, this._fateEvents.getExplainerText());
           this._lastLineIndex[i] = -1; // force a redraw once Collect's own ambient line takes back over
         }
+      } else if (isFollowupFigure) {
+        const text = this._fateEvents.getFollowupText();
+        if (text && text !== this._followupDrawn) {
+          this._followupDrawn = text;
+          this._drawBubbleText(i, text);
+        }
       } else if (active[i] && this._lastLineIndex[i] !== lineIndex[i]) {
         this._lastLineIndex[i] = lineIndex[i];
         // getLineText already routes through getDialogueLinesFor for
@@ -1432,6 +1461,7 @@ export class FateEventVfxSystem extends createSystem({
         this._drawBubbleText(i, text);
       }
       if (!isExplain) this._explainerDrawn = false;
+      else this._followupDrawn = ''; // the explainer line overwrote the bubble texture
 
       bubbleMesh.position
         .copy(this._scratchPos)
@@ -1447,12 +1477,14 @@ export class FateEventVfxSystem extends createSystem({
       // ambient/paired/named dialogue), so that's the single moment "talked
       // to" flips permanently true.
       if (i < namedCount) {
-        if (!this._talkedTo[i] && targetOpacity > 0) this._talkedTo[i] = 1;
+        // Star vanishes the instant the person/star is touched (see
+        // FateEventSystem._trigger), not when their bubble later fades in.
+        this._talkedTo[i] = this._fateEvents.getTriggeredMask()[i];
 
         const markerMesh = this._markerMeshes[i];
         markerMesh.visible = phase === Phase.FateEvents && group.visible && !this._talkedTo[i];
         if (markerMesh.visible) {
-          markerMesh.position.copy(this._scratchPos).addScaledVector(this._normalVec, MARKER_HEIGHT);
+          markerMesh.position.copy(this._scratchPos).addScaledVector(this._normalVec, TALK_STAR_HEIGHT);
           this._faceDir.copy(this._camWorldPos).sub(markerMesh.position).normalize();
           if (this._faceDir.lengthSq() > 0.0001) {
             markerMesh.quaternion.setFromUnitVectors(this._zAxis, this._faceDir);
@@ -1470,14 +1502,21 @@ export class FateEventVfxSystem extends createSystem({
         // me" mid-conversation, then eases back into blinking as the bubble
         // itself fades out. Mutates the material's existing uRimColor
         // Vector3 in place rather than allocating a new one every frame.
-        const blinkT = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + this._namedRimPhase[i] * Math.PI * 2);
-        const blinkBrightness = RIM_FLASH_MIN + (RIM_FLASH_MAX - RIM_FLASH_MIN) * blinkT;
-        const rimBrightness = blinkBrightness + (RIM_FLASH_MAX - blinkBrightness) * this._bubbleOpacity[i];
-        (this._namedMaterials[i].uniforms.uRimColor.value as Vector3).set(
-          NAMED_RIM_COLOR[0] * rimBrightness,
-          NAMED_RIM_COLOR[1] * rimBrightness,
-          NAMED_RIM_COLOR[2] * rimBrightness,
-        );
+        // Yellow only while this person is the player's NEXT objective (see
+        // FateEventSystem.isObjectiveTarget); back to the normal white rim
+        // once touched/talked to (or when they're not the objective yet).
+        const rimColor = (this._namedMaterials[i].uniforms.uRimColor.value as Vector3);
+        if (this._fateEvents.isObjectiveTarget(i)) {
+          const blinkT = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + this._namedRimPhase[i] * Math.PI * 2);
+          const rimBrightness = RIM_FLASH_MIN + (RIM_FLASH_MAX - RIM_FLASH_MIN) * blinkT;
+          rimColor.set(
+            NAMED_RIM_COLOR[0] * rimBrightness,
+            NAMED_RIM_COLOR[1] * rimBrightness,
+            NAMED_RIM_COLOR[2] * rimBrightness,
+          );
+        } else {
+          rimColor.set(NORMAL_RIM_COLOR[0], NORMAL_RIM_COLOR[1], NORMAL_RIM_COLOR[2]);
+        }
       }
     }
 
@@ -1487,6 +1526,13 @@ export class FateEventVfxSystem extends createSystem({
     for (const entity of this.queries.comets.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       this._scratchCometPos.fromArray(posView);
+      const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
+      this._scratchCometBack.set(-velView[0], -velView[1], -velView[2]);
+      if (this._scratchCometBack.lengthSq() > 1e-8) {
+        this._scratchCometBack.normalize();
+      } else {
+        this._scratchCometBack.set(0, 0, 0);
+      }
       this._updateSkulls(delta, dominant, phase);
 
       const trail = this._trailSystem.getBuffer(entity);
@@ -1498,7 +1544,7 @@ export class FateEventVfxSystem extends createSystem({
           this._ghostMeshes,
           this._ghostRimPhase,
           this._fateEvents.getGraveyardField(),
-          dominant === SOUL_DUST_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase),
+          dominant === SOUL_DUST_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase) && this._collectiblesRevealed(phase),
           trail,
           samples,
           stride,
@@ -1506,9 +1552,11 @@ export class FateEventVfxSystem extends createSystem({
           true, // bob — ghosts float, always bobbing regardless of state
           time,
           phase,
+          this._fateEvents.getGraveyardNormals(),
         );
         const seedField = this._fateEvents.getSeedField();
-        const showSeeds = dominant === ORGANIC_MATTER_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase);
+        const showSeeds =
+          dominant === ORGANIC_MATTER_TYPE && COLLECTIBLE_VISIBLE_FROM.has(phase) && this._collectiblesRevealed(phase);
         this._updateCollectibles(
           this._seedMeshes,
           this._seedRimPhase,
@@ -1535,6 +1583,13 @@ export class FateEventVfxSystem extends createSystem({
     for (const ev of this._fateEvents.drainCollectCaptureEvents()) {
       this._scratchCollectSoundPos.set(ev.x, ev.y, ev.z);
       this._twinkleSynth.playCatch(this._scratchCollectSoundPos, ev.speed);
+    }
+
+    // First-contact cue for a person/star touch — plays the instant it
+    // happens (no dwell), rather than whenever their hop later starts.
+    for (const ev of this._fateEvents.drainTalkTriggerEvents()) {
+      this._scratchCollectSoundPos.set(ev.x, ev.y, ev.z);
+      this._voiceSynth.playPickup(dominant, this._scratchCollectSoundPos, VOICE_BLIP_FIXED_SPEED);
     }
 
     if (beat === FateBeat.Payoff && dominant === SOUL_DUST_TYPE && !this._payoffChimePlayed) {
@@ -1690,9 +1745,11 @@ export class FateEventVfxSystem extends createSystem({
         this._skullT[i] = Math.min(1, this._skullT[i] + delta / SKULL_FLIGHT_DURATION);
         const t = smoothstep(this._skullT[i]);
         const angle = (i / count) * Math.PI * 2;
-        const targetX = this._scratchCometPos.x + Math.cos(angle) * SKULL_RING_RADIUS;
-        const targetY = this._scratchCometPos.y;
-        const targetZ = this._scratchCometPos.z + Math.sin(angle) * SKULL_RING_RADIUS;
+        const targetX =
+          this._scratchCometPos.x + Math.cos(angle) * SKULL_RING_RADIUS + this._scratchCometBack.x * SKULL_BACK_OFFSET;
+        const targetY = this._scratchCometPos.y + this._scratchCometBack.y * SKULL_BACK_OFFSET;
+        const targetZ =
+          this._scratchCometPos.z + Math.sin(angle) * SKULL_RING_RADIUS + this._scratchCometBack.z * SKULL_BACK_OFFSET;
         mesh.position.set(
           this._skullFromX[i] + (targetX - this._skullFromX[i]) * t,
           this._skullFromY[i] + (targetY - this._skullFromY[i]) * t,
@@ -1702,9 +1759,9 @@ export class FateEventVfxSystem extends createSystem({
       } else {
         const angle = (i / count) * Math.PI * 2;
         mesh.position.set(
-          this._scratchCometPos.x + Math.cos(angle) * SKULL_RING_RADIUS,
-          this._scratchCometPos.y,
-          this._scratchCometPos.z + Math.sin(angle) * SKULL_RING_RADIUS,
+          this._scratchCometPos.x + Math.cos(angle) * SKULL_RING_RADIUS + this._scratchCometBack.x * SKULL_BACK_OFFSET,
+          this._scratchCometPos.y + this._scratchCometBack.y * SKULL_BACK_OFFSET,
+          this._scratchCometPos.z + Math.sin(angle) * SKULL_RING_RADIUS + this._scratchCometBack.z * SKULL_BACK_OFFSET,
         );
       }
       this._faceDir.copy(this._camWorldPos).sub(mesh.position).normalize();
@@ -1724,6 +1781,13 @@ export class FateEventVfxSystem extends createSystem({
   // Attracting, and Captured alike, additive with `dance`), since "up" reads
   // the same regardless of viewing angle — unlike DANCE, this doesn't need
   // camera-relative basis vectors.
+  // Soul ghosts / Organic seeds stay hidden until the player has talked to the
+  // explainer figure (see FateEventSystem.getCollectiblesRevealElapsed) —
+  // once Fate Events is over, whatever was already out stays visible.
+  private _collectiblesRevealed(phase: Phase): boolean {
+    return phase !== Phase.FateEvents || this._fateEvents.getCollectiblesRevealElapsed() >= 0;
+  }
+
   private _updateCollectibles(
     meshes: Mesh[],
     rimPhase: Float32Array,
@@ -1736,6 +1800,7 @@ export class FateEventVfxSystem extends createSystem({
     bob: boolean,
     time: number,
     phase: Phase,
+    riseNormals?: Float32Array,
   ): void {
     if (!show) {
       for (const mesh of meshes) mesh.visible = false;
@@ -1804,9 +1869,31 @@ export class FateEventVfxSystem extends createSystem({
         (material.uniforms.uRimColor.value as Vector3).set(...COLLECTIBLE_NORMAL_RIM_COLOR);
       } else {
         mesh.position.set(positions[i * 3], positions[i * 3 + 1] + bobOffset, positions[i * 3 + 2]);
+        // Ghosts rise up out of the ground beneath their gravestone (the
+        // graveyard normals are the gravestones' own) when first revealed —
+        // staggered per ghost, growing in as they climb.
+        let riseScale = 1;
+        if (riseNormals && phase === Phase.FateEvents) {
+          const elapsed = this._fateEvents.getCollectiblesRevealElapsed() - (i / meshes.length) * GHOST_RISE_STAGGER_SECONDS;
+          const t = Math.min(1, Math.max(0, elapsed / GHOST_RISE_SECONDS));
+          if (t < 1) {
+            const eased = t * t * (3 - 2 * t);
+            const [cx, cy, cz] = this._fateEvents.getPlanetCenter();
+            const r = this._fateEvents.getPlanetRadius();
+            const gx = cx + riseNormals[i * 3] * r;
+            const gy = cy + riseNormals[i * 3 + 1] * r;
+            const gz = cz + riseNormals[i * 3 + 2] * r;
+            mesh.position.x = gx + (mesh.position.x - gx) * eased;
+            mesh.position.y = gy + (mesh.position.y - gy) * eased;
+            mesh.position.z = gz + (mesh.position.z - gz) * eased;
+            riseScale = 0.05 + 0.95 * eased;
+          }
+        }
         // Still out on the surface (Free/Attracting) — pulse so it reads as
         // an active collectible against the static decorations around it.
-        mesh.scale.setScalar(1 + Math.sin(time * COLLECTIBLE_PULSE_FREQ * Math.PI * 2 + i * 0.7) * COLLECTIBLE_PULSE_AMPLITUDE);
+        mesh.scale.setScalar(
+          riseScale * (1 + Math.sin(time * COLLECTIBLE_PULSE_FREQ * Math.PI * 2 + i * 0.7) * COLLECTIBLE_PULSE_AMPLITUDE),
+        );
         // Not yet captured — blink gold, same RIM_FLASH_* cadence/idiom as
         // the named figures' own rim (see that constant's own comment).
         const t = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + rimPhase[i] * Math.PI * 2);
@@ -1859,28 +1946,37 @@ export class FateEventVfxSystem extends createSystem({
     // text read as cramped right up against the bubble's edge at the old
     // value.
     const pad = 20;
-    ctx.clearRect(0, 0, w, h);
 
-    ctx.fillStyle = 'rgba(8, 8, 16, 0.82)';
-    roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 18);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
-    ctx.lineWidth = 3;
-    roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 18);
-    ctx.stroke();
+    const paint = () => {
+      ctx.clearRect(0, 0, w, h);
 
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 30px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const lines = wrapLines(ctx, text, w - pad * 4);
-    const totalHeight = lines.length * BUBBLE_LINE_HEIGHT;
-    let y = h / 2 - totalHeight / 2 + BUBBLE_LINE_HEIGHT / 2;
-    for (const line of lines) {
-      ctx.fillText(line, w / 2, y);
-      y += BUBBLE_LINE_HEIGHT;
-    }
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.86)';
+      roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 6);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.lineWidth = 3;
+      roundRectPath(ctx, pad, pad, w - pad * 2, h - pad * 2, 6);
+      ctx.stroke();
 
-    this._bubbleTextures[i].needsUpdate = true;
+      ctx.fillStyle = '#ffffff';
+      ctx.font = labelFont(30);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const lines = wrapLines(ctx, text, w - pad * 4);
+      const totalHeight = lines.length * BUBBLE_LINE_HEIGHT;
+      let y = h / 2 - totalHeight / 2 + BUBBLE_LINE_HEIGHT / 2;
+      for (const line of lines) {
+        ctx.fillText(line, w / 2, y);
+        y += BUBBLE_LINE_HEIGHT;
+      }
+
+      this._bubbleTextures[i].needsUpdate = true;
+    };
+
+    paint();
+    // Same "repaint once the real font lands" idiom as canvas-label.ts's
+    // drawLabel() — this can be called again (new dialogue line) before the
+    // font ever finishes loading the first time.
+    if (!document.fonts.check(labelFont(30))) fontReady.then(paint);
   }
 }

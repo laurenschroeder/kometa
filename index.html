@@ -10,27 +10,70 @@
   </head>
   <body style="margin: 0">
     <div id="scene-container"></div>
-    <button
-      id="enter-vr-button"
-      style="
+    <style>
+      /* Same source font the in-world notification HUD's MSDF atlas is
+         generated from (see src/vfx/fonts/font-registry.ts's "hud" ==
+         Carrois Gothic SC) — used here as a real @font-face instead, since
+         this button is a plain DOM overlay outside the WebXR scene, not a
+         PanelUI/uikitml element. */
+      @font-face {
+        font-family: 'CarroisGothicSC';
+        src: url('/fonts/CarroisGothicSC-Regular.ttf') format('truetype');
+      }
+      /* Matches ui/notification-hud.uikitml's .hud-box/.hud-corner look —
+         solid black fill, thin white border, square (unrounded) corners,
+         and the same corner.png swirl flourish reused at all four corners
+         via 90-degree-step rotation (see that file's own comment for why
+         one image covers all four). */
+      #enter-vr-button {
         position: fixed;
         left: 50%;
         bottom: 48px;
         transform: translateX(-50%);
         z-index: 10;
-        padding: 24px 48px;
-        font-family: sans-serif;
+        padding: 30px 56px;
+        font-family: 'CarroisGothicSC', sans-serif;
         font-size: 26px;
         font-weight: bold;
         color: #ffffff;
-        background-color: rgba(9, 9, 11, 0.85);
+        background-color: #000000;
         border: 2px solid #ffffff;
-        border-radius: 12px;
+        border-radius: 0;
         cursor: pointer;
         display: none;
-      "
-    >
-      Enter Kometa
+      }
+      #enter-vr-button .corner {
+        position: absolute;
+        width: 24px;
+        height: 24px;
+      }
+      #enter-vr-button .corner-bl {
+        left: 0;
+        bottom: 0;
+        transform: rotate(0deg);
+      }
+      #enter-vr-button .corner-tl {
+        left: 0;
+        top: 0;
+        transform: rotate(90deg);
+      }
+      #enter-vr-button .corner-tr {
+        right: 0;
+        top: 0;
+        transform: rotate(180deg);
+      }
+      #enter-vr-button .corner-br {
+        right: 0;
+        bottom: 0;
+        transform: rotate(270deg);
+      }
+    </style>
+    <button id="enter-vr-button">
+      <img class="corner corner-bl" src="/textures/corner.png" />
+      <img class="corner corner-tl" src="/textures/corner.png" />
+      <img class="corner corner-tr" src="/textures/corner.png" />
+      <img class="corner corner-br" src="/textures/corner.png" />
+      Enter VR
     </button>
     <script type="module" src="/src/index.ts"></script>
   </body>

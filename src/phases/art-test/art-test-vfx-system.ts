@@ -24,8 +24,8 @@ import {
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { buildBlueGreenPalette } from '../../vfx/color/blue-green-palette.js';
+import { loadFbxMeshesByName } from '../../vfx/geometry/fbx-field-loader.js';
 import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
-import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import {
   extractSpriteRects,
@@ -111,17 +111,16 @@ const RGB_PEBBLE_PALETTE = {
 // organic-type glitter body (pebble-material.ts).
 const PEBBLE_COLORED_PALETTE: [number, number, number][] = buildBlueGreenPalette();
 
-// The OBJ this project has actually been given — see obj-island-extractor.ts
-// / loadObjLargestIslands. Its 'Layer_1'/'Layer_2' groups have no
-// per-object tagging, just ~293 sculpted pieces merged together (checked
-// directly via connected-components analysis: Layer_1 alone is 190
-// disconnected pieces, Layer_2 is 103) — OBJ_ISLANDS_MAX_COUNT is how many
-// of the overall biggest ones (by triangle count) get extracted and
-// randomly used, per the user's own choice over building all ~293 or
-// hand-picking a curated subset.
-const GHOST_OBJ_URL = '/medium/virtualpebble_2026-09-03_13-09-21.obj';
-const OBJ_ISLANDS_GROUPS = ['Layer_1', 'Layer_2'];
-const OBJ_ISLANDS_MAX_COUNT = 8;
+// Was the raw virtualpebble_2026-09-03_13-09-21.obj scan, split into
+// undecimated ~54,500-133,000-tri "islands" via loadObjLargestIslands (see
+// obj-island-extractor.ts) — the same asset production's own soul-pebble
+// rendering used, and the confirmed source of a ~4.4M-triangle GPU spike
+// once visible (see pebble-material.ts's PEBBLE_ISLAND_MESH_* comment, whose
+// constants these intentionally mirror). Replaced with the same
+// hand-decimated island shapes production now uses, folded into
+// blobpeople.fbx.
+const GHOST_MESH_URL = '/medium/blobpeople.fbx';
+const GHOST_MESH_NAMES = ['ProperPerson', 'BlobPerson', 'MinimalPerson', 'Person', 'Dog', 'star'] as const;
 // 3x the other pebble variants' PEBBLE_RADIUS — was 4x (doubled from an
 // original 2x), scaled back down to 0.75 of that.
 const OBJ_ISLANDS_PEBBLE_RADIUS = PEBBLE_RADIUS * 4 * 0.75;
@@ -1154,17 +1153,15 @@ export class ArtTestVfxSystem extends createSystem({
   }
 
   // Variant 9 — every pebble slot (same shared 90-spot layout as 4/5/6)
-  // randomly gets one of OBJ_ISLANDS_MAX_COUNT biggest disconnected mesh
-  // pieces found inside the ghost OBJ's Layer_1/Layer_2 groups (see that
-  // constant's own comment — no per-object tagging in the export, just
-  // ~293 sculpted pieces merged into two groups). Same plain black + white
-  // rim shader as the black + magical haze pebbles (BLACK_RIM_PALETTE),
+  // randomly gets one of the hand-decimated island shapes folded into
+  // blobpeople.fbx (see GHOST_MESH_NAMES's own comment). Same plain black +
+  // white rim shader as the black + magical haze pebbles (BLACK_RIM_PALETTE),
   // no tint. Shows a black-rim organic-rock placeholder as variant 4 until
-  // the extraction (a real async pass over tens of thousands of faces)
-  // resolves, then rebuilds as one InstancedMesh per island shape actually
-  // drawn this playthrough — random per-slot assignment, bucketed — each
-  // auto-fit to OBJ_ISLANDS_PEBBLE_RADIUS via that island's own bounding
-  // sphere (see loadObjLargestIslands).
+  // the FBX resolves, then rebuilds as one InstancedMesh per island shape
+  // actually drawn this playthrough — random per-slot assignment, bucketed.
+  // loadFbxMeshesByName already normalizes every geometry to unit bounding-
+  // sphere radius, so OBJ_ISLANDS_PEBBLE_RADIUS applies directly with no
+  // further per-island fit-scale needed.
   private _buildPebblesObjIslands(): Group {
     const layout = this._pebbleLayout();
     const group = new Group();
@@ -1178,10 +1175,11 @@ export class ArtTestVfxSystem extends createSystem({
     );
     group.add(placeholder);
 
-    loadObjLargestIslands(GHOST_OBJ_URL, OBJ_ISLANDS_GROUPS, OBJ_ISLANDS_MAX_COUNT).then((islands) => {
+    loadFbxMeshesByName(GHOST_MESH_URL, GHOST_MESH_NAMES).then((rawIslands) => {
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
       if (islands.length === 0) {
         console.warn(
-          `[ArtTestVfxSystem] no mesh islands found under ${OBJ_ISLANDS_GROUPS.join('/')} in '${GHOST_OBJ_URL}' — keeping the placeholder pebble field.`,
+          `[ArtTestVfxSystem] none of [${GHOST_MESH_NAMES.join(', ')}] found in '${GHOST_MESH_URL}' — keeping the placeholder pebble field.`,
         );
         return;
       }
@@ -1192,18 +1190,15 @@ export class ArtTestVfxSystem extends createSystem({
         const bucket = layout.filter((_, i) => assigned[i] === islandIdx);
         if (bucket.length === 0) continue;
         const island = islands[islandIdx];
-        const islandRadius = island.boundingSphere && island.boundingSphere.radius > 1e-6 ? island.boundingSphere.radius : 1;
-        // .clone() — loadObjLargestIslands caches and returns these SAME
-        // geometry objects to every caller with the same (url, groups,
-        // count) key (field variant, test comet, and the wiggly siblings
-        // below all ask for the same 8 islands); _buildTintedInstancedMesh
-        // calls geo.setAttribute(...) directly on whatever it's given, so
-        // without cloning, each caller's per-instance attribute buffers
-        // would stomp on every other caller's already-built InstancedMesh
-        // sharing that same underlying geometry.
-        group.add(
-          this._buildTintedInstancedMesh(bucket, island.clone(), blackMat, OBJ_ISLANDS_PEBBLE_RADIUS / islandRadius),
-        );
+        // .clone() — loadFbxMeshesByName caches and returns these SAME
+        // geometry objects to every caller with the same (url, names,
+        // normalize) key (field variant, test comet, and the wiggly siblings
+        // below all ask for the same set); _buildTintedInstancedMesh calls
+        // geo.setAttribute(...) directly on whatever it's given, so without
+        // cloning, each caller's per-instance attribute buffers would stomp
+        // on every other caller's already-built InstancedMesh sharing that
+        // same underlying geometry.
+        group.add(this._buildTintedInstancedMesh(bucket, island.clone(), blackMat, OBJ_ISLANDS_PEBBLE_RADIUS));
       }
     });
 
@@ -1230,7 +1225,8 @@ export class ArtTestVfxSystem extends createSystem({
     );
     group.add(placeholder);
 
-    loadObjLargestIslands(GHOST_OBJ_URL, OBJ_ISLANDS_GROUPS, OBJ_ISLANDS_MAX_COUNT).then((islands) => {
+    loadFbxMeshesByName(GHOST_MESH_URL, GHOST_MESH_NAMES).then((rawIslands) => {
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
       if (islands.length === 0) return;
       group.remove(placeholder);
 
@@ -1239,10 +1235,7 @@ export class ArtTestVfxSystem extends createSystem({
         const bucket = layout.filter((_, i) => assigned[i] === islandIdx);
         if (bucket.length === 0) continue;
         const island = islands[islandIdx];
-        const islandRadius = island.boundingSphere && island.boundingSphere.radius > 1e-6 ? island.boundingSphere.radius : 1;
-        group.add(
-          this._buildWigglyInstancedMesh(bucket, island.clone(), wigglyMat, OBJ_ISLANDS_PEBBLE_RADIUS / islandRadius),
-        );
+        group.add(this._buildWigglyInstancedMesh(bucket, island.clone(), wigglyMat, OBJ_ISLANDS_PEBBLE_RADIUS));
       }
     });
 
@@ -2244,14 +2237,14 @@ export class ArtTestVfxSystem extends createSystem({
     const placeholder = buildMesh(buildOrganicGeometry(), 1);
     group.add(placeholder);
 
-    loadObjLargestIslands(GHOST_OBJ_URL, OBJ_ISLANDS_GROUPS, OBJ_ISLANDS_MAX_COUNT).then((islands) => {
+    loadFbxMeshesByName(GHOST_MESH_URL, GHOST_MESH_NAMES).then((rawIslands) => {
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
       if (islands.length === 0) return;
       group.remove(placeholder);
       const island = islands[Math.floor(Math.random() * islands.length)];
-      const islandRadius = island.boundingSphere && island.boundingSphere.radius > 1e-6 ? island.boundingSphere.radius : 1;
       // .clone() — see the field variant's own comment on this same fix,
       // just above _buildPebblesObjIslands's use of it.
-      group.add(buildMesh(island.clone(), 1 / islandRadius));
+      group.add(buildMesh(island.clone(), 1));
     });
 
     return { group, billboardMeshes: [] };
@@ -2295,12 +2288,12 @@ export class ArtTestVfxSystem extends createSystem({
     const placeholder = buildMesh(buildOrganicGeometry(), 1);
     group.add(placeholder);
 
-    loadObjLargestIslands(GHOST_OBJ_URL, OBJ_ISLANDS_GROUPS, OBJ_ISLANDS_MAX_COUNT).then((islands) => {
+    loadFbxMeshesByName(GHOST_MESH_URL, GHOST_MESH_NAMES).then((rawIslands) => {
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
       if (islands.length === 0) return;
       group.remove(placeholder);
       const island = islands[Math.floor(Math.random() * islands.length)];
-      const islandRadius = island.boundingSphere && island.boundingSphere.radius > 1e-6 ? island.boundingSphere.radius : 1;
-      group.add(buildMesh(island.clone(), 1 / islandRadius));
+      group.add(buildMesh(island.clone(), 1));
     });
 
     return { group, billboardMeshes: [] };

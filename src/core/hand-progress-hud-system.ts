@@ -1,13 +1,4 @@
-import {
-  createSystem,
-  Entity,
-  Matrix4,
-  Object3D,
-  PanelDocument,
-  PanelUI,
-  UIKit,
-  Vector3,
-} from '@iwsdk/core';
+import { createSystem, Entity, Object3D, PanelDocument, PanelUI, UIKit } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { CometBody } from '../comet/comet-body-component.js';
 import { HandAnchor, HandSide } from '../comet/hand-anchor-component.js';
@@ -28,6 +19,7 @@ import {
 } from '../vfx/color/color-scheme.js';
 import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
+import { WristAnchor } from './wrist-anchor.js';
 
 // Kill switch — flip to false to disable this whole HUD without ripping the
 // feature out (the panel/systems below are still fully built either way,
@@ -35,29 +27,10 @@ import { Phase } from './phase.js';
 // self-contained to this one file plus ui/hand-progress.uikitml and its own
 // registerSystem(HandProgressHudSystem) call in index.ts, so deleting all
 // three is a clean, complete removal if it's ever cut for good rather than
-// just toggled off.
-export const HAND_PROGRESS_HUD_ENABLED = true;
-
-// Anchored to the hand-tracking `wrist` joint when hands are tracked. The
-// grip space's origin sits at the palm centroid, which is what kept putting
-// this panel over the hand. In WebXR's joint/grip convention -Z points toward
-// the fingers, so +Z runs back up the forearm toward the elbow.
-//
-// "On top of the wrist from whatever side you look": the lift direction is
-// the wrist->camera vector with its along-forearm component removed, so the
-// panel hovers on whichever side of the wrist faces the viewer — never
-// behind the hand or arm, regardless of wrist roll or viewing angle.
-const WRIST_TOWARD_ELBOW_OFFSET = 0.025; // up the forearm from the wrist joint, where a watch sits
-const WRIST_LIFT_OFFSET = 0.055; // off the wrist's surface, toward the viewer
-// Controllers have no wrist joint — approximate it this far back from the
-// grip (palm) origin along the same +Z forearm axis.
-const CONTROLLER_GRIP_TO_WRIST = 0.06;
-// Fast catch-up ease (same "reads as locked, not laggy" idiom
-// NotificationHudSystem's own Follower tuning uses) — smooths raw
-// hand-tracking jitter without introducing visible lag as the off-hand
-// moves around, and doubles as the ease on the rise amount itself so it
-// glides up rather than snapping the instant the wrist rolls far enough.
-const POSITION_EASE_RATE = 14;
+// just toggled off. Currently OFF — ContinueButtonSystem (see
+// CONTINUE_BUTTON_ENABLED) replaces it on the same wrist; flip the two flags
+// together to switch back.
+export const HAND_PROGRESS_HUD_ENABLED = false;
 
 const PHASES_WITH_PROGRESS = new Set<Phase>([
   Phase.Stardust,
@@ -144,7 +117,6 @@ export class HandProgressHudSystem extends createSystem({
   private _lastShowSegments: boolean | null = null;
   private _lastHaloStep = -1;
   private _sparkleUnlocked: boolean[] = [false, false, false];
-  private _hasPosition = false;
 
   private _stardust!: StardustSystem;
   private _pebbles!: PebbleWeavingSystem;
@@ -152,12 +124,7 @@ export class HandProgressHudSystem extends createSystem({
   private _fateEvents!: FateEventSystem;
   private _launch!: OrbitalLaunchSystem;
 
-  private _scratchWristMat = new Matrix4();
-  private _scratchWrist = new Vector3();
-  private _scratchForearm = new Vector3();
-  private _scratchToCam = new Vector3();
-  private _scratchTarget = new Vector3();
-  private _scratchCamPos = new Vector3();
+  private _wristAnchor = new WristAnchor();
 
   init(): void {
     // Every phase system this looks up must already be registered (see
@@ -214,7 +181,7 @@ export class HandProgressHudSystem extends createSystem({
 
     if (!globals.gameStarted.peek() || !PHASES_WITH_PROGRESS.has(phase)) {
       this._panelObject.visible = false;
-      this._hasPosition = false;
+      this._wristAnchor.reset();
       return;
     }
 
@@ -224,55 +191,12 @@ export class HandProgressHudSystem extends createSystem({
     }
     if (!cometHand) {
       this._panelObject.visible = false;
-      this._hasPosition = false;
+      this._wristAnchor.reset();
       return;
     }
 
     const offHand = cometHand === HandSide.Right ? HandSide.Left : HandSide.Right;
-    const side = offHand === HandSide.Right ? 'right' : 'left';
-    const grip = this.player.gripSpaces[side];
-    grip.updateWorldMatrix(true, false);
-    this.camera.getWorldPosition(this._scratchCamPos);
-
-    // Joint poses are filled relative to the same grip XRSpace that posed
-    // `grip` (see XRHandVisualAdapter.update). Joint 0 is `wrist` — XRHand
-    // iterates joints in XRHandJoint enum order.
-    const xrInput = this.input.xr;
-    const joints = xrInput.visualAdapters.hand[side].jointTransforms;
-    if (joints && xrInput.isPrimary('hand', side)) {
-      this._scratchWristMat.fromArray(joints, 0).premultiply(grip.matrixWorld);
-      this._scratchWrist.setFromMatrixPosition(this._scratchWristMat);
-      this._scratchForearm.setFromMatrixColumn(this._scratchWristMat, 2).normalize();
-    } else {
-      this._scratchForearm.setFromMatrixColumn(grip.matrixWorld, 2).normalize();
-      this._scratchWrist
-        .setFromMatrixPosition(grip.matrixWorld)
-        .addScaledVector(this._scratchForearm, CONTROLLER_GRIP_TO_WRIST);
-    }
-
-    this._scratchToCam.subVectors(this._scratchCamPos, this._scratchWrist);
-    this._scratchToCam.addScaledVector(this._scratchForearm, -this._scratchToCam.dot(this._scratchForearm));
-    if (this._scratchToCam.lengthSq() < 1e-8) this._scratchToCam.set(0, 1, 0);
-    else this._scratchToCam.normalize();
-
-    this._scratchTarget
-      .copy(this._scratchWrist)
-      .addScaledVector(this._scratchForearm, WRIST_TOWARD_ELBOW_OFFSET)
-      .addScaledVector(this._scratchToCam, WRIST_LIFT_OFFSET);
-
-    if (!this._hasPosition) {
-      this._panelObject.position.copy(this._scratchTarget);
-      this._hasPosition = true;
-    } else {
-      const pull = 1 - Math.exp(-POSITION_EASE_RATE * delta);
-      this._panelObject.position.lerp(this._scratchTarget, pull);
-    }
-
-    // Billboard toward the camera — same "readable regardless of how the
-    // wrist happens to be turned" reasoning every other HUD/bubble element
-    // in this codebase already uses, rather than rigidly rotating with the
-    // hand's own (often awkward, mid-swing) orientation.
-    this._panelObject.lookAt(this._scratchCamPos);
+    this._wristAnchor.update(this.world, offHand, delta, this._panelObject);
     this._panelObject.visible = true;
 
     // Pebbles gets a stacked, per-type fill (see PebbleWeavingSystem.

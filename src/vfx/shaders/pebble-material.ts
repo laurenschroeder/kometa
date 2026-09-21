@@ -41,12 +41,19 @@ export const kSoulIslandMat = makeToonRimInstancedWigglyMaterial(SOUL_ISLAND_PAL
 // base pebble size — doubled to stand out.
 export const SOUL_SIZE_MULTIPLIER = 2;
 
-// Same source OBJ (and its extracted island shapes) the art-test "8 islands"
-// variants and Fate Events' placeholder crowd already use — shared constants
-// so every caller hits the same loadObjLargestIslands cache key.
-export const PEBBLE_ISLAND_OBJ_URL = '/medium/virtualpebble_2026-09-03_13-09-21.obj';
-export const PEBBLE_ISLAND_OBJ_GROUPS = ['Layer_1', 'Layer_2'];
-export const PEBBLE_ISLAND_OBJ_MAX_COUNT = 8;
+// Was the raw virtualpebble_2026-09-03_13-09-21.obj scan (7MB, undecimated —
+// loadObjLargestIslands's extracted "islands" still ran ~54,500-133,000
+// triangles EACH, instanced dozens of times per comet — the single biggest
+// GPU cost in the whole game once the comet turns visible at Seeding, ~4.4M
+// triangles measured live). Replaced with hand-decimated (~700-2000 tri)
+// island shapes the artist separated out of that same scan and folded into
+// blobpeople.fbx (naming wasn't matched 1:1 to the old OBJ groups — these are
+// just whichever of blobpeople.fbx's small "blob" shapes aren't already
+// spoken for by GHOST_MESH_NAMES/SEED_MESH_NAMES in fate-event-vfx-system.ts).
+// Shared constants so every caller hits the same loadFbxMeshesByName cache
+// key.
+export const PEBBLE_ISLAND_MESH_URL = '/medium/blobpeople.fbx';
+export const PEBBLE_ISLAND_MESH_NAMES = ['ProperPerson', 'BlobPerson', 'MinimalPerson', 'Person', 'Dog', 'star'] as const;
 
 // ── Organic (type 1) — glitter blue/green spectrum body, white rim ─────────
 // Dark body (glitter/sparkle carries the color, same read as the art-test

@@ -1,9 +1,9 @@
-import { createSystem, Entity, Follower, FollowBehavior, Object3D, PanelDocument, PanelUI } from '@iwsdk/core';
+import { createSystem, Entity, Follower, FollowBehavior, Object3D, PanelDocument, PanelUI, Vector3 } from '@iwsdk/core';
 import { GameDirectorSystem } from '../../core/game-director-system.js';
 import { getGlobals } from '../../core/globals.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import { finaleMessage } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { Phase } from '../../core/phase.js';
 import { StartMenuSystem } from '../../core/start-menu-system.js';
 import { OrbitalLaunchSystem } from '../orbital-launch/orbital-launch-system.js';
 import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, PokeCubeButton } from '../../vfx/ui/poke-button.js';
@@ -15,20 +15,18 @@ import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, PokeCubeButton } from '../.
 // pop-up the moment Finale's own entry blurb finishes.
 // Trimmed by 4s from an original 10 — the finale meaning/name notification
 // this triggers was landing too late relative to the rest of the sequence.
-const END_RUN_DELAY_SECONDS = 6;
+const END_RUN_DELAY_SECONDS = 2;
 
 // Phase-gated (see index.ts's Phase.Finale definePhase — play()/stop()'d
 // alongside FinaleSystem itself, which no longer carries a timeoutSeconds:
 // this system is what actually ends the run now). Once Finale has had time
-// to read, fires the "time's up" HUD notification and reveals a two-choice
-// row of floating poke-cubes (same interaction model as StartMenuSystem —
+// to read, fires the "time's up" HUD notification and reveals a single
+// floating poke-cube (same interaction model as StartMenuSystem —
 // see its own class comment on why raycasting isn't used anywhere in this
-// project's player-facing UI): "Make a New Comet" restarts the loop
-// immediately (GameDirectorSystem.jumpToPhase — the same mechanism the old
-// auto-timeout used to reach Stardust), "Main Menu" backs all the way out
-// to the Start Menu (GameDirectorSystem.returnToMenu(), a parked "not
-// started" state) instead of looping automatically — the player always
-// gets to choose now. The flat UIKit panel remains only for the closing
+// project's player-facing UI): "Main Menu" backs all the way out to the
+// Start Menu (GameDirectorSystem.returnToMenu(), a parked "not started"
+// state) instead of looping automatically. (There used to be a second
+// "Make a New Comet" choice that restarted via jumpToPhase(Phase.Stardust).) The flat UIKit panel remains only for the closing
 // line's READ-ONLY text — nothing on it is clickable.
 export class EndRunMenuSystem extends createSystem({
   panel: { required: [PanelUI, PanelDocument] },
@@ -36,10 +34,10 @@ export class EndRunMenuSystem extends createSystem({
   private _director!: GameDirectorSystem;
   private _panelObject!: Object3D;
   private _cubeRootObject!: Object3D;
-  private _newCometButton!: PokeCubeButton;
   private _mainMenuButton!: PokeCubeButton;
   private _elapsed = 0;
   private _shown = false;
+  private _scratchPokePos = new Vector3();
   // Bumped on every play()/stop() so a finale message's onComplete from an
   // earlier run can't reveal the panel during a later one.
   private _runToken = 0;
@@ -77,10 +75,8 @@ export class EndRunMenuSystem extends createSystem({
       speed: 6,
       maxAngle: 10,
     });
-    const offsets = cubeRowOffsets(2);
-    this._newCometButton = new PokeCubeButton(this.world, cubeRootEntity, 'Make a New Comet', [offsets[0], 0, 0]);
-    this._mainMenuButton = new PokeCubeButton(this.world, cubeRootEntity, 'Main Menu', [offsets[1], 0, 0]);
-    this._newCometButton.setEnabled(false);
+    const offsets = cubeRowOffsets(1);
+    this._mainMenuButton = new PokeCubeButton(this.world, cubeRootEntity, 'Main Menu', [offsets[0], 0, 0]);
     this._mainMenuButton.setEnabled(false);
   }
 
@@ -91,7 +87,6 @@ export class EndRunMenuSystem extends createSystem({
     this._runToken++;
     this._panelObject.visible = false;
     this._cubeRootObject.visible = false;
-    this._newCometButton.setEnabled(false);
     this._mainMenuButton.setEnabled(false);
   }
 
@@ -100,7 +95,6 @@ export class EndRunMenuSystem extends createSystem({
     this._runToken++;
     this._panelObject.visible = false;
     this._cubeRootObject.visible = false;
-    this._newCometButton.setEnabled(false);
     this._mainMenuButton.setEnabled(false);
   }
 
@@ -132,8 +126,8 @@ export class EndRunMenuSystem extends createSystem({
         const onComplete =
           i === nameMsgs.length - 1
             ? () => {
-                if (token === this._runToken) this._reveal();
-              }
+              if (token === this._runToken) this._reveal();
+            }
             : undefined;
         notifications.notify(msg.text, msg.holdSeconds, msg.delaySeconds ?? 0, msg.lineColors, onComplete);
       });
@@ -145,20 +139,32 @@ export class EndRunMenuSystem extends createSystem({
     // guard — by the time this menu can even appear, the player has already
     // been actively playing for a full run, so there's no "just donned the
     // headset" moment to guard against.
-    if (this._newCometButton.update(delta, true)) {
-      this._director.jumpToPhase(Phase.Stardust);
-    }
-    if (this._mainMenuButton.update(delta, true)) {
+    if (this._firedPoke(this._mainMenuButton, delta)) {
       this._director.returnToMenu();
       this.world.getSystem(NotificationHudSystem)?.resetBootTrigger();
       this.world.getSystem(StartMenuSystem)?.showAgain();
     }
   }
 
+  // Same "buzz whichever controller poked it" idiom as StartMenuSystem's own
+  // _firedPoke — see HapticsSystem.resolvePokeHand's own comment for how
+  // "whichever" is guessed.
+  private _firedPoke(button: PokeCubeButton, delta: number): boolean {
+    // pokeReady is always true here, unlike StartMenuSystem's own settling
+    // guard — see this file's own comment on that difference above.
+    const fired = button.update(delta, true);
+    if (fired) {
+      button.group.getWorldPosition(this._scratchPokePos);
+      const haptics = this.world.getSystem(HapticsSystem);
+      const hand = haptics?.resolvePokeHand(this._scratchPokePos);
+      if (hand) haptics?.pulse(hand, HapticPattern.MediumPulse);
+    }
+    return fired;
+  }
+
   private _reveal(): void {
     this._panelObject.visible = true;
     this._cubeRootObject.visible = true;
-    this._newCometButton.setEnabled(true);
     this._mainMenuButton.setEnabled(true);
   }
 }

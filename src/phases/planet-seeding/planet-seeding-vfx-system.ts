@@ -1,7 +1,5 @@
 import {
   AudioListener,
-  AudioSource,
-  AudioUtils,
   createSystem,
   DynamicDrawUsage,
   Entity,
@@ -9,7 +7,6 @@ import {
   InstancedMesh,
   Matrix4,
   Mesh,
-  PlaybackMode,
   Quaternion,
   ShaderMaterial,
   SphereGeometry,
@@ -19,6 +16,7 @@ import {
 import { getGlobals } from '../../core/globals.js';
 import { Phase } from '../../core/phase.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
+import { playGroundImpact } from '../../vfx/audio/ground-impact.js';
 import { PlanetSpinSynth } from '../../vfx/audio/planet-spin-synth.js';
 import { kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
 import { makePlanetStainMaterial, MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
@@ -286,12 +284,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
     mesh.scale.setScalar(PLANET_RADIUS);
     mesh.frustumCulled = false;
     const entity = this.world.createTransformEntity(mesh);
-    entity.addComponent(AudioSource, {
-      src: 'dustLand',
-      positional: true,
-      loop: false,
-      playbackMode: PlaybackMode.Overlap,
-    });
     this._planetMesh = mesh;
     this._planetEntity = entity;
   }
@@ -307,12 +299,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
       mesh.frustumCulled = false;
       mesh.visible = false;
       const entity = this.world.createTransformEntity(mesh);
-      entity.addComponent(AudioSource, {
-        src: 'dustLand',
-        positional: true,
-        loop: false,
-        playbackMode: PlaybackMode.Overlap,
-      });
       this._moonMeshes.push(mesh);
       this._moonEntities.push(entity);
     }
@@ -524,7 +510,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     const bumps = this._planetSeeding.drainBumpEvents();
     for (const moon of bumps) {
       this._moonFlash[moon] = 1;
-      AudioUtils.play(this._moonEntities[moon]);
+      playGroundImpact(this._audioListener, this.scene, this._moonMeshes[moon].position, 1.6);
     }
 
     if (!this._moonsFading && this._spinTransition.isActive()) {
@@ -833,7 +819,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     color: [number, number, number],
   ): void {
     this._addSplat(cellIndex, dirX, dirY, dirZ, color);
-    AudioUtils.play(this._planetEntity);
+    playGroundImpact(this._audioListener, this.scene, this._planetMesh.position);
 
     // No growth-pool flourish here anymore — plants no longer grow during
     // Seeding at all (see PlanetGrowthPool's own class comment); the grid

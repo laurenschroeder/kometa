@@ -3,7 +3,9 @@ import { CometBody } from '../../comet/comet-body-component.js';
 import { CometTrail } from '../../comet/comet-trail-component.js';
 import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { AchievementSystem } from '../../core/achievement-system.js';
 import { getGlobals } from '../../core/globals.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import { SEEDING_INTRO_TEXT } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
@@ -100,6 +102,12 @@ const FALL_SPEED_FOR_FAST_COOLDOWN = 2.0; // m/s — a brisk swing/orbit, not a 
 // read without that endgame becoming a war of attrition against the spin's
 // own timing.
 const COVERAGE_WIN_FRACTION = (MAX_SPLATS - 2) / MAX_SPLATS;
+// The wrist Continue button unlocks once this fraction of the coverage win
+// target (COVERAGE_WIN_FRACTION) is colored — well short of full coverage,
+// so the player can move on without having to hunt down every last cell.
+// Reaching the full target no longer ends the phase by itself; the player
+// presses Continue (or the phase times out).
+const CONTINUE_COVERAGE_FRACTION = 0.45;
 // A repeat landing whose globally-nearest cell is already colored instead
 // prefers the nearest still-UNCOLORED cell, as long as one exists within
 // this angular range — see _dropPebble's own comment for why: without this,
@@ -278,6 +286,14 @@ export class PlanetSeedingSystem extends createSystem({
   private _basisRight!: Vector3;
   private _basisUp!: Vector3;
   private _basisBack!: Vector3;
+  // World-space unit direction (planet center -> hand) of this playthrough's
+  // FIRST successful drop — null until then. Compared against every later
+  // drop's own direction (dot product) to fire the 'far-side' achievement
+  // the first time a drop lands roughly opposite where the player started,
+  // i.e. they actually orbited most of the way around rather than seeding
+  // from one spot. unlock() is idempotent (see AchievementSystem's own
+  // comment), so no separate "already unlocked" guard is needed here.
+  private _firstDropDir: Vector3 | null = null;
 
   init(): void {
     this._stardust = this.world.getSystem(StardustSystem)!;
@@ -342,6 +358,7 @@ export class PlanetSeedingSystem extends createSystem({
     this._cellColored.fill(0);
     this._coloredCount = 0;
     this._cellColor.fill(0); // harmless — only ever read for cells _dropPebble has actually colored
+    this._firstDropDir = null;
 
     const captured = this._stardust.getCapturedIndices();
     for (let i = 0; i < captured.length; i++) {
@@ -375,6 +392,26 @@ export class PlanetSeedingSystem extends createSystem({
       this._dropPebble(this._stardustQueue.pop()!, 0, -1, 0, null);
     }
     this._pendingCount = 0;
+  }
+
+  // MCP/agent-testing hook (see dev-jump-system.ts) — colors every coverage
+  // cell and flips phaseComplete, so a dev-jump straight to Phase.Seeding can
+  // reach Constellations' spin transition with a FULLY grown planet (every
+  // PlanetGrowthPool slot activated) without actually playing through
+  // Seeding by hand. Without this, a dev-jump leaves every cell uncolored
+  // (_cellColored never set outside real play() gameplay), so
+  // PlanetGrowthPool.activate() has nothing to grow and the spin transition
+  // never reproduces its real, fully-planted cost.
+  devForceFullCoverage(): void {
+    this._cellColored.fill(1);
+    this._coloredCount = MAX_SPLATS;
+    for (let c = 0; c < MAX_SPLATS; c++) {
+      const [r, g, b] = ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)];
+      this._cellColor[c * 3] = r;
+      this._cellColor[c * 3 + 1] = g;
+      this._cellColor[c * 3 + 2] = b;
+    }
+    getGlobals(this.world).phaseComplete.value = true;
   }
 
   update(delta: number): void {
@@ -419,6 +456,26 @@ export class PlanetSeedingSystem extends createSystem({
             const sin = Math.sin(this._spinAngle);
             const wx = pdx * inv;
             const wz = pdz * inv;
+
+            // 'far-side' achievement — see _firstDropDir's own comment. wx/wz
+            // above are the RAW world-space normalized direction (the
+            // cos/sin combination below, passed to _dropPebble, is what
+            // de-rotates it to compensate the mesh's own spin for local
+            // placement) — the achievement cares about the player's actual
+            // physical trip around the planet, not the mesh's rotation, so
+            // it uses wx/wz as-is rather than the de-rotated version.
+            const dropDirX = wx;
+            const dropDirY = pdy * inv;
+            const dropDirZ = wz;
+            if (!this._firstDropDir) {
+              this._firstDropDir = new Vector3(dropDirX, dropDirY, dropDirZ);
+            } else if (
+              this._firstDropDir.x * dropDirX + this._firstDropDir.y * dropDirY + this._firstDropDir.z * dropDirZ <
+              -0.7
+            ) {
+              this.world.getSystem(AchievementSystem)?.unlock('far-side');
+            }
+
             this._dropPebble(
               this._stardustQueue.pop()!,
               wx * cos - wz * sin,
@@ -426,6 +483,9 @@ export class PlanetSeedingSystem extends createSystem({
               wx * sin + wz * cos,
               this._scratchOrigin,
             );
+            this.world
+              .getSystem(HapticsSystem)
+              ?.pulse(entity.getValue(HandAnchor, 'hand') as string, HapticPattern.MediumPulse);
             const velView = entity.getVectorView(CometBody, 'velocity') as Float32Array;
             this._fallCooldown = this._fallCooldownFor(
               Math.sqrt(velView[0] * velView[0] + velView[1] * velView[1] + velView[2] * velView[2]),
@@ -440,6 +500,15 @@ export class PlanetSeedingSystem extends createSystem({
   private _updatePlanetPosition(delta: number): void {
     this.camera.getWorldPosition(this._camPos);
     this.camera.getWorldDirection(this._camFwd);
+    // Flattened to the horizontal plane before use — an un-flattened
+    // camFwd.y bakes whatever the player's head happens to be tilted at
+    // into the target's height, so a player looking even slightly up/down
+    // (the common case, not an edge case) settles the planet noticeably
+    // above/below true eye level instead of level with it. Renormalized
+    // since zeroing y shortens the vector, which would otherwise pull the
+    // resting distance in short of PLANET_FOLLOW_DISTANCE.
+    this._camFwd.y = 0;
+    if (this._camFwd.lengthSq() > 1e-6) this._camFwd.normalize();
     this._followTarget.copy(this._camPos).addScaledVector(this._camFwd, PLANET_FOLLOW_DISTANCE);
 
     // Held at PLANET_INITIAL_POSITION (not easing toward the player at all)
@@ -526,9 +595,6 @@ export class PlanetSeedingSystem extends createSystem({
     if (!this._cellColored[target]) {
       this._cellColored[target] = 1;
       this._coloredCount++;
-      if (this._coloredCount >= Math.ceil(MAX_SPLATS * COVERAGE_WIN_FRACTION)) {
-        getGlobals(this.world).phaseComplete.value = true;
-      }
     }
 
     // Never let the player get soft-locked out of finishing a nearly-
@@ -594,8 +660,21 @@ export class PlanetSeedingSystem extends createSystem({
 
   // Fills _scratchOrigin with where `item` currently rides on the comet's
   // tail (the same camera-relative trail sampling every captured-mote pool
-  // uses) and returns false if that spot is inside the planet — see
-  // ORIGIN_MIN_SURFACE_CLEARANCE.
+  // uses). If that spot is inside the planet (within ORIGIN_MIN_SURFACE_
+  // CLEARANCE of its surface), pushes it straight back out to exactly that
+  // clearance along the same direction from the planet's center rather than
+  // rejecting the drop outright — always returns true. This used to return
+  // false instead, which — since _dropPebble/update() only ever look at the
+  // stardustQueue's own top-of-stack item, with no fallback to try a
+  // different one — could deadlock a player entirely: closing in for a
+  // careful final placement on one of the last few uncolored cells (exactly
+  // the "just a bit left to go" endgame) puts the HAND, and so its own
+  // recent trail history, inside the exclusion radius, silently blocking
+  // every further drop attempt until the hand backs off or the phase's own
+  // 240s timeout eventually forces a transition. Clamping instead of
+  // rejecting means a drop can always land — worst case its fall starts
+  // right at the surface rather than a few centimeters further out, a
+  // negligible visual difference against always being able to finish.
   private _sampleDropOrigin(entity: Entity, item: QueueItem): boolean {
     const trail = this._trailSystem.getBuffer(entity);
     if (!trail) return false;
@@ -621,7 +700,23 @@ export class PlanetSeedingSystem extends createSystem({
     const oy = this._scratchOrigin.y - this._planetPositionArray[1];
     const oz = this._scratchOrigin.z - this._planetPositionArray[2];
     const minDist = PLANET_RADIUS + ORIGIN_MIN_SURFACE_CLEARANCE;
-    return ox * ox + oy * oy + oz * oz > minDist * minDist;
+    const distSq = ox * ox + oy * oy + oz * oz;
+    if (distSq > minDist * minDist) return true;
+    // Degenerate (origin essentially at the planet's own center, distSq
+    // ~0) — direction is undefined, so push straight up rather than
+    // dividing by ~0.
+    const dist = Math.sqrt(distSq);
+    if (dist < 1e-5) {
+      this._scratchOrigin.set(this._planetPositionArray[0], this._planetPositionArray[1] + minDist, this._planetPositionArray[2]);
+      return true;
+    }
+    const scale = minDist / dist;
+    this._scratchOrigin.set(
+      this._planetPositionArray[0] + ox * scale,
+      this._planetPositionArray[1] + oy * scale,
+      this._planetPositionArray[2] + oz * scale,
+    );
+    return true;
   }
 
   // Read-only accessors for PlanetSeedingVfxSystem — callers must not mutate.
@@ -640,6 +735,15 @@ export class PlanetSeedingSystem extends createSystem({
   // gasses atmosphere glow's intensity (see PlanetSeedingVfxSystem).
   getCoverageFraction(): number {
     return this._coloredCount / MAX_SPLATS;
+  }
+  // 0-1 readiness for the wrist Continue button (see PhaseConfig.continue) —
+  // unlocks at CONTINUE_COVERAGE_FRACTION of the win target.
+  getContinueReadiness01(): number {
+    return Math.min(1, this.getProgress01() / CONTINUE_COVERAGE_FRACTION);
+  }
+  // Wrist Continue button pressed — ends the phase.
+  continueNow(): void {
+    getGlobals(this.world).phaseComplete.value = true;
   }
   // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
   // normalized against the actual win threshold (COVERAGE_WIN_FRACTION of

@@ -9,11 +9,16 @@
 
   .hud-box {
     display: none;
-    padding: 1.8;
+    /* Bumped from a flat 1.8 — the four corner flourishes below (each
+       hud-corner-size square, absolutely positioned flush with this box's
+       own corners) need the text's safe area pulled in well past their own
+       footprint on every side, or the swirl art overlaps the first/last
+       line. */
+    padding: 4;
     border-width: 0.15;
     border-color: #ffffff;
-    background-color: #0a0a0a;
-    border-radius: 0.4;
+    background-color: #000000;
+    border-radius: 0;
     opacity: 0;
     max-width: 36;
     flex-direction: column;
@@ -30,9 +35,49 @@
     font-weight: bold;
     opacity: 0;
   }
+
+  /* corner.png is a single decorative swirl/vine flourish authored as the
+     BOTTOM-LEFT corner (its own right-angle bracket lines run along the
+     image's left and bottom edges, vertex at bottom-left) — reused at all
+     four corners via 90-degree-step rotation rather than four separate
+     image files. Each instance is absolutely positioned flush with its own
+     corner of hud-box (positioned relative to that nearest ancestor), so
+     hud-box's own padding above is what actually keeps text clear of these,
+     not any margin here. */
+  .hud-corner {
+    position-type: absolute;
+    /* 2/3 of the old 5.5 — smaller corners need less safe-area padding (see
+       hud-box's own padding above, scaled down the same 2/3). */
+    width: 3.67;
+    height: 3.67;
+  }
+  .hud-corner-bl {
+    position-bottom: 0;
+    position-left: 0;
+    transform-rotate-z: 0;
+  }
+  .hud-corner-tl {
+    position-top: 0;
+    position-left: 0;
+    transform-rotate-z: 270;
+  }
+  .hud-corner-tr {
+    position-top: 0;
+    position-right: 0;
+    transform-rotate-z: 180;
+  }
+  .hud-corner-br {
+    position-bottom: 0;
+    position-right: 0;
+    transform-rotate-z: 90;
+  }
 </style>
 <div class="hud-root">
   <div id="hud-box" class="hud-box">
+    <img class="hud-corner hud-corner-bl" src="/textures/corner.png" />
+    <img class="hud-corner hud-corner-tl" src="/textures/corner.png" />
+    <img class="hud-corner hud-corner-tr" src="/textures/corner.png" />
+    <img class="hud-corner hud-corner-br" src="/textures/corner.png" />
     <hudtext id="hud-text-0" class="hud-text">placeholder</hudtext>
     <hudtext id="hud-text-1" class="hud-text">placeholder</hudtext>
     <hudtext id="hud-text-2" class="hud-text">placeholder</hudtext>

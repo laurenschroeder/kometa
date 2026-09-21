@@ -1,8 +1,9 @@
 import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
-import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { HandAnchor, HandSide } from '../../comet/hand-anchor-component.js';
 import { AchievementSystem } from '../../core/achievement-system.js';
 import { hasAllCombos, recordCombo } from '../../core/achievement-store.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import {
   FINAL_CHOICE_MESSAGE,
   LAUNCH_BUILDUP_SEQUENCE,
@@ -27,11 +28,6 @@ import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-sys
 export const ORBIT_DIR: [number, number, number] = [-Math.SQRT1_2, 0, -Math.SQRT1_2];
 export const UNKNOWN_DIR: [number, number, number] = [Math.SQRT1_2, 0, -Math.SQRT1_2];
 const CHOICE_ANGLE_RAD = Math.PI / 4; // 45°
-// Volatile gasses' index in PEBBLE_TYPES/dominantPebbleType — same local-copy
-// convention every other file needing it keeps (see e.g. planet-growth-
-// pool.ts's own comment). Only used to gate _commit()'s Gas-only repeat of
-// the orbit-choice line.
-const VOLATILE_GASSES_TYPE = 2;
 const UP_AXIS = new Vector3(0, 1, 0);
 
 // Zone-center distance from the player — reach-scale (comparable to
@@ -55,6 +51,10 @@ export const ZONE_RADIUS = 0.35;
 // to actually read as "a decision being made" rather than a near-instant
 // flicker.
 export const CHARGE_SECONDS = 3.0;
+// How long a zone must be dwelled in to count as "genuinely considered" for
+// the 'second-thoughts' achievement — well short of CHARGE_SECONDS (a full
+// commit), just enough to rule out a comet merely passing through.
+const SECOND_THOUGHTS_DWELL_SECONDS = 1.2;
 
 // Total on-screen time of one notify() call: fade-in + hold + fade-out,
 // back to back with no gap between queued messages (see
@@ -72,6 +72,17 @@ const IN_VIEW_COS = Math.cos((55 * Math.PI) / 180);
 // camera's forward vector (see _detach) — a near-stationary swing should
 // still visibly fly off rather than just sit there.
 const MIN_DETACH_SPEED = 1.0;
+
+// GameDirector's timeout for this phase (see index.ts's definePhase call) —
+// exported so stop() can tell a genuine timeout apart from a dev-menu jump /
+// return-to-menu, for the 'indecisive' achievement.
+export const LAUNCH_TIMEOUT_SECONDS = 65;
+// The choice zones appear this long after the intro notifications have
+// finished (on top of their own on-screen time — see play()).
+const ZONES_EXTRA_DELAY_SECONDS = 2;
+// After a timeout-deferred detach (see onTimeout), how long the comet gets to
+// fly off before the phase ends.
+const POST_DETACH_HOLD_SECONDS = 2;
 
 export type LaunchChoice = 'orbit' | 'launch';
 type LaunchState = 'choosing' | 'committed' | 'detached';
@@ -116,11 +127,23 @@ export class OrbitalLaunchSystem extends createSystem({
   // notify() chain (commit message + LAUNCH_BUILDUP_SEQUENCE) — see the
   // class comment on why this can't be a hand-timed guess.
   private _buildupComplete = false;
+  // See onTimeout().
+  private _timeoutDeferred = false;
+  private _postDetachElapsed = 0;
   // Seconds continuously spent inside each zone this "choosing" spell — see
   // CHARGE_SECONDS. Read by OrbitalLaunchVfxSystem (getOrbit/UnknownCharge01)
   // to fill in the zone as a visible charge-up cue.
   private _orbitCharge = 0;
   private _unknownCharge = 0;
+  // Unlike _orbitCharge/_unknownCharge (which reset to 0 the instant the
+  // comet leaves a zone — see _updateCharge's own comment), these latch
+  // permanently true once that zone's charge ever crosses
+  // SECOND_THOUGHTS_DWELL_SECONDS and stay true for the rest of this
+  // playthrough — used by _commit() to detect "genuinely considered both
+  // zones before choosing," which the live charge values alone can't tell
+  // apart from "beelined straight to the one they committed to."
+  private _orbitDwelledEnough = false;
+  private _unknownDwelledEnough = false;
   // Which zone the charge-rise tone is currently voicing, if any — see
   // _updateChargeAudio(). Tracked separately from _orbitCharge/
   // _unknownCharge (which reset to 0 the instant a hand leaves) so the
@@ -160,6 +183,10 @@ export class OrbitalLaunchSystem extends createSystem({
 
   private _audioListener!: AudioListener;
   private _synth!: OrbitalLaunchSynth;
+  // Which hand currently holds the comet, refreshed each update() before
+  // _updateCharge()/_commit() run — both need it and neither has direct
+  // entity access (update()'s own bodies-entity loop is what reads it).
+  private _currentHand: string = HandSide.Left;
 
   init(): void {
     this._audioListener = new AudioListener();
@@ -206,9 +233,18 @@ export class OrbitalLaunchSystem extends createSystem({
   // Only meaningful while still choosing — once committed/detached there's
   // no zone left to re-anchor, and touching _orbitZoneCenter after Leg C has
   // moved on to something else (or the phase has ended) would be actively
-  // wrong.
+  // wrong. Also requires _hasPlayed: _state's class-field default is
+  // 'choosing' too, so before play() ever runs (i.e. during any earlier
+  // phase, including Fate Events) this guard alone doesn't distinguish
+  // "genuinely choosing" from "just never started" — a system-level recenter
+  // during an earlier phase would otherwise reach startLaunchRecedeTransition
+  // below and hijack PlanetSeedingVfxSystem's shared planet mesh away from
+  // whatever transition that phase is actually driving (Leg C wins priority
+  // in _updatePlanetTransitions() once started, and never releases it until
+  // the next Stardust-phase reset) — this is exactly what caused Fate
+  // Events' planet to visibly recede/shrink on an unrelated recenter.
   private _onSystemRecenter(): void {
-    if (this._state !== 'choosing') return;
+    if (!this._hasPlayed || this._state !== 'choosing') return;
     this._placeZones();
     this.world
       .getSystem(PlanetSeedingVfxSystem)
@@ -221,8 +257,12 @@ export class OrbitalLaunchSystem extends createSystem({
     this._state = 'choosing';
     this._choice = null;
     this._buildupComplete = false;
+    this._timeoutDeferred = false;
+    this._postDetachElapsed = 0;
     this._orbitCharge = 0;
     this._unknownCharge = 0;
+    this._orbitDwelledEnough = false;
+    this._unknownDwelledEnough = false;
     this._chargingZone = null;
     this._synth.stopCharge();
     this._synth.stopAmbient();
@@ -251,7 +291,10 @@ export class OrbitalLaunchSystem extends createSystem({
     // time, not just the second one.
     notifications?.notify(FINAL_CHOICE_MESSAGE.text, FINAL_CHOICE_MESSAGE.holdSeconds);
     notifications?.notify(launchBlurb.text, launchBlurb.holdSeconds);
-    this._zonesReadyAtSeconds = notifyDuration(FINAL_CHOICE_MESSAGE.holdSeconds) + notifyDuration(launchBlurb.holdSeconds);
+    this._zonesReadyAtSeconds =
+      notifyDuration(FINAL_CHOICE_MESSAGE.holdSeconds) +
+      notifyDuration(launchBlurb.holdSeconds) +
+      ZONES_EXTRA_DELAY_SECONDS;
 
     // Leg C: the planet recedes/shrinks away to exactly where the orbit
     // choice zone was just placed (see ORBIT_DIR's own comment) — fired
@@ -274,13 +317,41 @@ export class OrbitalLaunchSystem extends createSystem({
     this._synth.stopCharge();
     this._synth.stopAmbient();
     if (this._hasPlayed && this._state !== 'detached') {
+      // Timed out without ever committing to a zone (still 'choosing', and
+      // this stop() is the director's timeout rather than a manual jump) —
+      // the player couldn't make up their mind.
+      if (this._state === 'choosing' && this._elapsed >= LAUNCH_TIMEOUT_SECONDS - 1) {
+        this.world.getSystem(AchievementSystem)?.unlock('indecisive');
+      }
       this._choice = this._choice ?? 'orbit';
       this._detach();
     }
   }
 
+  // GameDirector's timeout for this phase (see PhaseConfig.onTimeout). Only a
+  // player who never chose gets cut off (stop()'s fallback detach, plus the
+  // 'indecisive' achievement). A player who HAS committed is mid-buildup —
+  // the timeout used to detach the comet right through the "faster / keep
+  // going" notification sequence — so defer: the buildup finishes, the comet
+  // detaches (in view or not), then the phase ends shortly after.
+  onTimeout(): boolean {
+    if (this._state !== 'committed') return false;
+    this._timeoutDeferred = true;
+    return true;
+  }
+
   update(delta: number): void {
-    if (this._state === 'detached') return;
+    if (this._state === 'detached') {
+      // Every detach (not just a timeout-deferred one) ends the phase a
+      // moment later — without this, a normal launch sat out the rest of
+      // LAUNCH_TIMEOUT_SECONDS before Finale (and its closing notifications)
+      // could start.
+      this._postDetachElapsed += delta;
+      if (this._postDetachElapsed >= POST_DETACH_HOLD_SECONDS) {
+        getGlobals(this.world).phaseComplete.value = true;
+      }
+      return;
+    }
 
     this._elapsed += delta;
 
@@ -309,6 +380,7 @@ export class OrbitalLaunchSystem extends createSystem({
     for (const entity of this.queries.bodies.entities) {
       const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
       this._scratchPos.fromArray(posView);
+      this._currentHand = entity.getValue(HandAnchor, 'hand') as string;
 
       if (this._state === 'choosing') {
         if (!readyToChoose) continue;
@@ -318,7 +390,7 @@ export class OrbitalLaunchSystem extends createSystem({
           inUnknownZone = true;
         }
       } else if (this._state === 'committed') {
-        if (this._buildupComplete && this._isCometInView(this._scratchPos)) {
+        if (this._buildupComplete && (this._timeoutDeferred || this._isCometInView(this._scratchPos))) {
           this._detach();
         }
       }
@@ -349,19 +421,30 @@ export class OrbitalLaunchSystem extends createSystem({
   // than letting partial dwell time carry over, so a comet just passing
   // through on a wide swing can't accidentally lock in a choice.
   private _updateCharge(delta: number, inOrbitZone: boolean, inUnknownZone: boolean): void {
+    const haptics = this.world.getSystem(HapticsSystem);
     if (inOrbitZone) {
       this._unknownCharge = 0;
+      haptics?.stopRisingCharge(this._currentHand, 'launch');
+      if (this._chargingZone !== 'orbit') haptics?.startRisingCharge(this._currentHand, 'orbit');
       this._orbitCharge += delta;
+      if (this._orbitCharge >= SECOND_THOUGHTS_DWELL_SECONDS) this._orbitDwelledEnough = true;
+      haptics?.updateRisingCharge(this._currentHand, 'orbit', this.getOrbitCharge01());
       this._updateChargeAudio('orbit');
       if (this._orbitCharge >= CHARGE_SECONDS) this._commit('orbit');
     } else if (inUnknownZone) {
       this._orbitCharge = 0;
+      haptics?.stopRisingCharge(this._currentHand, 'orbit');
+      if (this._chargingZone !== 'launch') haptics?.startRisingCharge(this._currentHand, 'launch');
       this._unknownCharge += delta;
+      if (this._unknownCharge >= SECOND_THOUGHTS_DWELL_SECONDS) this._unknownDwelledEnough = true;
+      haptics?.updateRisingCharge(this._currentHand, 'launch', this.getUnknownCharge01());
       this._updateChargeAudio('launch');
       if (this._unknownCharge >= CHARGE_SECONDS) this._commit('launch');
     } else {
       this._orbitCharge = 0;
       this._unknownCharge = 0;
+      haptics?.stopRisingCharge(this._currentHand, 'orbit');
+      haptics?.stopRisingCharge(this._currentHand, 'launch');
       this._updateChargeAudio(null);
     }
   }
@@ -404,6 +487,10 @@ export class OrbitalLaunchSystem extends createSystem({
     this._orbitCharge = 0;
     this._unknownCharge = 0;
     this._chargingZone = null;
+    const haptics = this.world.getSystem(HapticsSystem);
+    haptics?.stopRisingCharge(this._currentHand, 'orbit');
+    haptics?.stopRisingCharge(this._currentHand, 'launch');
+    haptics?.pulse(this._currentHand, HapticPattern.StrongPulse);
     // Hands off to playCommit's own chord below rather than fading out on
     // its own — a hard cut reads as "arrived," not "interrupted," right as
     // the commit chord takes over.
@@ -417,14 +504,6 @@ export class OrbitalLaunchSystem extends createSystem({
     const { text, holdSeconds } =
       choice === 'orbit' ? orbitCommitMessage(dominantType) : unknownCommitMessage(dominantType);
     notifications?.notify(text, holdSeconds);
-    // Gas's orbit-choice line ("You will stay as a light in their sky...")
-    // repeats once more — the "omen" reveal carries more weight as a refrain
-    // than a single pass, same idiom a spoken omen/curse would use. Only this
-    // one commit line, not Soul/Organic's or either type's unknown-choice
-    // line.
-    if (choice === 'orbit' && dominantType === VOLATILE_GASSES_TYPE) {
-      notifications?.notify(text, holdSeconds);
-    }
 
     // Eternal Light/Into the Unknown fire the instant the choice itself is
     // made, right alongside the commit message above — same natural beat,
@@ -433,6 +512,12 @@ export class OrbitalLaunchSystem extends createSystem({
     // pebble types x 2 choices) the player has ever actually experienced.
     const achievements = this.world.getSystem(AchievementSystem);
     achievements?.unlock(choice === 'orbit' ? 'eternal-light' : 'into-the-unknown');
+    // 'second-thoughts' — committed to this zone, but only after also
+    // meaningfully dwelling in the OTHER one first (see
+    // _orbitDwelledEnough/_unknownDwelledEnough's own comment).
+    if (choice === 'orbit' ? this._unknownDwelledEnough : this._orbitDwelledEnough) {
+      achievements?.unlock('second-thoughts');
+    }
     recordCombo(dominantType, choice);
     if (hasAllCombos()) achievements?.unlock('complete-collection');
 
@@ -478,6 +563,9 @@ export class OrbitalLaunchSystem extends createSystem({
       const speed = Math.max(this._scratchVel.length(), MIN_DETACH_SPEED);
       this._scratchVel.copy(this._camFwd).multiplyScalar(speed);
       this._scratchVel.toArray(velView);
+      this.world
+        .getSystem(HapticsSystem)
+        ?.pulse(entity.getValue(HandAnchor, 'hand') as string, HapticPattern.StrongPulse);
       entity.removeComponent(HandAnchor);
     }
     this._synth.playDetach(this._scratchPos);

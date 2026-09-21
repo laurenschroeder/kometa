@@ -1,4 +1,6 @@
 import { createSystem, Entity, Vector3 } from '@iwsdk/core';
+import { getGlobals } from '../core/globals.js';
+import { Phase } from '../core/phase.js';
 import { CometBody } from './comet-body-component.js';
 import { CometTrail } from './comet-trail-component.js';
 
@@ -41,6 +43,27 @@ export class CometTrailSystem extends createSystem({
     this.queries.trails.subscribe('disqualify', (entity) => {
       this._buffers.delete(entity.index);
     });
+
+    // Not GameDirector-managed (there's only ever one persistent comet
+    // entity for the whole playthrough, see this file's own class comment —
+    // it never dis/requalifies on a replay loop), so this has no play() to
+    // hook a reset into; same "reset on Phase.Stardust re-entry" idiom
+    // StarfieldSystem/SkyBackdropSystem/etc. use for their own always-on
+    // state. Without this, a fresh loop's tail starts by whipping in from
+    // wherever the PREVIOUS run's comet was last sitting (Finale's orbit/
+    // launch position) instead of reading as a clean new comet.
+    this.cleanupFuncs.push(
+      getGlobals(this.world).gamePhase.subscribe((phase) => {
+        if (phase !== Phase.Stardust) return;
+        for (const entity of this.queries.trails.entities) {
+          const buf = this._buffers.get(entity.index);
+          if (!buf) continue;
+          const posView = entity.getVectorView(CometBody, 'position') as Float32Array;
+          this._pos.fromArray(posView);
+          this._resetBuffer(buf, this._pos);
+        }
+      }),
+    );
 
     this.cleanupFuncs.push(() => this._buffers.clear());
   }

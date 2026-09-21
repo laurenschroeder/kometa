@@ -1,14 +1,16 @@
 import {
+  AdditiveBlending,
   AnimationAction,
   AnimationClip,
   AnimationMixer,
   AssetManager,
   AudioListener,
-  CanvasTexture,
+  BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
   Color,
   ConeGeometry,
   CylinderGeometry,
-  DoubleSide,
   DynamicDrawUsage,
   Entity,
   Group,
@@ -19,8 +21,9 @@ import {
   Matrix4,
   Mesh,
   MeshBasicMaterial,
-  PlaneGeometry,
+  Points,
   Quaternion,
+  SphereGeometry,
   createSystem,
   Vector3,
 } from '@iwsdk/core';
@@ -30,7 +33,15 @@ import { Phase } from '../../core/phase.js';
 import { playKingDeathTone } from '../../vfx/audio/king-death-tone.js';
 import { playKingHorn } from '../../vfx/audio/king-horn.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
+import {
+  convertZUpToYUp,
+  loadFbxAllMeshes,
+  normalizeGeometryToUnitRadius,
+  normalizeGeometryToUnitRadiusFromOrigin,
+  rotateX180,
+} from '../../vfx/geometry/fbx-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
+import { loadObjMeshGeometry } from '../../vfx/geometry/obj-field-loader.js';
 import { buildPlaceholderPerson, PERSON_HEIGHT } from '../../vfx/geometry/placeholder-person.js';
 import {
   buildAnimatedPerson,
@@ -39,12 +50,16 @@ import {
   PERSON_BODY_COLOR,
 } from '../../vfx/geometry/animated-person.js';
 import { scatterOnSphereCap } from '../../vfx/geometry/sphere-scatter.js';
-import { kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
-import { makeToonRimSkinnedMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { kGasCloudMat, kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
+import { makeToonRimFlatMaterial, makeToonRimSkinnedMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { CrownRise } from '../../vfx/particles/crown-rise.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
-import { CROWN, GRAVE, ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
-import { CROWD_CAP_DIRECTION, FateBeat, FateEventSystem } from './fate-event-system.js';
+import { COMET_HEAD, CROWN, GRAVE, hexToRgb, ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
+import { celestialSymbolMessage, FATE_GAS_INTRO_TEXT } from '../../core/notification-copy.js';
+import { NotificationHudSystem } from '../../core/notification-hud-system.js';
+import { CROWD_CAP_DIRECTION, FateBeat, FateEventSystem, GAS_DEATH_START_SECONDS } from './fate-event-system.js';
+import { loadSkullGeometry, SKULL_COLOR } from './fate-event-vfx-system.js';
+import { kHeadGeo } from '../pebbles/pebble-comet-presentation-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 
@@ -59,13 +74,18 @@ const SURFACE_OFFSET = 0.01;
 const STAGGER_WINDOW = 0.3; // same idiom/purpose as FateEventVfxSystem's own person stagger
 const REVEAL_EASE_RATE = 3; // 1/s exponential ease toward the staggered target scale
 
-const CROWN_COLOR = new Color(CROWN);
+// Toon-shaded (no imported texture maps — the loaded FBX's own embedded
+// MeshPhongMaterial is discarded entirely, see _buildCrownProp/
+// loadCrownGeometry below) — same self-lit body/rim look every other figure
+// in this file uses, shared across every crown instance since the color
+// never needs to vary per-instance.
+const crownMaterial = makeToonRimFlatMaterial(hexToRgb(CROWN));
 // The King's own worn crown prop — a low band plus evenly-spaced spikes
 // around the rim, all as fractions of PERSON_HEIGHT (same "authored as
 // ratios, not raw meters" convention placeholder-person.ts's own proportions
 // use) so it stays sized correctly relative to the figure if PERSON_HEIGHT
-// ever changes again. Previously a single bare cone, which read as more of
-// a party hat than a crown.
+// ever changes again. Used as the instant-visible fallback shape (see
+// _populateProceduralCrown) until the real crownForKing.fbx model resolves.
 const CROWN_SPIKE_COUNT = 5;
 const CROWN_BAND_RADIUS = PERSON_HEIGHT * 0.11;
 const CROWN_BAND_HEIGHT = PERSON_HEIGHT * 0.05;
@@ -76,6 +96,53 @@ const CROWN_SPIKE_HEIGHT = PERSON_HEIGHT * 0.09;
 // entirely above it, so it reads as resting ON the head, not floating just
 // past the crown of the skull.
 const CROWN_EMBED = CROWN_BAND_HEIGHT * 0.3;
+
+// Real modeled crown — a single static mesh. Despite its baked FBX node
+// transform looking like every other Z-up pack in this project, it reads
+// correctly raw/unconverted in-headset (see loadCrownGeometry's own
+// comment) — no axis correction applied. Its local origin is deliberately
+// placed by the artist at the bottom-front-center of the band, matching
+// this file's own "origin at the resting point" crown convention above.
+// normalizeGeometryToUnitRadiusFromOrigin scales around that same origin
+// (never recenters it), so it drops into the exact same "position this at
+// the head-top attach point" callers (_buildKing/_swapKingToAnimated below)
+// use for the procedural fallback, unmodified.
+const CROWN_FBX_URL = '/medium/crownForKing.fbx';
+// Its own max-distance-from-origin, scaled to this many meters — sized to
+// roughly the same overall reach as the procedural fallback's own band-
+// radius/spike-height combined. Starting guess; tune visually in-headset.
+const CROWN_FBX_RADIUS = PERSON_HEIGHT * 0.18;
+// Small tuning offset from the head-top attach point — mirrors CROWN_EMBED's
+// own "sink slightly into the head" idiom. No Z (forward/back) offset yet:
+// the model's own front-biased origin (see this const's own comment above)
+// means one will likely read better, but its correct sign/magnitude needs
+// visual confirmation in-headset before guessing at a number.
+const CROWN_FBX_OFFSET_Y = -CROWN_EMBED;
+const CROWN_FBX_OFFSET_Z = 0;
+
+let crownGeometryPromise: Promise<BufferGeometry | null> | null = null;
+// Loads (and caches) crownForKing.fbx's own single mesh, converted to Y-up
+// and normalized around its own artist-placed origin — see CROWN_FBX_URL's
+// comment. Resolves null (never rejects) if the file isn't available yet,
+// same graceful-degradation idiom every other FBX consumer in this codebase
+// uses, so _buildCrownProp just keeps its procedural fallback in that case.
+function loadCrownGeometry(): Promise<BufferGeometry | null> {
+  if (!crownGeometryPromise) {
+    crownGeometryPromise = loadFbxAllMeshes(CROWN_FBX_URL, 1, (geo) => {
+      // NOT convertZUpToYUp, unlike most other Z-up FBX packs in this
+      // codebase (planet-growth-pool.ts's plants, this file's own
+      // blobpeople.fbx) — that -90°-about-X correction read as tipped
+      // forward onto its own face in-headset. Raw/unconverted turned out to
+      // be wrong too (read fully upside-down) — rotateX180 is the actual
+      // confirmed fix; see its own comment for how these two data points
+      // pin it down to exactly 180°.
+      rotateX180(geo);
+      normalizeGeometryToUnitRadiusFromOrigin(geo);
+    }).then((geos) => geos[0] ?? null);
+  }
+  return crownGeometryPromise;
+}
+
 const GRAVE_COLOR = new Color(GRAVE);
 
 const KING_SCALE = 0.75;
@@ -90,7 +157,6 @@ const KING_SCALE = 0.75;
 // file), 8-10s the crowd turns to face the player (also fate-event-vfx-
 // system.ts). GAS_DEATH_START/DURATION below are this file's own slice of
 // that timeline.
-const GAS_DEATH_START_SECONDS = 3;
 // Real death animation — plays once in place on the ground (its own bone
 // motion carries the "falling backward" topple), then holds its final
 // "laying on his back" pose for good (LoopOnce + clampWhenFinished, see
@@ -107,8 +173,7 @@ const KING_DYING_URL = '/medium/DyingBackwards.fbx';
 const KING_FALLBACK_ANIM_DURATION = 1.5;
 const KING_TOPPLE_ANGLE = (100 * Math.PI) / 180; // past horizontal, reads as a genuine fall
 
-// Soul's Beat 2.5 graveyard — grave markers + one seated, idly-bobbing bench
-// figure watching a grave, positioned from FateEventSystem's own canonical
+// Soul's Beat 2.5 graveyard — grave markers, positioned from FateEventSystem's own canonical
 // graveyard layout (see getGraveyardNormals) so the static dressing here and
 // Beat 4's actual ghost collectibles (fate-event-vfx-system.ts) land on the
 // same spots instead of two independent scatters.
@@ -116,7 +181,34 @@ const KING_TOPPLE_ANGLE = (100 * Math.PI) / 180; // past horizontal, reads as a 
 const GRAVE_WIDTH = 0.06;
 const GRAVE_HEIGHT = 0.09;
 const GRAVE_DEPTH = 0.024;
-const BENCH_SCALE = 0.7;
+
+// Real modeled gravestone — same "artist-placed origin at the resting
+// point" convention as loadCrownGeometry's crownForKing.fbx (its own origin
+// is at the bottom ground-attachment point, so normalizeGeometryToUnitRadius
+// FromOrigin below scales around that point rather than recentering it —
+// same reason that function exists for the crown). rotateX180 applied on the
+// same inferred-not-independently-confirmed basis as skull.obj's own fix
+// (see fate-event-vfx-system.ts's _buildSkulls) — this asset sheet's other
+// two props (crownForKing.fbx, skull.obj) both needed it, so this one likely
+// shares the same Z-up export quirk; flag if it reads upside-down.
+const GRAVESTONE_OBJ_URL = '/medium/gravestone.obj';
+const GRAVESTONE_OBJ_NAME = 'flourish2';
+// Starting guess for the loaded mesh's own max-reach-from-origin, scaled to
+// meters — roughly the old cylinder placeholder's own height (GRAVE_HEIGHT).
+// Tune visually in-headset once the real model is confirmed to read right
+// side up.
+const GRAVESTONE_RADIUS = GRAVE_HEIGHT;
+
+let gravestoneGeometryPromise: Promise<BufferGeometry | null> | null = null;
+function loadGravestoneGeometry(): Promise<BufferGeometry | null> {
+  if (!gravestoneGeometryPromise) {
+    gravestoneGeometryPromise = loadObjMeshGeometry(GRAVESTONE_OBJ_URL, GRAVESTONE_OBJ_NAME, (geo) => {
+      rotateX180(geo);
+      normalizeGeometryToUnitRadiusFromOrigin(geo);
+    });
+  }
+  return gravestoneGeometryPromise;
+}
 
 // "Explorable" organic scene — lots of small plant/animal decorations, same
 // shared instanced material the organic pebbles use (kOrganicGlitterMat),
@@ -133,7 +225,7 @@ const ORGANIC_MAX_SCALE = 0.04;
 const ORGANIC_SWAY_FREQ = 0.9; // Hz, plant variants
 const ORGANIC_SWAY_AMPLITUDE = 0.18; // radians
 const ORGANIC_BOB_FREQ = 1.6; // Hz, animal variants
-const ORGANIC_BOB_AMPLITUDE = 0.01; // meters, along the surface normal
+const ORGANIC_BOB_AMPLITUDE = 0; // bouncing disabled for now (was 0.01) // meters, along the surface normal
 
 // A couple of real (Quill-authored) bee models hovering over the organic
 // scene — everything else in this file is placeholder procedural geometry,
@@ -162,10 +254,12 @@ const BLOSSOM_STAGGER_SPAN = 2.5; // seconds across which each plant's own pulse
 const BLOSSOM_PULSE_DURATION = 1.2; // seconds, one instance's own rise-and-settle
 const BLOSSOM_SCALE_BUMP = 0.6; // peak fractional size increase mid-pulse
 
-// Beat 5 — Gas's "COMET = SKULL" banner rises above the crowd and holds.
-// Simple canvas-texture billboard, same construction idiom as
-// FateEventVfxSystem's own speech bubbles/fire quads — not PanelUI, which is
-// for interactive panels, the wrong tool for a static in-world graphic.
+// Beat 5 — Gas's "comet = skull" banner rises above the crowd and holds.
+// Three real 3D pieces in a row (comet head + a little red gas halo, an
+// equals sign built from two bars, the same skull.obj model
+// FateEventVfxSystem's own flying skull icons use) instead of a flat
+// canvas-texture billboard — reads as an actual diorama the King's crowd
+// could conceivably be looking at, not a floating sign.
 const BANNER_WIDTH = 0.3;
 const BANNER_HEIGHT = 0.09;
 const BANNER_RISE_DURATION = 4;
@@ -173,12 +267,26 @@ const BANNER_RISE_DURATION = 4;
 // the (now-removed) tower's own height; a plain fixed height reads the same
 // without needing a tower to measure off of.
 const BANNER_RISE_HEIGHT = 0.31;
-const BANNER_CANVAS_W = 512;
-const BANNER_CANVAS_H = 160;
-// "mini comet = SKULL" — the comet half is a small drawn glyph (bright core
-// + trailing red-dust specks), not text, so it actually reads as the thing
-// blamed for the king's death rather than a literal word.
-const BANNER_COMET_TAIL_SPECKS = 10;
+// Local-space layout, in meters, at the group's default (unscaled) size —
+// _updatePayoff applies radiusScale as a uniform group.scale on top of this,
+// same as the old plane's own absolute BANNER_WIDTH/HEIGHT geometry did.
+// x-offsets mirror the old canvas layout's horizontal fractions (comet at
+// 0.2, "=" at 0.46, skull at 0.74, all across BANNER_WIDTH).
+const BANNER_COMET_X = (0.2 - 0.5) * BANNER_WIDTH;
+const BANNER_EQUALS_X = (0.46 - 0.5) * BANNER_WIDTH;
+const BANNER_SKULL_X = (0.74 - 0.5) * BANNER_WIDTH;
+const BANNER_COMET_RADIUS = BANNER_HEIGHT * 0.2;
+const BANNER_SKULL_RADIUS = BANNER_HEIGHT * 0.26;
+const BANNER_EQUALS_BAR_WIDTH = BANNER_HEIGHT * 0.34;
+const BANNER_EQUALS_BAR_THICKNESS = BANNER_HEIGHT * 0.09;
+const BANNER_EQUALS_GAP = BANNER_HEIGHT * 0.22; // vertical gap between the two bars
+// Small ring of additive gas-cloud points (reusing kGasCloudMat, the same
+// warm red/orange material Gas's own pebbles/haze use) orbiting the comet
+// head — "comet head with red gas particles around it" per this banner's
+// own brief, standing in for the old drawn tail specks.
+const BANNER_GAS_PARTICLE_COUNT = 8;
+const BANNER_GAS_RING_RADIUS = BANNER_COMET_RADIUS * 1.7;
+const BANNER_GAS_PARTICLE_SIZE = BANNER_COMET_RADIUS * 0.9;
 
 // Same phase-eligibility guard idiom used throughout this phase (see
 // PLANET_ARRIVAL_ELIGIBLE_FROM/SPIN_ELIGIBLE_FROM in fate-event-vfx-system.ts)
@@ -287,7 +395,6 @@ export class EarthSituationsVfxSystem extends createSystem({
   // (_kingBody.rotation.x, below) is a plain ROOT rotation on this same
   // group either way, so it needs no change once the swap happens.
   private _kingMixer: AnimationMixer | null = null;
-  private _benchMixer: AnimationMixer | null = null;
   // DyingBackwards.fbx's own clip, loaded once (see _buildKing) —
   // null until it resolves, or forever if it fails to load (see
   // _triggerKingDeath's fallback path). idleAction is the King's own
@@ -309,10 +416,13 @@ export class EarthSituationsVfxSystem extends createSystem({
   // applies once a head bone actually exists.
   private _kingCrown!: Group;
   private _kingMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
-  private _benchBodyVisual!: Group;
-  private _benchMaterial!: ReturnType<typeof makeToonRimSkinnedMaterial>;
   private _graveyard!: DecorationSet;
-  private _graveyardBench!: DecorationSet;
+  // One InstancedMesh for every stone (see _buildGraveyardScene) — its geometry
+  // is swapped in place once the real model resolves.
+  private _graveMesh!: InstancedMesh;
+  private _graveLocal = new Matrix4();
+  private _graveScratch = new Matrix4();
+  private _graveZero = new Matrix4().makeScale(0, 0, 0);
 
   // The king's death sequence, once triggered — see _triggerKingDeath/
   // _updatePendingCollapse. animDuration is the real DyingBackwards clip's
@@ -338,13 +448,13 @@ export class EarthSituationsVfxSystem extends createSystem({
 
   // Beat 5 (Payoff) — one-shot guard + per-type state. Organic's blossom
   // pulse is folded into _updateOrganicScene (see BLOSSOM_* constants);
-  // Gas's banner rises via _bannerMesh below. Soul's own payoff (ghosts
+  // Gas's banner rises via _bannerGroup below. Soul's own payoff (ghosts
   // dancing in the tail) lives in fate-event-vfx-system.ts, which owns that
   // rendering — this system only needs to know payoff started, for the
   // shared chime.
   private _payoffTriggered = false;
   private _payoffElapsed = 0;
-  private _bannerMesh!: Mesh;
+  private _bannerGroup!: Group;
 
   private _wasComplete = false;
   private _cometEntity: Entity | null = null;
@@ -390,6 +500,14 @@ export class EarthSituationsVfxSystem extends createSystem({
 
     this._crown = new CrownRise();
     this._crown.build(this.world, this._audioListener, this.scene);
+    // The crown only lands once the "you are crowned" reveal has faded out.
+    // No celestial symbol yet (e.g. a dev-menu jump) means no reveal to wait on.
+    this._crown.landGate = () => {
+      const name = getGlobals(this.world).celestialSymbol.peek();
+      if (!name) return true;
+      const notifications = this.world.getSystem(NotificationHudSystem);
+      return !notifications || notifications.hasFinished(celestialSymbolMessage(name).text);
+    };
     this._buildBanner();
 
     this.cleanupFuncs.push(
@@ -515,16 +633,33 @@ export class EarthSituationsVfxSystem extends createSystem({
     }
   }
 
-  // A fresh crown Group — band + rim spikes, local origin at the band's
-  // own bottom edge so a caller positioning/parenting this at "top of head"
-  // gets a crown that visibly rests there (see CROWN_EMBED). Built fresh
-  // per call (not shared) since the placeholder and the real rig each need
-  // their own instance — see _kingCrown's own comment.
+  // A fresh crown Group — local origin at the band's own bottom edge so a
+  // caller positioning/parenting this at "top of head" gets a crown that
+  // visibly rests there (see CROWN_EMBED). Built fresh per call (not
+  // shared) since the placeholder and the real rig each need their own
+  // instance — see _kingCrown's own comment. Populated instantly with the
+  // procedural fallback shape (see _populateProceduralCrown), then silently
+  // swapped for the real crownForKing.fbx model the moment (if ever) it
+  // resolves — same "instant placeholder, upgrade in place" idiom as
+  // buildFbxField/buildObjNamedGroupField.
   private _buildCrownProp(): Group {
     const group = new Group();
-    const material = new MeshBasicMaterial({ color: CROWN_COLOR });
+    this._populateProceduralCrown(group);
 
-    const band = new Mesh(new CylinderGeometry(CROWN_BAND_RADIUS, CROWN_BAND_RADIUS * 1.08, CROWN_BAND_HEIGHT, 10), material);
+    loadCrownGeometry().then((geo) => {
+      if (!geo) return;
+      while (group.children.length > 0) group.remove(group.children[0]);
+      const mesh = new Mesh(geo, crownMaterial);
+      mesh.scale.setScalar(CROWN_FBX_RADIUS);
+      mesh.position.set(0, CROWN_FBX_OFFSET_Y, CROWN_FBX_OFFSET_Z);
+      group.add(mesh);
+    });
+
+    return group;
+  }
+
+  private _populateProceduralCrown(group: Group): void {
+    const band = new Mesh(new CylinderGeometry(CROWN_BAND_RADIUS, CROWN_BAND_RADIUS * 1.08, CROWN_BAND_HEIGHT, 10), crownMaterial);
     band.position.y = CROWN_BAND_HEIGHT / 2 - CROWN_EMBED;
     group.add(band);
 
@@ -532,12 +667,10 @@ export class EarthSituationsVfxSystem extends createSystem({
     const spikeY = CROWN_BAND_HEIGHT - CROWN_EMBED + CROWN_SPIKE_HEIGHT / 2;
     for (let i = 0; i < CROWN_SPIKE_COUNT; i++) {
       const angle = (i / CROWN_SPIKE_COUNT) * Math.PI * 2;
-      const spike = new Mesh(spikeGeo, material);
+      const spike = new Mesh(spikeGeo, crownMaterial);
       spike.position.set(Math.cos(angle) * CROWN_BAND_RADIUS * 0.85, spikeY, Math.sin(angle) * CROWN_BAND_RADIUS * 0.85);
       group.add(spike);
     }
-
-    return group;
   }
 
   private _buildKing(): void {
@@ -614,149 +747,158 @@ export class EarthSituationsVfxSystem extends createSystem({
   }
 
   // Grave markers (small headstones) at FateEventSystem's own canonical
-  // graveyard layout, plus one seated bench figure watching a grave — Soul
-  // type's Beat 2.5 vignette. Static dressing only; Beat 4's actual ghost
+  // graveyard layout — Soul type's Beat 2.5 vignette. Static dressing only; Beat 4's actual ghost
   // collectibles (rendered off the same GatherableField/normals) live in
   // fate-event-vfx-system.ts.
   private _buildGraveyardScene(): void {
     const material = new MeshBasicMaterial({ color: GRAVE_COLOR });
-    this._graveyard = buildDecorationSetFromNormals(this._fateEvents.getGraveyardNormals(), () => {
-      const group = new Group();
-      const stone = new Mesh(new CylinderGeometry(GRAVE_WIDTH / 2, GRAVE_WIDTH / 2, GRAVE_HEIGHT, 6), material);
-      stone.position.y = GRAVE_HEIGHT / 2;
-      stone.scale.z = GRAVE_DEPTH / GRAVE_WIDTH;
-      group.add(stone);
-      return group;
-    });
+    // Transform-only groups (position/scale/orientation driven by _updateSet,
+    // same as every other DecorationSet) — the stones themselves are ONE
+    // InstancedMesh (one draw call instead of one per stone), whose instance
+    // matrices _syncGraveyardInstances copies from these groups each frame.
+    this._graveyard = buildDecorationSetFromNormals(this._fateEvents.getGraveyardNormals(), () => new Group());
     this._registerSet(this._graveyard);
 
-    this._benchMaterial = makeToonRimSkinnedMaterial(PERSON_BODY_COLOR);
-    this._graveyardBench = buildDecorationSet(1, () => {
-      const group = new Group();
-      this._benchBodyVisual = buildPlaceholderPerson(this._benchMaterial).group;
-      this._benchBodyVisual.scale.setScalar(BENCH_SCALE);
-      group.add(this._benchBodyVisual);
-      return group;
+    // Instant-visible cylinder placeholder, same "instant placeholder,
+    // upgrade in place" idiom as _buildCrownProp — swapped for the real
+    // gravestone.obj geometry the moment (if ever) it resolves, below. The
+    // placeholder centers on its own middle (hence the y lift) and is
+    // squashed to GRAVE_DEPTH; the real geometry's own origin is already at
+    // the bottom ground-attachment point, so it needs neither.
+    const count = this._graveyard.groups.length;
+    const placeholderGeo = new CylinderGeometry(GRAVE_WIDTH / 2, GRAVE_WIDTH / 2, GRAVE_HEIGHT, 6);
+    this._graveLocal.compose(
+      new Vector3(0, GRAVE_HEIGHT / 2, 0),
+      new Quaternion(),
+      new Vector3(1, 1, GRAVE_DEPTH / GRAVE_WIDTH),
+    );
+    this._graveMesh = new InstancedMesh(placeholderGeo, material, count);
+    this._graveMesh.frustumCulled = false;
+    this._graveMesh.visible = false;
+    this.world.createTransformEntity(this._graveMesh);
+
+    loadGravestoneGeometry().then((geo) => {
+      if (!geo) return;
+      this._graveMesh.geometry = geo;
+      this._graveLocal.makeScale(GRAVESTONE_RADIUS, GRAVESTONE_RADIUS, GRAVESTONE_RADIUS);
     });
-    this._registerSet(this._graveyardBench);
-
-    loadAnimatedPersonTemplate().then((template) => this._swapBenchToAnimated(template));
   }
 
-  private _swapBenchToAnimated(template: Awaited<ReturnType<typeof loadAnimatedPersonTemplate>>): void {
-    if (!template) {
-      console.warn('[EarthSituationsVfxSystem] BreathingIdle.fbx unavailable — keeping the bench NPC\'s primitive placeholder figure.');
-      return;
+  // Copies each graveyard group's current transform (composed with the stone's
+  // local offset/scale) into the shared InstancedMesh. Both the groups and the
+  // mesh sit directly under the level root, so group.matrix is already the
+  // instance's world matrix.
+  private _syncGraveyardInstances(): void {
+    const mesh = this._graveMesh;
+    if (this._graveyard.atRest && !mesh.visible) return;
+    let any = false;
+    const groups = this._graveyard.groups;
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      if (group.visible) {
+        any = true;
+        group.updateMatrix();
+        this._graveScratch.multiplyMatrices(group.matrix, this._graveLocal);
+        mesh.setMatrixAt(i, this._graveScratch);
+      } else {
+        mesh.setMatrixAt(i, this._graveZero);
+      }
     }
-    const wrapper = this._benchBodyVisual.parent!;
-    wrapper.remove(this._benchBodyVisual);
-    const animated = buildAnimatedPerson(template, this._benchMaterial, PERSON_HEIGHT);
-    animated.group.scale.setScalar(BENCH_SCALE);
-    this._benchBodyVisual = animated.group;
-    wrapper.add(this._benchBodyVisual);
-    this._benchMixer = animated.mixer;
+    mesh.visible = any;
+    mesh.instanceMatrix.needsUpdate = true;
   }
 
-  // Draws a small "comet" glyph directly on the banner canvas — a bright
-  // core plus a trail of fading red dust specks, same radial-gradient
-  // language buildFireTexture() already uses for this phase's other red
-  // flourish, so "the comet" reads as an actual drawn object, not a word.
-  private _drawMiniComet(ctx: CanvasRenderingContext2D, cx: number, cy: number, coreRadius: number): void {
-    for (let i = BANNER_COMET_TAIL_SPECKS; i >= 1; i--) {
-      const t = i / BANNER_COMET_TAIL_SPECKS;
-      const x = cx - coreRadius * 6 * t;
-      const y = cy + Math.sin(t * Math.PI * 1.5) * coreRadius * 0.5;
-      const r = Math.max(1, coreRadius * (1 - t * 0.7) * (0.6 + Math.random() * 0.4));
-      const alpha = (1 - t) * 0.8;
-      ctx.fillStyle = `rgba(255, ${80 + Math.floor(60 * (1 - t))}, ${50 + Math.floor(40 * (1 - t))}, ${alpha})`;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+  // Small ring of additive gas-cloud points orbiting the banner's comet
+  // head — see BANNER_GAS_PARTICLE_COUNT's own comment. Fixed positions,
+  // computed once; the whole group (including this) rides along with
+  // _bannerGroup's own position/scale/quaternion every frame, so there's no
+  // per-frame work needed here beyond the shared uTime tick already applied
+  // to kGasCloudMat's sibling materials elsewhere (this one has no time-
+  // varying uniform of its own).
+  private _buildBannerCometHead(): Group {
+    const group = new Group();
+    const headMat = makeToonRimFlatMaterial(hexToRgb(COMET_HEAD));
+    const headMesh = new Mesh(kHeadGeo, headMat);
+    headMesh.scale.setScalar(BANNER_COMET_RADIUS);
+    group.add(headMesh);
+
+    const positions = new Float32Array(BANNER_GAS_PARTICLE_COUNT * 3);
+    const sizes = new Float32Array(BANNER_GAS_PARTICLE_COUNT);
+    const brights = new Float32Array(BANNER_GAS_PARTICLE_COUNT);
+    for (let i = 0; i < BANNER_GAS_PARTICLE_COUNT; i++) {
+      const angle = (i / BANNER_GAS_PARTICLE_COUNT) * Math.PI * 2;
+      const r = BANNER_GAS_RING_RADIUS * (0.8 + Math.random() * 0.4);
+      positions[i * 3] = Math.cos(angle) * r;
+      positions[i * 3 + 1] = Math.sin(angle) * r * 0.6;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * BANNER_GAS_RING_RADIUS * 0.4;
+      sizes[i] = BANNER_GAS_PARTICLE_SIZE * (0.7 + Math.random() * 0.6);
+      brights[i] = 0.6 + Math.random() * 0.4;
     }
-    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
-    gradient.addColorStop(0, 'rgba(255, 240, 200, 1)');
-    gradient.addColorStop(0.5, 'rgba(255, 120, 60, 0.9)');
-    gradient.addColorStop(1, 'rgba(200, 30, 10, 0)');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
-    ctx.fill();
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new BufferAttribute(positions, 3));
+    geo.setAttribute('aSize', new BufferAttribute(sizes, 1));
+    geo.setAttribute('aBright', new BufferAttribute(brights, 1));
+    group.add(new Points(geo, kGasCloudMat));
+
+    return group;
   }
 
-  // Same "drawn directly on the canvas" reasoning as _drawMiniComet above —
-  // see _buildBanner's own comment for why this replaced a plain
-  // fillText('☠', ...) call. Cranium + jaw in the banner's own ink color,
-  // eye sockets/nasal cavity/teeth cut back to (approximately) the
-  // banner's own background color so they read as sockets rather than a
-  // separate drawn shape.
-  private _drawSkull(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number): void {
-    ctx.fillStyle = '#ffdede';
-    ctx.beginPath();
-    ctx.arc(cx, cy - radius * 0.15, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(cx - radius * 0.55, cy + radius * 0.15);
-    ctx.quadraticCurveTo(cx, cy + radius * 1.05, cx + radius * 0.55, cy + radius * 0.15);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = 'rgba(20, 4, 4, 0.88)';
-    ctx.beginPath();
-    ctx.arc(cx - radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx + radius * 0.38, cy - radius * 0.1, radius * 0.28, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(cx, cy + radius * 0.05);
-    ctx.lineTo(cx - radius * 0.12, cy + radius * 0.32);
-    ctx.lineTo(cx + radius * 0.12, cy + radius * 0.32);
-    ctx.closePath();
-    ctx.fill();
-    for (let i = -1; i <= 1; i++) {
-      ctx.fillRect(
-        cx + i * radius * 0.22 - radius * 0.03,
-        cy + radius * 0.55,
-        radius * 0.06,
-        radius * 0.22,
-      );
-    }
+  // "=" built from two thin bars rather than a text glyph — matches this
+  // banner's other two pieces now being real geometry instead of anything
+  // font-dependent (see the old fillText('☠', ...) missing-glyph problem
+  // this whole banner rework grew out of).
+  private _buildBannerEquals(): Group {
+    const group = new Group();
+    const material = makeToonRimFlatMaterial(SKULL_COLOR);
+    const barGeo = new BoxGeometry(BANNER_EQUALS_BAR_WIDTH, BANNER_EQUALS_BAR_THICKNESS, BANNER_EQUALS_BAR_THICKNESS);
+    const topBar = new Mesh(barGeo, material);
+    topBar.position.y = BANNER_EQUALS_GAP / 2;
+    const bottomBar = new Mesh(barGeo, material);
+    bottomBar.position.y = -BANNER_EQUALS_GAP / 2;
+    group.add(topBar, bottomBar);
+    return group;
   }
 
+  // Instant-visible placeholder swapped for the real skull.obj model once it
+  // resolves — same graceful-degradation idiom as FateEventVfxSystem's own
+  // _buildSkulls, whose loadSkullGeometry/SKULL_COLOR this reuses
+  // directly rather than re-deriving them.
+  private _buildBannerSkull(): Mesh {
+    const material = makeToonRimFlatMaterial(SKULL_COLOR);
+    const placeholderGeo = new SphereGeometry(BANNER_SKULL_RADIUS, 8, 6);
+    const mesh: Mesh = new Mesh(placeholderGeo, material);
+    loadSkullGeometry().then((geo) => {
+      if (!geo) return;
+      mesh.geometry = geo;
+      mesh.scale.setScalar(BANNER_SKULL_RADIUS);
+    });
+    return mesh;
+  }
+
+  // "comet = skull" as three real 3D pieces laid out left to right along the
+  // group's own local X axis (see this file's own comment on this banner's
+  // rework) — _updatePayoff drives the whole group's position/scale/
+  // quaternion every frame exactly like it used to drive the old single
+  // plane Mesh, so nothing about the rise/face-camera logic needs to change,
+  // only what's inside.
   private _buildBanner(): void {
-    const canvas = document.createElement('canvas');
-    canvas.width = BANNER_CANVAS_W;
-    canvas.height = BANNER_CANVAS_H;
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = 'rgba(20, 4, 4, 0.88)';
-    ctx.fillRect(0, 0, BANNER_CANVAS_W, BANNER_CANVAS_H);
-    ctx.strokeStyle = 'rgba(255, 120, 100, 0.7)';
-    ctx.lineWidth = 6;
-    ctx.strokeRect(6, 6, BANNER_CANVAS_W - 12, BANNER_CANVAS_H - 12);
+    const group = new Group();
 
-    ctx.fillStyle = '#ffdede';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // "comet = SKULL" — comet glyph first (reads left-to-right as "this is
-    // what caused this"), skull last. Both are drawn directly on the
-    // canvas (see _drawMiniComet/_drawSkull) rather than typed as text —
-    // the skull specifically USED to be a plain fillText('☠', ...) call,
-    // but a Unicode glyph is only as good as whatever font the browser
-    // happens to resolve 'sans-serif' to, and it was silently rendering as
-    // nothing (missing-glyph) in at least this environment — same "drawn
-    // object, not a font's problem" reasoning the comet glyph already used.
-    this._drawMiniComet(ctx, BANNER_CANVAS_W * 0.2, BANNER_CANVAS_H / 2, BANNER_CANVAS_H * 0.18);
-    ctx.font = 'bold 56px sans-serif';
-    ctx.fillText('=', BANNER_CANVAS_W * 0.46, BANNER_CANVAS_H / 2);
-    this._drawSkull(ctx, BANNER_CANVAS_W * 0.74, BANNER_CANVAS_H / 2, BANNER_CANVAS_H * 0.24);
+    const comet = this._buildBannerCometHead();
+    comet.position.x = BANNER_COMET_X;
+    group.add(comet);
 
-    const texture = new CanvasTexture(canvas);
-    const geo = new PlaneGeometry(BANNER_WIDTH, BANNER_HEIGHT);
-    const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
-    const mesh = new Mesh(geo, material);
-    mesh.visible = false;
-    this._bannerMesh = mesh;
-    this.world.createTransformEntity(mesh);
+    const equals = this._buildBannerEquals();
+    equals.position.x = BANNER_EQUALS_X;
+    group.add(equals);
+
+    const skull = this._buildBannerSkull();
+    skull.position.x = BANNER_SKULL_X;
+    group.add(skull);
+
+    group.visible = false;
+    this._bannerGroup = group;
+    this.world.createTransformEntity(group);
   }
 
   update(delta: number, time: number): void {
@@ -765,7 +907,6 @@ export class EarthSituationsVfxSystem extends createSystem({
     // always safe regardless of current visibility, same reasoning as
     // _updateBees' own mixer.update() call.
     this._kingMixer?.update(delta);
-    this._benchMixer?.update(delta);
 
     const globals = getGlobals(this.world);
     const phase = globals.gamePhase.peek();
@@ -808,15 +949,7 @@ export class EarthSituationsVfxSystem extends createSystem({
     this._updateBees(showOrganicScene, this._scratchCenter, reach, delta, time, radiusScale);
     this._updateSet(this._king, showKing, spinProgress, delta, this._scratchCenter, reach, radiusScale);
     this._updateSet(this._graveyard, showGraveyard, spinProgress, delta, this._scratchCenter, reach, radiusScale);
-    this._updateSet(
-      this._graveyardBench,
-      showGraveyard,
-      spinProgress,
-      delta,
-      this._scratchCenter,
-      reach,
-      radiusScale,
-    );
+    this._syncGraveyardInstances();
 
     for (const entity of this.queries.comets.entities) {
       this._cometEntity = entity;
@@ -872,7 +1005,9 @@ export class EarthSituationsVfxSystem extends createSystem({
     if (this._gasVignetteTriggered) return;
     if (
       this._fateEvents.getBeat() !== FateBeat.Ambient ||
-      this._fateEvents.getBeatElapsed() < GAS_DEATH_START_SECONDS
+      this._fateEvents.getBeatElapsed() < GAS_DEATH_START_SECONDS ||
+      // Also waits for the "someone to blame" intro notification to fade out.
+      !this.world.getSystem(NotificationHudSystem)?.hasFinished(FATE_GAS_INTRO_TEXT)
     ) {
       return;
     }
@@ -1128,33 +1263,32 @@ export class EarthSituationsVfxSystem extends createSystem({
       this._payoffElapsed = 0;
       this._lastPayoffDominant = dominant;
       if (dominant === VOLATILE_GASSES_TYPE) {
-        this._bannerMesh.visible = true;
+        this._bannerGroup.visible = true;
       }
       playPayoffChime(this._audioListener, this.scene, this._scratchCenter, 420);
     }
     this._payoffElapsed += delta;
 
-    if (dominant === VOLATILE_GASSES_TYPE && this._bannerMesh.visible) {
+    if (dominant === VOLATILE_GASSES_TYPE && this._bannerGroup.visible) {
       // Recomputed every frame from the LIVE planet center/reach/radiusScale
       // (all passed in fresh each call), not just once at trigger time — the
       // banner used to freeze at its trigger-time world position, visibly
       // detaching from the planet as it kept moving (following the player,
       // then receding for Launch) instead of staying anchored to "the
-      // earth." Standalone Mesh, not a DecorationSet child — its own
-      // absolute BANNER_WIDTH/HEIGHT geometry and the fixed-meter offsets
-      // below need radiusScale applied directly (same reasoning as
-      // _updateBees).
-      this._bannerMesh.scale.setScalar(radiusScale);
+      // earth." Standalone Group, not a DecorationSet child — its own
+      // absolute BANNER_* local layout and the fixed-meter offsets below
+      // need radiusScale applied directly (same reasoning as _updateBees).
+      this._bannerGroup.scale.setScalar(radiusScale);
       this._scratchBannerPos
         .copy(this._scratchCenter)
         .addScaledVector(CROWD_CAP_DIRECTION, reach + 0.02 * radiusScale);
       const t = smoothstep(clamp01(this._payoffElapsed / BANNER_RISE_DURATION));
-      this._bannerMesh.position.copy(this._scratchBannerPos);
-      this._bannerMesh.position.y += BANNER_RISE_HEIGHT * radiusScale * t;
+      this._bannerGroup.position.copy(this._scratchBannerPos);
+      this._bannerGroup.position.y += BANNER_RISE_HEIGHT * radiusScale * t;
       this.camera.getWorldPosition(this._scratchBannerFace);
-      this._scratchBannerFace.sub(this._bannerMesh.position).normalize();
+      this._scratchBannerFace.sub(this._bannerGroup.position).normalize();
       if (this._scratchBannerFace.lengthSq() > 0.0001) {
-        this._bannerMesh.quaternion.setFromUnitVectors(this._zAxis, this._scratchBannerFace);
+        this._bannerGroup.quaternion.setFromUnitVectors(this._zAxis, this._scratchBannerFace);
       }
     }
   }
@@ -1188,7 +1322,7 @@ export class EarthSituationsVfxSystem extends createSystem({
   }
 
   private _resetAll(): void {
-    for (const set of [this._king, this._graveyard, this._graveyardBench]) {
+    for (const set of [this._king, this._graveyard]) {
       set.scale.fill(0);
       for (const group of set.groups) group.visible = false;
     }
@@ -1214,7 +1348,7 @@ export class EarthSituationsVfxSystem extends createSystem({
     this._payoffTriggered = false;
     this._payoffElapsed = 0;
     this._lastPayoffDominant = -1;
-    this._bannerMesh.visible = false;
+    this._bannerGroup.visible = false;
 
     getGlobals(this.world).crownLanded.value = false;
     getGlobals(this.world).kingDeathComplete.value = false;

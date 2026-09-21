@@ -20,6 +20,13 @@ const ANCHOR_AZIMUTH_SPREAD_DEG = 30; // -30/0/+30 around the planet's vertical 
 // it — this is what keeps the arc above the people cap instead of sharing it.
 const ANCHOR_ELEVATION: [number, number, number] = [0, 0.55, 1];
 
+// Constellations sit at the planet's (far) intermediate distance, but stars
+// must be touchable from where the player stands — every constellation anchor
+// is shifted this far toward the player (+z), on top of the planet-relative
+// placement above. Applied by both ConstellationsSystem (baked layouts) and
+// ConstellationsVfxSystem (baked offsets + live anchor) so they stay in sync.
+export const CONSTELLATION_REACH_SHIFT: readonly [number, number, number] = [0, -.1, 0.35];
+
 function rotateAroundY(base: [number, number, number], degrees: number): Vector3 {
   const rad = (degrees * Math.PI) / 180;
   const cos = Math.cos(rad);
@@ -115,6 +122,12 @@ export interface ConstellationLayout {
 // planet's own live radius later grows through Leg B), just exact rather
 // than probabilistic now that the shape is a flat authored pattern instead
 // of a 3D random scatter.
+// Shapes are squashed to this fraction of their authored height (the shape's
+// own Y axis only — width is untouched). Tall shapes like Throne put stars
+// too far above/below arm's reach to comfortably gather; this keeps the
+// silhouette recognizable while pulling the top/bottom stars in.
+const VERTICAL_SCALE = 0.5;
+
 export function generateConstellationLayout(
   def: ConstellationDef,
   anchor: readonly [number, number, number],
@@ -140,7 +153,8 @@ export function generateConstellationLayout(
   const [ax, ay, az] = anchor;
   const starPositions = new Float32Array(shape.length * 3);
   for (let i = 0; i < shape.length; i++) {
-    const [x, y] = shape[i];
+    const [x, yRaw] = shape[i];
+    const y = yRaw * VERTICAL_SCALE;
     starPositions[i * 3] = ax + (right.x * x + up.x * y) * def.spreadRadius;
     starPositions[i * 3 + 1] = ay + (right.y * x + up.y * y) * def.spreadRadius;
     starPositions[i * 3 + 2] = az + (right.z * x + up.z * y) * def.spreadRadius;

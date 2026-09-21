@@ -3,6 +3,7 @@ import { AchievementSynth } from '../vfx/audio/achievement-synth.js';
 import { ACHIEVEMENTS } from './achievement-list.js';
 import { unlockAchievement } from './achievement-store.js';
 import { getGlobals } from './globals.js';
+import { HapticPattern, HapticsSystem } from './haptics-system.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
 
 // A shared "unlock" service, not a self-driving one — every achievement in
@@ -45,6 +46,7 @@ export class AchievementSystem extends createSystem({}) {
     // stays unconditional so the queue/hasShown() bookkeeping there is
     // unaffected. Only this achievement-specific jingle needs its own gate.
     this.world.getSystem(NotificationHudSystem)?.notify(`Achievement unlocked: ${def.title}`, 3.5);
+    this.world.getSystem(HapticsSystem)?.pulseBoth(HapticPattern.CelebratoryBurst);
     if (!getGlobals(this.world).notificationsEnabled.peek()) return;
     // Not tied to any world location — just plays roughly where the player
     // is looking, same as the HUD notification it accompanies.

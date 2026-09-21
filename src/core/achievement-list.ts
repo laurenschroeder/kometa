@@ -14,6 +14,9 @@ export interface AchievementDef {
 // no longer drives unlocks itself; each one is fired directly by whichever
 // system owns that moment.
 export const ACHIEVEMENTS: AchievementDef[] = [
+  { id: 'stargazer', title: 'Stargazer', description: 'Wander far enough from the comet to gather a distant speck of stardust.' },
+  { id: 'far-side', title: 'Far Side', description: 'Seed the side of the planet facing directly away from where you started.' },
+  { id: 'second-thoughts', title: 'Second Thoughts', description: 'Linger at both choice zones before finally committing to one.' },
   { id: 'full-sweep', title: 'Full Sweep', description: 'Clear every mote from all three Stardust swirls before the phase ends.' },
   { id: 'ambidextrous', title: 'Ambidextrous', description: 'Toss the comet to your other hand and catch it.' },
   { id: 'true-believer', title: 'True Believer', description: "Finish Pebbles with one type making up 90% or more of what you gathered." },
@@ -23,5 +26,6 @@ export const ACHIEVEMENTS: AchievementDef[] = [
   { id: 'faced-the-mob', title: 'Faced the Mob', description: 'Face every last member of the angry, grieving crowd.' },
   { id: 'eternal-light', title: 'Eternal Light', description: 'Choose to orbit the planet forever.' },
   { id: 'into-the-unknown', title: 'Into the Unknown', description: 'Choose to launch onward into the universe.' },
+  { id: 'indecisive', title: 'Indecisive', description: "Let the clock run out without choosing your comet's fate." },
   { id: 'complete-collection', title: 'Complete Collection', description: 'Experience every combination of comet type and final choice.' },
 ];

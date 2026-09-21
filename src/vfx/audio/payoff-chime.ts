@@ -12,7 +12,17 @@ const GAIN = 0.09;
 // triad burst. Built for Fate Events' Beat 5 payoff cues (organic blossom,
 // Gas banner, Soul dance), where three near-identical sustained-drone rigs
 // would be pure duplication.
-export function playPayoffChime(listener: AudioListener, scene: Scene, position: Vector3, baseFreq: number): void {
+export function playPayoffChime(
+  listener: AudioListener,
+  scene: Scene,
+  position: Vector3,
+  baseFreq: number,
+  // Shorter/quieter variant of the same chime, e.g. a foreshadowing cue —
+  // gainScale multiplies GAIN, decayScale multiplies DECAY.
+  variant: { gainScale?: number; decayScale?: number } = {},
+): void {
+  const gainPeak = GAIN * (variant.gainScale ?? 1);
+  const decay = DECAY * (variant.decayScale ?? 1);
   const context = listener.context;
   if (context.state !== 'running') {
     context.resume().catch(() => {});
@@ -27,12 +37,12 @@ export function playPayoffChime(listener: AudioListener, scene: Scene, position:
     osc.frequency.value = baseFreq * ratio;
     const g = context.createGain();
     g.gain.setValueAtTime(0, now);
-    g.gain.linearRampToValueAtTime(GAIN, now + ATTACK);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + ATTACK + DECAY);
+    g.gain.linearRampToValueAtTime(gainPeak, now + ATTACK);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + ATTACK + decay);
     osc.connect(g);
     g.connect(sum);
     osc.start(now);
-    osc.stop(now + ATTACK + DECAY + 0.05);
+    osc.stop(now + ATTACK + decay + 0.05);
   }
   const sound = new PositionalAudio(listener);
   sound.setNodeSource(sum as unknown as AudioScheduledSourceNode);
@@ -41,5 +51,5 @@ export function playPayoffChime(listener: AudioListener, scene: Scene, position:
   setTimeout(() => {
     scene.remove(sound);
     sum.disconnect();
-  }, (ATTACK + DECAY + 0.1) * 1000);
+  }, (ATTACK + decay + 0.1) * 1000);
 }

@@ -11,6 +11,9 @@ export interface PebbleType {
   color: [number, number, number]; // 0-1 RGB
 }
 
+// Hex strings indexed by PebbleType.id, for tinting UI.
+export const PEBBLE_TYPE_HEX: string[] = [SOUL_DUST, ORGANIC_MATTER, VOLATILE_GASSES];
+
 export const PEBBLE_TYPES: PebbleType[] = [
   { id: 0, name: 'soul dust', color: hexToRgb(SOUL_DUST) }, // blue
   { id: 1, name: 'organic matter', color: hexToRgb(ORGANIC_MATTER) }, // green

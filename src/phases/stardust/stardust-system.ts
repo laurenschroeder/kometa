@@ -2,13 +2,94 @@ import { createSystem, Matrix4, Quaternion, Vector3 } from '@iwsdk/core';
 import { AchievementSystem } from '../../core/achievement-system.js';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { CapturedField, GatherableField, GatherHandInput } from '../../comet/gatherable-field.js';
-import { HandAnchor } from '../../comet/hand-anchor-component.js';
+import { HandAnchor, HandSide } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
+import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
+import { Phase } from '../../core/phase.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { STARDUST_INTRO_TEXT, STARDUST_WIN_SEQUENCE } from '../../core/notification-copy.js';
+import { CONTINUE_INTRO_TEXT, STARDUST_INTRO_TEXT, STARDUST_WIN_SEQUENCE } from '../../core/notification-copy.js';
+import { randomUnitVector3 } from '../../vfx/geometry/mesh-utils.js';
 import { scatterDisc, scatterGalaxyArm } from '../../vfx/geometry/pixel-swirl.js';
 
-const N_STARDUST = 500;
+const N_STARDUST = 505;
+
+// A subset of N_STARDUST spawns in a tight shell already within easy reach
+// (NEAR_RADIUS_MIN/MAX) instead of the old single far-out band
+// (FAR_RADIUS_MIN/MAX) — lets a player start gathering immediately without
+// first having to move around, and reads as a denser "close" field of finer
+// motes layered in front of the sparser far field (see StardustVfxSystem's
+// own NEAR_AMBIENT_SIZE/NEAR_CAPTURED_SIZE for the smaller-and-dimmer visual
+// half of this). Index-keyed, not random per-frame — see
+// _stardustSpawnPoint: indices below NEAR_COUNT are permanently "near," the
+// rest permanently "far," matching how GatherableField's own spawnPoint
+// contract fixes direction/type once at construction.
+const NEAR_COUNT = 260;
+const NEAR_RADIUS_MIN = 0.15;
+const NEAR_RADIUS_MAX = 0.4;
+const FAR_RADIUS_MIN = 0.5;
+const FAR_RADIUS_MAX = 1.8;
+// A handful of motes scattered well beyond the ordinary far shell — an
+// optional "did you notice these" discovery reward rather than something
+// every player needs to reach 100%, since a player who never wanders that
+// far still completes the field via the other 500. See
+// ACHIEVEMENTS' 'stargazer' entry, fired from this field's own onCapture
+// below.
+const DISTANT_COUNT = 5;
+const DISTANT_RADIUS_MIN = 3.0;
+const DISTANT_RADIUS_MAX = 4.5;
+// Reference range _stardustSpawnPoint's radiusT is measured against (passed
+// as the field's own spawnRadiusMin/Max) — spans all three bands so a
+// single GatherableField instance can host them without the gaps between
+// bands reading as anything but the deliberate near/far/distant split they
+// are.
+const SPAWN_RADIUS_MIN = NEAR_RADIUS_MIN;
+const SPAWN_RADIUS_MAX = DISTANT_RADIUS_MAX;
+// Near motes are small (see NEAR_AMBIENT_SIZE) and easy to lose track of
+// precisely, so on top of already starting closer, both the comet's notice
+// distance AND its capture window are widened for them — meaningfully
+// easier to latch onto, not just nearer. Applied via GatherableField's
+// easeMultiplier (see gatherable-field.ts) to attractRadius/captureDistance
+// alike; far motes keep a multiplier of 1 (unchanged base tuning).
+const NEAR_EASE_MULTIPLIER = 1.6;
+// How long NEAR motes take to all become attractable, staggered across this
+// window — see GatherableFieldParams.activationDelay's own comment for why
+// this exists at all.
+const TRICKLE_IN_SECONDS = 4;
+// assignedType values for this field's spawnPoint — read back by
+// StardustVfxSystem (getAssignedTypes()) to size near motes smaller than far
+// ones, both ambient and once captured.
+export const STARDUST_TYPE_FAR = 0;
+export const STARDUST_TYPE_NEAR = 1;
+export const STARDUST_TYPE_DISTANT = 2;
+
+// GatherableFieldParams.spawnPoint for the main field — every index below
+// NEAR_COUNT spawns in the near shell (STARDUST_TYPE_NEAR), the last
+// DISTANT_COUNT spawn far beyond the ordinary far shell
+// (STARDUST_TYPE_DISTANT), everything else in the old far shell
+// (STARDUST_TYPE_FAR). Direction is still uniform-random (this field has no
+// angular meaning, unlike Pebbles' spawnPoint) — only the radius band and
+// resulting type differ from the old default (spawnPoint-less) path. A
+// plain function, not a method — unlike _swirlSpawnPoint (see below) it
+// needs no instance state, just NEAR_COUNT/DISTANT_COUNT and the radius
+// bands.
+function stardustSpawnPoint(index: number): { dir: Vector3; radiusT: number; type: number } {
+  const isNear = index < NEAR_COUNT;
+  const isDistant = index >= N_STARDUST - DISTANT_COUNT;
+  let r: number;
+  let type: number;
+  if (isDistant) {
+    r = DISTANT_RADIUS_MIN + Math.random() * (DISTANT_RADIUS_MAX - DISTANT_RADIUS_MIN);
+    type = STARDUST_TYPE_DISTANT;
+  } else if (isNear) {
+    r = NEAR_RADIUS_MIN + Math.random() * (NEAR_RADIUS_MAX - NEAR_RADIUS_MIN);
+    type = STARDUST_TYPE_NEAR;
+  } else {
+    r = FAR_RADIUS_MIN + Math.random() * (FAR_RADIUS_MAX - FAR_RADIUS_MIN);
+    type = STARDUST_TYPE_FAR;
+  }
+  const radiusT = (r - SPAWN_RADIUS_MIN) / (SPAWN_RADIUS_MAX - SPAWN_RADIUS_MIN);
+  return { dir: randomUnitVector3(), radiusT, type };
+}
 
 // Three-swirl finale: once the main field is SWIRL_FIRST_REVEAL_FRACTION
 // gathered, three gold pixel-CRT swirls (see StardustVfxSystem) arrive one
@@ -22,7 +103,11 @@ const N_STARDUST = 500;
 // timeoutSeconds (150) — the worst-case reveal/finale durations plus the
 // notification sequence's own playback time need to fit inside it.
 const SWIRL_COUNT = 3;
-const SWIRL_FIRST_REVEAL_FRACTION = 0.5;
+// Bumped 0.5 -> 0.65 — with more ambient motes now spawning close to the
+// player, the main field was crossing this threshold (and popping the swirl
+// finale's own progress jump, see getProgress() below) too soon into the
+// phase.
+const SWIRL_FIRST_REVEAL_FRACTION = 0.65;
 // Seconds after the reveal sequence starts that each swirl appears —
 // index-matched against SWIRL_REVEAL_ANGLES_DEG (center, then left, then right).
 const SWIRL_REVEAL_DELAYS_SECONDS = [0, 3, 6];
@@ -69,6 +154,16 @@ export interface CaptureEvent {
 }
 export type AttractEvent = CaptureEvent;
 
+// Stardust can't be gathered until this long after the first notification
+// (STARDUST_INTRO_TEXT) starts showing, so the player reads it before the
+// field reacts to their hand. Fallback cap counts from phase start in case
+// that message never shows (e.g. a dev-menu jump straight to this phase).
+const GATHER_UNLOCK_AFTER_INTRO_SECONDS = 3;
+const GATHER_UNLOCK_FALLBACK_SECONDS = 15;
+// How close a bare hand/controller (grip position) must be to a near mote to
+// attach it.
+const NEAR_TOUCH_RADIUS = 0.1;
+
 // Gameplay for Chapter 1: stardust motes fill the playspace; slow, deliberate
 // comet movement within range pulls nearby motes in; once close enough a
 // mote is "captured" and joins the comet's trail-following pool (rendered
@@ -97,6 +192,9 @@ export class StardustSystem extends createSystem({
   // See STARDUST_INTRO_TEXT's own comment — the intro notification holds
   // (a generous 60s fallback cap, not the real hold time) until the player
   // actually gathers their first stardust, dismissed here exactly once.
+  // See GATHER_UNLOCK_AFTER_INTRO_SECONDS.
+  private _gatherUnlocked = false;
+  private _sinceIntroShown = 0;
   private _introDismissed = false;
 
   // Index-matched against SWIRL_REVEAL_DELAYS_SECONDS/SWIRL_REVEAL_ANGLES_DEG.
@@ -112,8 +210,14 @@ export class StardustSystem extends createSystem({
   private _swirlCaptureEvents: CaptureEvent[][] = [[], [], []];
   private _swirlAttractEvents: AttractEvent[][] = [[], [], []];
 
+  // Which hand currently holds the comet, refreshed each update() before
+  // this._field.step() runs — read by the onCapture/onAttractStart closures
+  // below (both fired synchronously from inside that same step() call) so
+  // they know which controller to buzz.
+  private _currentHand: string = HandSide.Left;
   private _hand!: GatherHandInput;
   private _scratchVel!: Vector3;
+  private _scratchTouchPos = new Vector3();
   private _scratchSwirlCenter!: Vector3;
   private _scratchSwirlDir!: Vector3;
   private _scratchCamPos!: Vector3;
@@ -129,14 +233,40 @@ export class StardustSystem extends createSystem({
   private _refForward!: Vector3;
 
   init(): void {
+    const easeMultiplier = new Float32Array(N_STARDUST);
+    const activationDelay = new Float32Array(N_STARDUST);
+    // NEAR motes are within easy reach, so they're touch-only — you have to
+    // actually touch one with your hand/controller to attach it, instead of
+    // it being pulled in from across the room.
+    const touchOnly = new Uint8Array(N_STARDUST);
+    for (let i = 0; i < N_STARDUST; i++) {
+      easeMultiplier[i] = i < NEAR_COUNT ? NEAR_EASE_MULTIPLIER : 1;
+      touchOnly[i] = i < NEAR_COUNT ? 1 : 0;
+      // NEAR motes spawn well within their own (ease-boosted) attractRadius
+      // of a hand resting anywhere near spawnCenter — without this, most of
+      // them were already grabbable the instant the phase started, reading
+      // as one big glob of stardust hitting the player's hand immediately
+      // rather than the field trickling in. Staggered roughly evenly across
+      // TRICKLE_IN_SECONDS (plus a little jitter so it doesn't read as a
+      // mechanical wave) rather than each fully random, so it visibly
+      // "streams in" over the first few seconds instead of arriving in
+      // random clumps. FAR motes need no delay — they're already out of
+      // easy reach at spawn.
+      activationDelay[i] =
+        i < NEAR_COUNT ? (i / NEAR_COUNT) * TRICKLE_IN_SECONDS + Math.random() * 0.4 : 0;
+    }
     this._field = new GatherableField({
       count: N_STARDUST,
       spawnCenter: [0, 1.2, 0],
-      spawnRadiusMin: 0.5,
-      spawnRadiusMax: 1.8,
+      spawnRadiusMin: SPAWN_RADIUS_MIN,
+      spawnRadiusMax: SPAWN_RADIUS_MAX,
       attractRadius: 0.4,
       captureDistance: 0.05,
       attractRate: 3.0,
+      spawnPoint: stardustSpawnPoint,
+      easeMultiplier,
+      touchOnly,
+      activationDelay,
       // Distribution for newly captured stardust riding the comet's trail —
       // intentionally tighter than the eventual pebble tail (this is the
       // comet just forming, not yet grown).
@@ -144,11 +274,16 @@ export class StardustSystem extends createSystem({
       capturedSpreadBase: 0.01,
       capturedSpreadGrowth: 0.02,
       capturedDepthRatio: 1.4,
-      onCapture: (_index, x, y, z, speed) => {
+      onCapture: (index, x, y, z, speed) => {
         this._captureEvents.push({ x, y, z, speed });
+        this.world.getSystem(HapticsSystem)?.pulse(this._currentHand, HapticPattern.MediumPulse);
+        if (this._field.assignedType[index] === STARDUST_TYPE_DISTANT) {
+          this.world.getSystem(AchievementSystem)?.unlock('stargazer');
+        }
       },
       onAttractStart: (_index, x, y, z, speed) => {
         this._attractEvents.push({ x, y, z, speed });
+        this.world.getSystem(HapticsSystem)?.pulse(this._currentHand, HapticPattern.LightTick);
       },
     });
 
@@ -223,9 +358,11 @@ export class StardustSystem extends createSystem({
       spawnPoint: (index) => this._swirlSpawnPoint(index),
       onCapture: (_index, x, y, z, speed) => {
         this._swirlCaptureEvents[slot].push({ x, y, z, speed });
+        this.world.getSystem(HapticsSystem)?.pulse(this._currentHand, HapticPattern.MediumPulse);
       },
       onAttractStart: (_index, x, y, z, speed) => {
         this._swirlAttractEvents[slot].push({ x, y, z, speed });
+        this.world.getSystem(HapticsSystem)?.pulse(this._currentHand, HapticPattern.LightTick);
       },
     });
   }
@@ -235,6 +372,21 @@ export class StardustSystem extends createSystem({
   // is what gives a fresh stardust field every replay loop.
   play(): void {
     super.play();
+    this.resetRun();
+
+    this.camera.getWorldPosition(this._refPos);
+    this.camera.getWorldDirection(this._refForward);
+  }
+
+  // Clears all of this phase's gameplay state. Called from play() and, via
+  // PhaseConfig.reset, when the game returns to the main menu — GameDirector
+  // stop()s this system without play()ing it again, so without this the
+  // finished run's swirl fields would stay alive (and StardustVfxSystem,
+  // which is always-on, would keep re-rendering them as uncollectable
+  // swirls behind the menu and into the next run).
+  resetRun(): void {
+    this._gatherUnlocked = false;
+    this._sinceIntroShown = 0;
     this._field.reset();
     this._hasWon = false;
     this._introDismissed = false;
@@ -247,9 +399,6 @@ export class StardustSystem extends createSystem({
     this._attractEvents.length = 0;
     for (const arr of this._swirlCaptureEvents) arr.length = 0;
     for (const arr of this._swirlAttractEvents) arr.length = 0;
-
-    this.camera.getWorldPosition(this._refPos);
-    this.camera.getWorldDirection(this._refForward);
   }
 
   update(delta: number): void {
@@ -261,9 +410,36 @@ export class StardustSystem extends createSystem({
       this._hand.position.fromArray(posView);
       this._hand.speed = this._scratchVel.length();
       this._hand.seen = true;
+      this._currentHand = entity.getValue(HandAnchor, 'hand') as string;
+    }
+
+    // With notifications turned off in Settings there's no message to wait
+    // for, so gathering is never gated.
+    if (!this._gatherUnlocked && !getGlobals(this.world).notificationsEnabled.peek()) {
+      this._gatherUnlocked = true;
+    }
+    if (!this._gatherUnlocked) {
+      if (this.world.getSystem(NotificationHudSystem)?.hasShown(STARDUST_INTRO_TEXT)) this._sinceIntroShown += delta;
+      if (
+        this._sinceIntroShown >= GATHER_UNLOCK_AFTER_INTRO_SECONDS ||
+        this._elapsed >= GATHER_UNLOCK_FALLBACK_SECONDS
+      ) {
+        this._gatherUnlocked = true;
+      }
+      // A hand the field can't see attracts/captures nothing.
+      else this._hand.seen = false;
     }
 
     this._field.step(this._hand, delta);
+    // Near motes also attach to a bare hand/controller touching them, not
+    // just the comet — see NEAR_TOUCH_RADIUS.
+    if (this._gatherUnlocked) {
+      for (const side of ['left', 'right'] as const) {
+        if (this.input.xr.gamepads[side] === undefined) continue;
+        this.player.gripSpaces[side].getWorldPosition(this._scratchTouchPos);
+        this._field.touchCapture(this._scratchTouchPos, NEAR_TOUCH_RADIUS, 0);
+      }
+    }
     for (const field of this._swirlFields) {
       field?.step(this._hand, delta);
     }
@@ -289,53 +465,6 @@ export class StardustSystem extends createSystem({
         this._buildSwirlField(slot);
       }
     }
-
-    const allRevealed = this._swirlRevealed.every(Boolean);
-    if (allRevealed && !this._hasWon) {
-      this._finaleElapsed += delta;
-      let totalCaptured = 0;
-      for (const field of this._swirlFields) {
-        totalCaptured += field?.totalCaptured ?? 0;
-      }
-      const combinedFraction = totalCaptured / (SWIRL_COUNT * SWIRL_POINT_COUNT);
-      if (combinedFraction >= FINALE_TRIGGER_FRACTION || this._finaleElapsed >= FINALE_EXTRA_SECONDS) {
-        this._hasWon = true;
-        // A "you gathered enough" success cue, distinct from 'full-sweep'
-        // below — that achievement only unlocks on a literal 100% capture,
-        // so a normal (70%+) win otherwise played no sound at all.
-        this.world.getSystem(AchievementSystem)?.playSuccessChime();
-        const notifications = this.world.getSystem(NotificationHudSystem);
-        const lastIndex = STARDUST_WIN_SEQUENCE.length - 1;
-        STARDUST_WIN_SEQUENCE.forEach((entry, i) => {
-          // Only the last message's onComplete flips phaseComplete — it fires
-          // once that message has actually finished its own on-screen fade-
-          // out, whatever else (e.g. Stardust's own still-playing intro
-          // blurb) was already queued ahead of it. A hand-rolled duration
-          // estimate can't know that, and previously let phaseComplete flip
-          // — and GameDirector transition to Pebbles — before the win
-          // sequence had actually been shown at all.
-          const onComplete =
-            i === lastIndex
-              ? () => {
-                  // Checked here, not at the FINALE_TRIGGER_FRACTION(0.7)
-                  // threshold above — gathering keeps running the whole time
-                  // this win-sequence notification plays out (see this
-                  // update()'s own field.step() calls, unguarded by
-                  // _hasWon), so a player who keeps sweeping during those
-                  // ~9-13s can still reach every last mote before the phase
-                  // actually ends.
-                  let finalCaptured = 0;
-                  for (const field of this._swirlFields) finalCaptured += field?.totalCaptured ?? 0;
-                  if (finalCaptured >= SWIRL_COUNT * SWIRL_POINT_COUNT) {
-                    this.world.getSystem(AchievementSystem)?.unlock('full-sweep');
-                  }
-                  getGlobals(this.world).phaseComplete.value = true;
-                }
-              : undefined;
-          notifications?.notify(entry.text, entry.holdSeconds, 0, undefined, onComplete);
-        });
-      }
-    }
   }
 
   // Read by StardustVfxSystem to swap the pickup/catch sound to the
@@ -345,6 +474,68 @@ export class StardustSystem extends createSystem({
   isSwirling(): boolean {
     return this._swirlRevealed[0];
   }
+  // 0-1 readiness for the Continue button (see PhaseConfig.continue). Unlike
+  // other phases there's no progress threshold: the button is ready the
+  // moment it appears, which is when the notification introducing it
+  // (CONTINUE_INTRO_TEXT) first shows.
+  getContinueReadiness01(): number {
+    return this.world.getSystem(NotificationHudSystem)?.hasShown(CONTINUE_INTRO_TEXT) ? 1 : 0;
+  }
+
+  // The phase's ending: the "you have so much stardust" win-sequence
+  // notifications, then (once the last one has faded out) phaseComplete.
+  // Triggered by the Continue button (continueNow) or the phase timeout
+  // (onTimeout) — gathering/swirling no longer ends the phase by itself.
+  // Idempotent via _hasWon.
+  private _startWinSequence(): void {
+    if (this._hasWon) return;
+    this._hasWon = true;
+    // A "you gathered enough" success cue, distinct from 'full-sweep' below —
+    // that achievement only unlocks on a literal 100% capture.
+    this.world.getSystem(AchievementSystem)?.playSuccessChime();
+    const notifications = this.world.getSystem(NotificationHudSystem);
+    // Drop whatever intro blurbs are still queued/showing so the sequence
+    // plays right away instead of behind them.
+    notifications?.clearQueue();
+    const lastIndex = STARDUST_WIN_SEQUENCE.length - 1;
+    STARDUST_WIN_SEQUENCE.forEach((entry, i) => {
+      // Only the last message's onComplete flips phaseComplete — it fires
+      // once that message has actually finished its own on-screen fade-out.
+      const onComplete =
+        i === lastIndex
+          ? () => {
+              // Gathering keeps running while the sequence plays (see
+              // update()'s field.step() calls), so a player who keeps
+              // sweeping can still reach every last mote before it ends.
+              let finalCaptured = 0;
+              for (const field of this._swirlFields) finalCaptured += field?.totalCaptured ?? 0;
+              if (finalCaptured >= SWIRL_COUNT * SWIRL_POINT_COUNT) {
+                this.world.getSystem(AchievementSystem)?.unlock('full-sweep');
+              }
+              // Guarded: by now a dev jump / menu return may have moved on,
+              // and this would flip the NEXT phase's completion flag.
+              if (getGlobals(this.world).gamePhase.peek() === Phase.Stardust) {
+                getGlobals(this.world).phaseComplete.value = true;
+              }
+            }
+          : undefined;
+      notifications?.notify(entry.text, entry.holdSeconds, 0, undefined, onComplete);
+    });
+  }
+
+  // Continue button pressed — play the win sequence, then move on.
+  continueNow(): void {
+    this._startWinSequence();
+  }
+
+  // GameDirector's timeout for this phase: play the win sequence before
+  // moving on instead of cutting straight to Pebbles (see
+  // PhaseConfig.onTimeout). The phase then ends via phaseComplete above.
+  onTimeout(): boolean {
+    this._startWinSequence();
+    return true;
+  }
+
   // 0-1 overall phase progress for HandProgressHudSystem's wrist bar —
   // gathering toward the swirl reveal threshold fills the first
   // half, the finale (combined capture across all three swirls) fills the
@@ -376,6 +567,18 @@ export class StardustSystem extends createSystem({
   }
   getStates(): Uint8Array {
     return this._field.states;
+  }
+  // STARDUST_TYPE_NEAR/FAR per particle (see stardustSpawnPoint) — read by
+  // StardustVfxSystem to size near motes smaller than far ones.
+  getAssignedTypes(): Uint8Array {
+    return this._field.assignedType;
+  }
+  // Read by StardustVfxSystem to keep a not-yet-activated NEAR mote (see
+  // TRICKLE_IN_SECONDS) visually hidden rather than sitting there inert and
+  // visible — a field trickling in should look empty-then-filling, not
+  // full-but-unresponsive.
+  isActivated(i: number): boolean {
+    return this._field.isActivated(i);
   }
   getCapturedField(): CapturedField {
     return this._field.capturedField;

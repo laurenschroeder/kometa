@@ -10,13 +10,14 @@ import {
   Vector3,
 } from '@iwsdk/core';
 import { getGlobals } from '../../core/globals.js';
-import { VISIT_STARS_TEXT } from '../../core/notification-copy.js';
+import { CONSTELLATIONS_PRE_HINT_TEXT } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { Phase } from '../../core/phase.js';
 import { StarDronePool } from '../../vfx/audio/star-drone-pool.js';
 import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import {
   ANCHOR_SURFACE_OFFSET,
+  CONSTELLATION_REACH_SHIFT,
   placeConstellationAnchorsAroundPlanet,
   sampleSmoothPath,
 } from '../../vfx/geometry/constellation-path.js';
@@ -220,9 +221,16 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     // old 3) — see ConstellationsSystem's own matching comment; this MUST
     // stay in sync with that call site since both need the exact same
     // anchor position.
-    const bakedAnchors = placeConstellationAnchorsAroundPlanet(1, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
+    const planetAnchors = placeConstellationAnchorsAroundPlanet(1, INTERMEDIATE_PLANET_CENTER, INTERMEDIATE_PLANET_RADIUS);
     const center = new Vector3(...INTERMEDIATE_PLANET_CENTER);
-    this._anchorDir = bakedAnchors.map((a) => new Vector3(...a).sub(center).normalize());
+    this._anchorDir = planetAnchors.map((a) => new Vector3(...a).sub(center).normalize());
+    const bakedAnchors = planetAnchors.map(
+      (a): [number, number, number] => [
+        a[0] + CONSTELLATION_REACH_SHIFT[0],
+        a[1] + CONSTELLATION_REACH_SHIFT[1],
+        a[2] + CONSTELLATION_REACH_SHIFT[2],
+      ],
+    );
     this._liveAnchor = bakedAnchors.map(() => new Vector3());
     this._scratchLiveCenter = new Vector3();
 
@@ -281,6 +289,17 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     }
 
     this._buildFieldStars(bakedAnchors[0]);
+
+    // _starMat/_ribbonMat/_fieldStarMat's shaders have never actually been
+    // compiled yet — every mesh above sits invisible (visible = false) until
+    // _applyVisibility/_revealed flips it right as Phase.Constellations
+    // actually starts, alongside "Many years later." Without this, that
+    // first-ever compile happens synchronously at exactly that moment,
+    // which is the stutter reported there. Pre-warming here at build time
+    // (Seeding, well before Constellations is reached) moves that one-time
+    // cost somewhere it can't be felt — same fix already applied to
+    // planet-growth-pool.ts's own plant shader for the same reason.
+    this.world.renderer.compileAsync(this.world.scene, this.world.camera).catch(() => {});
 
     this._audioListener = new AudioListener();
     this.player.head.add(this._audioListener);
@@ -451,6 +470,14 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     if (phase === Phase.Stardust || phase === Phase.Constellations) this._resetAll();
   }
 
+  // Whether the active constellation's stars are actually visible right now
+  // — used by ConstellationsSystem to gate hand-touch/"spied" detection so a
+  // player can't trigger the spied notification while the stars are still
+  // hidden/mid-reveal (see this file's own _revealed/_applyVisibility).
+  isRevealed(): boolean {
+    return this._revealed;
+  }
+
   private _applyVisibility(phase: Phase): void {
     const active = phase === Phase.Constellations && this._revealed;
     const dominant = getGlobals(this.world).dominantPebbleType.peek();
@@ -511,18 +538,17 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     const activePositions = this._starPosAttrs[dominant][activeSlot].array as Float32Array;
     const def = this._constellations.getDefs(dominant)[activeSlot];
 
-    // Gated on BOTH the spin/recede transition having settled AND the "why
-    // not visit those nearby stars" hint (VISIT_STARS_TEXT) actually having
-    // been shown — without the second half, the constellation could start
-    // flashing/connecting the instant the transition finished (typically
-    // well before that hint even reaches the front of the notification
-    // queue), reading as stars just appearing out of nowhere rather than the
-    // game having actually pointed the player at them first.
+    // Gated on BOTH the spin/recede transition having settled AND the
+    // message right before the "why not visit those nearby stars" hint
+    // having finished — the constellation appears first, and the hint
+    // (VISIT_STARS_TEXT) follows a couple of seconds later (see its
+    // delaySeconds in notification-copy.ts), so the hint points at
+    // something already visible.
     if (
       !this._revealed &&
       phase === Phase.Constellations &&
       !this._planetSeeding.isSpinTransitionActive() &&
-      this._notifications.hasShown(VISIT_STARS_TEXT)
+      this._notifications.hasFinished(CONSTELLATIONS_PRE_HINT_TEXT)
     ) {
       this._revealed = true;
       this._applyVisibility(phase);
@@ -609,6 +635,9 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       .copy(this._anchorDir[activeSlot])
       .multiplyScalar(liveRadius + ANCHOR_SURFACE_OFFSET)
       .add(this._scratchLiveCenter);
+    this._liveAnchor[activeSlot].x += CONSTELLATION_REACH_SHIFT[0];
+    this._liveAnchor[activeSlot].y += CONSTELLATION_REACH_SHIFT[1];
+    this._liveAnchor[activeSlot].z += CONSTELLATION_REACH_SHIFT[2];
   }
 
   private _applyLiveOffsets(offsets: Float32Array, attr: BufferAttribute, anchor: Vector3): void {

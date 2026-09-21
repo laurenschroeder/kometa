@@ -173,6 +173,37 @@ export function normalizeGeometryToUnitRadiusFromOrigin(geo: BufferGeometry): vo
   geo.computeBoundingSphere();
 }
 
+// Recenters `geo` on its own bounding-box center (unlike
+// normalizeGeometryToUnitRadius, which scales raw/uncentered positions
+// directly and only reads right if the pack already happens to sit near its
+// own local origin) then scales so its longest bounding-box dimension becomes
+// exactly 1 — for a flat decorative panel (e.g. poke-button.ts's
+// flourish.obj) whose own scene-authored origin carries an arbitrary offset
+// unrelated to its silhouette, and whose aspect ratio (a wide, shallow
+// relief) makes "longest dimension" a more useful unit than
+// normalizeGeometryToUnitRadius's bounding-sphere radius. No-ops on a
+// degenerate zero-size geometry rather than dividing by zero.
+export function centerAndNormalizeGeometryToUnitSize(geo: BufferGeometry): void {
+  geo.computeBoundingBox();
+  const box = geo.boundingBox!;
+  const cx = (box.min.x + box.max.x) / 2;
+  const cy = (box.min.y + box.max.y) / 2;
+  const cz = (box.min.z + box.max.z) / 2;
+  const sizeX = box.max.x - box.min.x;
+  const sizeY = box.max.y - box.min.y;
+  const sizeZ = box.max.z - box.min.z;
+  const maxDim = Math.max(sizeX, sizeY, sizeZ);
+  if (maxDim < 1e-6) return;
+  const scale = 1 / maxDim;
+  const pos = geo.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, (pos.getX(i) - cx) * scale, (pos.getY(i) - cy) * scale, (pos.getZ(i) - cz) * scale);
+  }
+  pos.needsUpdate = true;
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+}
+
 // Shared by every FBX pack authored Z-up (confirmed per-pack by directly
 // parsing the file with FBXLoader and checking bounding boxes: Z consistently
 // the tallest of a mesh's three axes, Y the thinnest) — three.js's own
@@ -201,6 +232,65 @@ export function convertZUpToYUp(geo: BufferGeometry): void {
       const nz = normal.getZ(i);
       normal.setY(i, nz);
       normal.setZ(i, -ny);
+    }
+    normal.needsUpdate = true;
+  }
+}
+
+// Exact inverse of convertZUpToYUp — (x,y,z) -> (x,-z,y), +90° about X
+// instead of -90°. Tried as skull.obj's 'skull' mesh fix after rotateX180
+// read a quarter-turn off in-headset, but that overshot the other direction
+// ("better but now upside down") — see rotateX180's own comment for how that
+// second data point pointed at convertZUpToYUp (-90°) instead, the fix
+// actually in use now. NOT currently used by any caller; kept in case a
+// future asset genuinely needs the +90° direction — verify with an actual
+// in-headset look before reusing it, not bounding-box guesswork.
+export function rotateXPositive90(geo: BufferGeometry): void {
+  const pos = geo.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    pos.setY(i, -z);
+    pos.setZ(i, y);
+  }
+  pos.needsUpdate = true;
+  const normal = geo.getAttribute('normal');
+  if (normal) {
+    for (let i = 0; i < normal.count; i++) {
+      const ny = normal.getY(i);
+      const nz = normal.getZ(i);
+      normal.setY(i, -nz);
+      normal.setZ(i, ny);
+    }
+    normal.needsUpdate = true;
+  }
+}
+
+// 180° about X — (x,y,z) -> (x,-y,-z). The confirmed-correct fix for
+// crownForKing.fbx/tiaraGas.fbx (see earth-situations-vfx-system.ts's
+// loadCrownGeometry/crown-rise.ts's loadTiaraGeometry) — worked out from two
+// in-headset data points: convertZUpToYUp alone (-90° about X) read as
+// tipped forward onto its own face, and raw/unconverted (0°) read as fully
+// upside-down — both are exactly 90° away from 180°, which is the one angle
+// consistent with both reports. Initially assumed to carry over to
+// skull.obj's own 'skull' mesh too (same asset sheet), but that guess turned
+// out wrong in-headset (read a quarter-turn off); rotateXPositive90 (+90°)
+// was tried next and read "better but now upside down" — one more 180° flip
+// on top of +90° lands at -90°, i.e. convertZUpToYUp itself, which is the
+// fix skull.obj actually uses now (see fate-event-vfx-system.ts's own
+// _buildSkulls comment for the full chain).
+export function rotateX180(geo: BufferGeometry): void {
+  const pos = geo.getAttribute('position');
+  for (let i = 0; i < pos.count; i++) {
+    pos.setY(i, -pos.getY(i));
+    pos.setZ(i, -pos.getZ(i));
+  }
+  pos.needsUpdate = true;
+  const normal = geo.getAttribute('normal');
+  if (normal) {
+    for (let i = 0; i < normal.count; i++) {
+      normal.setY(i, -normal.getY(i));
+      normal.setZ(i, -normal.getZ(i));
     }
     normal.needsUpdate = true;
   }

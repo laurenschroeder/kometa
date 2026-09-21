@@ -17,19 +17,19 @@ import { CometTrailSystem } from '../../comet/comet-trail-system.js';
 import { GatherState } from '../../comet/gatherable-field.js';
 import { HandAnchor } from '../../comet/hand-anchor-component.js';
 import { ORGANIC_PALETTE } from '../../vfx/color/color-scheme.js';
-import { loadObjLargestIslands } from '../../vfx/geometry/obj-field-loader.js';
+import { loadFbxMeshesByName } from '../../vfx/geometry/fbx-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { PEBBLE_MESH_SCALE } from '../../vfx/particles/pebble-size.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
+import { PEBBLE_INTRO_LINE_START_SECONDS } from '../../core/notification-copy.js';
 import { PebbleSynth } from '../../vfx/audio/pebble-synth.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import {
   kGasCloudMat,
   kOrganicGlitterMat,
   kSoulIslandMat,
-  PEBBLE_ISLAND_OBJ_GROUPS,
-  PEBBLE_ISLAND_OBJ_MAX_COUNT,
-  PEBBLE_ISLAND_OBJ_URL,
+  PEBBLE_ISLAND_MESH_NAMES,
+  PEBBLE_ISLAND_MESH_URL,
   SOUL_SIZE_MULTIPLIER,
 } from '../../vfx/shaders/pebble-material.js';
 import { PEBBLE_TYPES } from './pebble-type.js';
@@ -37,7 +37,7 @@ import { PebbleWeavingSystem } from './pebble-weaving-system.js';
 
 // PEBBLE_TYPES' own index order — soul dust (0), organic matter (1),
 // volatile gasses (2) — doubles as this system's art-style dispatch key
-// (see _setInstance): soul renders as translucent wiggly OBJ islands,
+// (see _setInstance): soul renders as translucent wiggly islands,
 // organic as a glitter blue/green spectrum body on the same rock shape
 // every pebble used to share, gas as little additive cloud puffs. A
 // pebble's assignedType is fixed for its whole life (GatherableField never
@@ -57,6 +57,12 @@ const TYPE_GAS = 2;
 // so the third call reads as building on the first two, not a repeat.
 const CALL_CHIME_BASE_FREQ = 300;
 const CALL_CHIME_FREQ_STEP = 90;
+// A shorter, quieter version of the same chime plays when that type's intro
+// LINE first fades in (PEBBLE_INTRO_LINE_START_SECONDS), a couple of seconds
+// before its pebbles appear with the full one — foreshadowing it, so the line
+// and the pebbles read as connected.
+const LINE_CUE_GAIN_SCALE = 0.35;
+const LINE_CUE_DECAY_SCALE = 0.3;
 
 const N_ORGANIC_VARIANTS = 6;
 // Only organic-type pebbles use these now (previously shared by all three
@@ -138,7 +144,7 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _organicMeshes!: InstancedMesh[];
   private _organicMeshEntities!: Entity[];
 
-  // Soul (type 0) — primitive-rock placeholder until loadObjLargestIslands
+  // Soul (type 0) — primitive-rock placeholder until loadFbxMeshesByName
   // resolves, then per-island-bucketed wiggly InstancedMeshes.
   private _soulBucket!: Uint8Array; // which mesh in _soulMeshes, meaningful only where type===soul
   private _soulLocalIdx!: Uint16Array;
@@ -174,6 +180,8 @@ export class PebbleFieldVfxSystem extends createSystem({
   // Per-type, whether that type's call chime has already fired this loop —
   // see CALL_CHIME_BASE_FREQ's own comment. Reset on play().
   private _typeCalled!: boolean[];
+  // Same, for the muted line-appears cue — see LINE_CUE_GAIN_SCALE.
+  private _typeLineCued!: boolean[];
   private _scratchCallPos!: Vector3;
 
   init(): void {
@@ -191,6 +199,7 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._pebbleSynth.build(this._audioListener, this.scene);
     this._scratchCapturePos = new Vector3();
     this._typeCalled = new Array(PEBBLE_TYPES.length).fill(false);
+    this._typeLineCued = new Array(PEBBLE_TYPES.length).fill(false);
     this._scratchCallPos = new Vector3();
 
     this._camRight = new Vector3();
@@ -292,82 +301,80 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._soulMeshEntities = [this.world.createTransformEntity(placeholder)];
     this._soulMeshes = [placeholder];
 
-    loadObjLargestIslands(PEBBLE_ISLAND_OBJ_URL, PEBBLE_ISLAND_OBJ_GROUPS, PEBBLE_ISLAND_OBJ_MAX_COUNT).then(
-      (islands) => {
-        if (islands.length === 0) {
-          console.warn(
-            `[PebbleFieldVfxSystem] no mesh islands found under ${PEBBLE_ISLAND_OBJ_GROUPS.join('/')} in '${PEBBLE_ISLAND_OBJ_URL}' — keeping the primitive placeholder soul pebbles.`,
-          );
-          return;
-        }
-        for (const e of this._soulMeshEntities) {
-          // The placeholder's own geometry (a one-off buildOrganicGeometry()
-          // call) isn't shared with anything else, unlike kSoulIslandMat —
-          // dispose it explicitly since e.destroy() alone would leak it
-          // (e.dispose() isn't safe here, it would also free the SHARED
-          // material).
-          (e.object3D as InstancedMesh).geometry.dispose();
-          e.destroy();
-        }
+    loadFbxMeshesByName(PEBBLE_ISLAND_MESH_URL, PEBBLE_ISLAND_MESH_NAMES).then((rawIslands) => {
+      const islands = rawIslands.filter((geo): geo is BufferGeometry => geo !== null);
+      if (islands.length === 0) {
+        console.warn(
+          `[PebbleFieldVfxSystem] none of [${PEBBLE_ISLAND_MESH_NAMES.join(', ')}] found in '${PEBBLE_ISLAND_MESH_URL}' — keeping the primitive placeholder soul pebbles.`,
+        );
+        return;
+      }
+      for (const e of this._soulMeshEntities) {
+        // The placeholder's own geometry (a one-off buildOrganicGeometry()
+        // call) isn't shared with anything else, unlike kSoulIslandMat —
+        // dispose it explicitly since e.destroy() alone would leak it
+        // (e.dispose() isn't safe here, it would also free the SHARED
+        // material).
+        (e.object3D as InstancedMesh).geometry.dispose();
+        e.destroy();
+      }
 
-        const assignedIsland = new Uint8Array(n);
-        const bucketCounts = new Array<number>(islands.length).fill(0);
+      const assignedIsland = new Uint8Array(n);
+      const bucketCounts = new Array<number>(islands.length).fill(0);
+      for (let i = 0; i < n; i++) {
+        if (this._assignedType[i] !== TYPE_SOUL) continue;
+        const islandIdx = Math.floor(Math.random() * islands.length);
+        assignedIsland[i] = islandIdx;
+        this._soulBucket[i] = islandIdx;
+        this._soulLocalIdx[i] = bucketCounts[islandIdx]++;
+        // loadFbxMeshesByName already normalizes every geometry to exactly
+        // unit bounding-sphere radius (see its own comment) — unlike the old
+        // OBJ islands' arbitrary native scan scale, no runtime
+        // boundingSphere-based correction is needed here.
+        this._soulExtraScale[i] = 1;
+      }
+
+      this._soulMeshes = [];
+      this._soulMeshEntities = [];
+      for (let islandIdx = 0; islandIdx < islands.length; islandIdx++) {
+        const count = bucketCounts[islandIdx];
+        if (count === 0) continue;
+        // .clone() — loadFbxMeshesByName caches and returns these SAME
+        // geometry objects to every caller requesting this (url, names,
+        // normalize) key (pebble-comet-presentation-system.ts asks for the
+        // same set); setAttribute() below mutates the geometry directly, so
+        // without cloning, each caller's per-instance buffers would stomp on
+        // every other caller's already-built mesh sharing that object.
+        const geo = islands[islandIdx].clone();
+        geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(count).fill(0.7), 1));
+        geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(count * 3), 3));
+        geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(count), 1));
+        const islandPhaseAttr = new InstancedBufferAttribute(new Float32Array(count), 1);
+        geo.setAttribute('aWigglePhase', islandPhaseAttr);
         for (let i = 0; i < n; i++) {
-          if (this._assignedType[i] !== TYPE_SOUL) continue;
-          const islandIdx = Math.floor(Math.random() * islands.length);
-          assignedIsland[i] = islandIdx;
-          this._soulBucket[i] = islandIdx;
-          this._soulLocalIdx[i] = bucketCounts[islandIdx]++;
-          const islandRadius =
-            islands[islandIdx].boundingSphere && islands[islandIdx].boundingSphere!.radius > 1e-6
-              ? islands[islandIdx].boundingSphere!.radius
-              : 1;
-          this._soulExtraScale[i] = 1 / islandRadius;
+          if (this._assignedType[i] !== TYPE_SOUL || assignedIsland[i] !== islandIdx) continue;
+          islandPhaseAttr.setX(this._soulLocalIdx[i], this._soulWigglePhase[i]);
         }
-
-        this._soulMeshes = [];
-        this._soulMeshEntities = [];
-        for (let islandIdx = 0; islandIdx < islands.length; islandIdx++) {
-          const count = bucketCounts[islandIdx];
-          if (count === 0) continue;
-          // .clone() — loadObjLargestIslands caches and returns these SAME
-          // geometry objects to every caller requesting this (url, groups,
-          // count) key (art-test's own "8 islands" variants, Fate Events'
-          // placeholder crowd, and this system all ask for the same 8
-          // islands); setAttribute() below mutates the geometry directly, so
-          // without cloning, each caller's per-instance buffers would stomp
-          // on every other caller's already-built mesh sharing that object.
-          const geo = islands[islandIdx].clone();
-          geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(count).fill(0.7), 1));
-          geo.setAttribute('aTint', new InstancedBufferAttribute(new Float32Array(count * 3), 3));
-          geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(count), 1));
-          const islandPhaseAttr = new InstancedBufferAttribute(new Float32Array(count), 1);
-          geo.setAttribute('aWigglePhase', islandPhaseAttr);
-          for (let i = 0; i < n; i++) {
-            if (this._assignedType[i] !== TYPE_SOUL || assignedIsland[i] !== islandIdx) continue;
-            islandPhaseAttr.setX(this._soulLocalIdx[i], this._soulWigglePhase[i]);
-          }
-          const mesh = new InstancedMesh(geo, kSoulIslandMat, count);
-          mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-          mesh.frustumCulled = false;
-          zeroInstanceMatrices(mesh, count);
-          // This async callback can resolve while the system is stopped (the
-          // OBJ takes real time to load — the common case is it resolves
-          // long before the player ever reaches Pebbles phase). A fresh Mesh
-          // defaults to visible=true, and update() — which is what writes
-          // each instance's real small-scale transform via setMatrixAt — only
-          // runs while playing, so without this the mesh would sit fully
-          // visible at its raw native OBJ scale and identity (origin)
-          // transform until the next play()/stop() cycle: giant geometry in
-          // the background of every phase before the player's first Pebbles
-          // visit. play()/stop() already keep everything in _soulMeshes in
-          // sync going forward — this just seeds the correct initial state.
-          mesh.visible = !this.isPaused;
-          this._soulMeshEntities.push(this.world.createTransformEntity(mesh));
-          this._soulMeshes.push(mesh);
-        }
-      },
-    );
+        const mesh = new InstancedMesh(geo, kSoulIslandMat, count);
+        mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+        mesh.frustumCulled = false;
+        zeroInstanceMatrices(mesh, count);
+        // This async callback can resolve while the system is stopped (the
+        // FBX takes real time to load — the common case is it resolves long
+        // before the player ever reaches Pebbles phase). A fresh Mesh
+        // defaults to visible=true, and update() — which is what writes
+        // each instance's real small-scale transform via setMatrixAt — only
+        // runs while playing, so without this the mesh would sit fully
+        // visible at its raw native scale and identity (origin) transform
+        // until the next play()/stop() cycle: giant geometry in the
+        // background of every phase before the player's first Pebbles
+        // visit. play()/stop() already keep everything in _soulMeshes in
+        // sync going forward — this just seeds the correct initial state.
+        mesh.visible = !this.isPaused;
+        this._soulMeshEntities.push(this.world.createTransformEntity(mesh));
+        this._soulMeshes.push(mesh);
+      }
+    });
   }
 
   private _buildGas(n: number): void {
@@ -421,6 +428,7 @@ export class PebbleFieldVfxSystem extends createSystem({
     for (const mesh of this._soulMeshes) mesh.visible = true;
     this._gasPoints.visible = true;
     this._typeCalled.fill(false);
+    this._typeLineCued.fill(false);
   }
 
   stop(): void {
@@ -442,6 +450,18 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._states = this._pebbles.getStates();
     for (let t = 0; t < this._typeReveal.length; t++) {
       this._typeReveal[t] = this._pebbles.getTypeRevealProgress(t);
+      // Line 0 is the generic "Three paths" line; type t is line t + 1.
+      if (!this._typeLineCued[t] && this._pebbles.getElapsed() >= PEBBLE_INTRO_LINE_START_SECONDS[t + 1]) {
+        this._typeLineCued[t] = true;
+        this._pebbles.getCallOrigin(t, this._scratchCallPos);
+        playPayoffChime(
+          this._audioListener,
+          this.scene,
+          this._scratchCallPos,
+          CALL_CHIME_BASE_FREQ + t * CALL_CHIME_FREQ_STEP,
+          { gainScale: LINE_CUE_GAIN_SCALE, decayScale: LINE_CUE_DECAY_SCALE },
+        );
+      }
       if (!this._typeCalled[t] && this._typeReveal[t] > 0) {
         this._typeCalled[t] = true;
         this._pebbles.getCallOrigin(t, this._scratchCallPos);

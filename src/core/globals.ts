@@ -39,6 +39,10 @@ export interface KometaGlobals {
   // relevant if the body becomes visible before Chapter 2 ever completes
   // (e.g. a dev-menu jump straight to Seeding).
   pebbleTypeWeights: Signal<[number, number, number]>;
+  // Raw per-type capture counts from Pebbles (same order/timing as the
+  // weights above) — PebbleCometPresentationSystem shows exactly this many
+  // pebbles on the tail (capped by its slot count), not a fixed-size tail.
+  pebbleTypeCounts: Signal<[number, number, number]>;
   // Flips true the instant EarthSituationsVfxSystem's crown-rise mechanic
   // (see crown-rise.ts) attaches to the comet's head — ConstellationsSystem
   // polls this instead of a flat hold timer so celestialSymbolMessage/
@@ -93,6 +97,8 @@ export function bootstrapGlobals(world: World): KometaGlobals {
   globals.dominantPebbleType = signal(0);
   globals.celestialSymbol = signal(null);
   globals.pebbleTypeWeights = signal([1 / 3, 1 / 3, 1 / 3]);
+  // Default (dev jump past Pebbles): a full, evenly split tail.
+  globals.pebbleTypeCounts = signal([87, 87, 86]);
   globals.crownLanded = signal(false);
   globals.kingDeathComplete = signal(false);
   globals.passthroughEnabled = signal(false);

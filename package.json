@@ -11,7 +11,8 @@
     "reference:status": "iwsdk reference status",
     "reference:warmup": "iwsdk reference warmup",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "content-budget": "node scripts/content-budget/check.mjs"
   },
   "dependencies": {
     "@iwsdk/core": "0.4.1",

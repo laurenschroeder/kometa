@@ -24,7 +24,7 @@ import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { makePixelCrtMaterial } from '../../vfx/shaders/pixel-crt-material.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
 import { hexToRgb, STARDUST, SWIRL_GOLD } from '../../vfx/color/color-scheme.js';
-import { StardustSystem } from './stardust-system.js';
+import { STARDUST_TYPE_DISTANT, STARDUST_TYPE_NEAR, StardustSystem } from './stardust-system.js';
 
 // The swirl finale's collectible gold gather-field (see
 // StardustSystem.getSwirlField()) — a warm gold, distinct from the cream
@@ -47,6 +47,21 @@ const SWIRL_ARRIVE_FREQ_STEP = 70;
 export const STARDUST_COLOR: [number, number, number] = hexToRgb(STARDUST);
 const AMBIENT_SIZE = 0.05;
 const CAPTURED_SIZE = 0.035;
+// StardustSystem.STARDUST_TYPE_NEAR motes (its own NEAR_COUNT/NEAR_RADIUS_*)
+// render smaller than the far field, both while ambient and once captured —
+// the visual half of "close and easy," alongside that system's own
+// NEAR_EASE_MULTIPLIER on attract/capture radius.
+const NEAR_AMBIENT_SIZE = 0.028;
+const NEAR_CAPTURED_SIZE = 0.02;
+// Distant motes (STARDUST_TYPE_DISTANT — see stardust-system.ts's own
+// comment) sit 3-4.5m out, where ordinary AMBIENT_SIZE would be nearly
+// imperceptible at that range — bigger than even the ordinary far motes so
+// they still read as "something out there worth investigating" rather than
+// vanishing into the background.
+const DISTANT_AMBIENT_SIZE = 0.09;
+// Seconds a freshly captured mote takes to fly from where it was touched into
+// its spot on the comet's tail, instead of snapping there instantly.
+const CAPTURE_FLIGHT_SECONDS = 0.45;
 
 // Phases where stardust already collected onto the comet's trail should stay
 // visible — Stardust (where it's gathered) through Seeding (where
@@ -91,6 +106,9 @@ export class StardustVfxSystem extends createSystem({
   private _capturedPositions!: Float32Array;
   private _capturedBright!: Float32Array;
   private _capturedPhase!: Float32Array;
+  private _capturedSize!: Float32Array;
+  // 0-1 per particle: progress of its capture flight toward the tail.
+  private _flight!: Float32Array;
   private _capturedGeo!: BufferGeometry;
   private _capturedEntity!: Entity;
   private _capturedPoints!: Points;
@@ -179,11 +197,16 @@ export class StardustVfxSystem extends createSystem({
     this._capturedPositions = new Float32Array(n * 3);
     this._capturedBright = new Float32Array(n);
     this._capturedPhase = new Float32Array(n);
+    // Per-slot, not a fixed fill — near-type motes (see stardust-system.ts's
+    // STARDUST_TYPE_NEAR) need to keep rendering smaller once captured too;
+    // set alongside position/bright/phase in _placeCapturedPool each frame.
+    this._capturedSize = new Float32Array(n);
+    this._flight = new Float32Array(n);
     this._capturedGeo = new BufferGeometry();
     const capturedPosAttr = new BufferAttribute(this._capturedPositions, 3);
     capturedPosAttr.setUsage(DynamicDrawUsage);
     this._capturedGeo.setAttribute('position', capturedPosAttr);
-    this._capturedGeo.setAttribute('aSize', new BufferAttribute(new Float32Array(n).fill(CAPTURED_SIZE), 1));
+    this._capturedGeo.setAttribute('aSize', new BufferAttribute(this._capturedSize, 1));
     this._capturedGeo.setAttribute('aBright', new BufferAttribute(this._capturedBright, 1));
     this._capturedGeo.setAttribute('aPhase', new BufferAttribute(this._capturedPhase, 1));
     this._capturedGeo.setDrawRange(0, 0);
@@ -236,8 +259,17 @@ export class StardustVfxSystem extends createSystem({
     this._material.uniforms.uTime.value = time;
 
     const states = this._stardust.getStates();
+    const types = this._stardust.getAssignedTypes();
     for (let i = 0; i < states.length; i++) {
-      this._ambientSize[i] = states[i] === GatherState.Captured ? 0 : AMBIENT_SIZE;
+      const baseSize =
+        types[i] === STARDUST_TYPE_NEAR
+          ? NEAR_AMBIENT_SIZE
+          : types[i] === STARDUST_TYPE_DISTANT
+            ? DISTANT_AMBIENT_SIZE
+            : AMBIENT_SIZE;
+      const activated = this._stardust.isActivated(i);
+      this._ambientSize[i] = states[i] === GatherState.Captured || !activated ? 0 : baseSize;
+      if (states[i] !== GatherState.Captured) this._flight[i] = 0;
     }
     (this._ambientGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
     (this._ambientGeo.getAttribute('aSize') as BufferAttribute).needsUpdate = true;
@@ -253,7 +285,7 @@ export class StardustVfxSystem extends createSystem({
       if (!trail) continue;
       const samples = entity.getValue(CometTrail, 'samples') as number;
       const stride = entity.getValue(CometTrail, 'stride') as number;
-      this._placeCapturedPool(trail, samples, stride);
+      this._placeCapturedPool(trail, samples, stride, delta);
       for (let slot = 0; slot < this._swirlCount; slot++) {
         this._placeSwirlCapturedPool(slot, trail, samples, stride);
       }
@@ -426,9 +458,13 @@ export class StardustVfxSystem extends createSystem({
     this._swirlCapturedEntity[slot].dispose();
   }
 
-  private _placeCapturedPool(trail: Float32Array, samples: number, stride: number): void {
+  private _placeCapturedPool(trail: Float32Array, samples: number, stride: number, delta: number): void {
     const indices = this._stardust.getCapturedIndices();
     const field = this._stardust.getCapturedField();
+    const types = this._stardust.getAssignedTypes();
+    // Captured particles never move in the field's own position array, so it
+    // still holds the spot where each was touched — the flight's start point.
+    const startPositions = this._stardust.getPositions();
 
     for (let slot = 0; slot < indices.length; slot++) {
       const i = indices[slot];
@@ -445,16 +481,23 @@ export class StardustVfxSystem extends createSystem({
         this._camFwd,
         this._scratchOffset,
       );
-      this._capturedPositions[slot * 3] = this._scratchOffset.x;
-      this._capturedPositions[slot * 3 + 1] = this._scratchOffset.y;
-      this._capturedPositions[slot * 3 + 2] = this._scratchOffset.z;
+      const f = Math.min(1, this._flight[i] + delta / CAPTURE_FLIGHT_SECONDS);
+      this._flight[i] = f;
+      const e = 1 - (1 - f) * (1 - f) * (1 - f);
+      this._capturedPositions[slot * 3] = startPositions[i * 3] + (this._scratchOffset.x - startPositions[i * 3]) * e;
+      this._capturedPositions[slot * 3 + 1] =
+        startPositions[i * 3 + 1] + (this._scratchOffset.y - startPositions[i * 3 + 1]) * e;
+      this._capturedPositions[slot * 3 + 2] =
+        startPositions[i * 3 + 2] + (this._scratchOffset.z - startPositions[i * 3 + 2]) * e;
       this._capturedBright[slot] = this._moteBright[i];
       this._capturedPhase[slot] = this._motePhase[i];
+      this._capturedSize[slot] = types[i] === STARDUST_TYPE_NEAR ? NEAR_CAPTURED_SIZE : CAPTURED_SIZE;
     }
 
     this._capturedGeo.setDrawRange(0, indices.length);
     (this._capturedGeo.getAttribute('position') as BufferAttribute).needsUpdate = true;
     (this._capturedGeo.getAttribute('aBright') as BufferAttribute).needsUpdate = true;
     (this._capturedGeo.getAttribute('aPhase') as BufferAttribute).needsUpdate = true;
+    (this._capturedGeo.getAttribute('aSize') as BufferAttribute).needsUpdate = true;
   }
 }

@@ -63,6 +63,30 @@ export interface GatherableFieldParams {
   // Omit for fields that don't need typed/directional particles (e.g.
   // Stardust) — assignedType stays unused zeros and costs nothing extra.
   spawnPoint?: (index: number) => { dir: Vector3; radiusT: number; type: number };
+  // Optional: per-particle multiplier (index-aligned, count entries) applied
+  // to BOTH attractRadius and captureDistance in _stepParticle — lets a
+  // subset of particles (e.g. Stardust's near/small motes, see
+  // stardust-system.ts's NEAR_EASE_MULTIPLIER) be more forgiving to grab
+  // than the field's base tuning, without needing a whole separate
+  // GatherableField/render-pool just for that subset. Omit for fields where
+  // every particle uses the same tuning (treated as 1 everywhere).
+  easeMultiplier?: Float32Array;
+  // Optional: per-particle flag (index-aligned, count entries; nonzero =
+  // touch-only). A touch-only particle isn't pulled toward the hand from a
+  // distance at all — it only attaches once the hand is within its capture
+  // distance, i.e. you have to physically touch it. Omit for fields where
+  // every particle is pulled from attractRadius as usual.
+  touchOnly?: Uint8Array;
+  // Optional: per-particle seconds (index-aligned, count entries) before a
+  // particle can be attracted/captured at all — before its delay elapses it
+  // stays Free and un-pullable regardless of hand proximity, same as if the
+  // hand were out of range. Lets a field "trickle in" over the first few
+  // seconds instead of every particle being grabbable from frame one (e.g.
+  // Stardust's NEAR motes, spawned close enough that a resting hand could
+  // otherwise scoop up dozens the instant the phase starts). Omit for
+  // fields where every particle is attractable immediately (treated as 0
+  // everywhere).
+  activationDelay?: Float32Array;
   // Optional: fired the instant a particle crosses captureDistance, with its
   // world position and the hand's speed at that moment (e.g. for a per-catch
   // sound/VFX cue). Omit for fields that don't need this.
@@ -113,6 +137,11 @@ export class GatherableField {
   private readonly _velX: Float32Array;
   private readonly _velY: Float32Array;
   private readonly _velZ: Float32Array;
+  // Wall-clock seconds since construction/reset() — compared against
+  // params.activationDelay in _stepParticle. Only advanced by step(), so a
+  // field never even ticked (e.g. a phase not yet active) doesn't count
+  // toward any particle's delay.
+  private _elapsed = 0;
 
   constructor(params: GatherableFieldParams) {
     this._params = params;
@@ -158,6 +187,16 @@ export class GatherableField {
     return this._params.count;
   }
 
+  // Whether particle i's activationDelay (if any) has elapsed yet — a
+  // renderer can use this to visually fade/hide a not-yet-activatable
+  // particle (see StardustVfxSystem's own use), rather than showing the
+  // whole field sitting there inert while activation quietly ticks toward
+  // 0 in the background. Always true for a field with no activationDelay.
+  isActivated(i: number): boolean {
+    const delay = this._params.activationDelay ? this._params.activationDelay[i] : 0;
+    return this._elapsed >= delay;
+  }
+
   get capturedField(): CapturedField {
     return { t: this.capturedT, dx: this.capturedDX, dy: this.capturedDY, dz: this.capturedDZ };
   }
@@ -187,6 +226,7 @@ export class GatherableField {
     this._velX.fill(0);
     this._velY.fill(0);
     this._velZ.fill(0);
+    this._elapsed = 0;
     if (!this._params.spawnPoint) {
       this.assignedType.fill(0);
     }
@@ -213,10 +253,32 @@ export class GatherableField {
     this._recenteredTo.set(x, y, z);
   }
 
+  // Captures every touch-only particle (see GatherableFieldParams.touchOnly)
+  // that's within `radius` of `pos` — for a bare hand/controller touching
+  // motes directly, separate from the comet-driven step() above. Call after
+  // step() each frame with the physical hand position(s).
+  touchCapture(pos: Vector3, radius: number, speed: number): void {
+    const touchOnly = this._params.touchOnly;
+    if (!touchOnly) return;
+    const r2 = radius * radius;
+    for (let i = 0; i < this._params.count; i++) {
+      if (!touchOnly[i] || this.states[i] === GatherState.Captured) continue;
+      const activationDelay = this._params.activationDelay ? this._params.activationDelay[i] : 0;
+      if (this._elapsed < activationDelay) continue;
+      const dx = this.positions[i * 3] - pos.x;
+      const dy = this.positions[i * 3 + 1] - pos.y;
+      const dz = this.positions[i * 3 + 2] - pos.z;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      this._capture(i);
+      this._params.onCapture?.(i, this.positions[i * 3], this.positions[i * 3 + 1], this.positions[i * 3 + 2], speed);
+    }
+  }
+
   // Single comet, single hand input — see comet/comet-handoff-system.ts for
   // how "which hand" is decided; this class doesn't care, it just gets
   // wherever the comet currently is.
   step(hand: GatherHandInput, delta: number): void {
+    this._elapsed += delta;
     for (let i = 0; i < this._params.count; i++) {
       if (this.states[i] === GatherState.Captured) continue;
       this._stepParticle(i, hand, delta);
@@ -225,9 +287,17 @@ export class GatherableField {
 
   private _stepParticle(i: number, hand: GatherHandInput, delta: number): void {
     const p = this._params;
+    const ease = p.easeMultiplier ? p.easeMultiplier[i] : 1;
+    const captureDistance = p.captureDistance * ease;
+    const attractRadius = p.touchOnly?.[i] ? captureDistance : p.attractRadius * ease;
     this._scratchPos.set(this.positions[i * 3], this.positions[i * 3 + 1], this.positions[i * 3 + 2]);
 
-    if (!hand.seen || this._scratchPos.distanceToSquared(hand.position) > p.attractRadius * p.attractRadius) {
+    const activationDelay = p.activationDelay ? p.activationDelay[i] : 0;
+    if (
+      this._elapsed < activationDelay ||
+      !hand.seen ||
+      this._scratchPos.distanceToSquared(hand.position) > attractRadius * attractRadius
+    ) {
       this.states[i] = GatherState.Free;
       this._coast(i, delta);
       return;
@@ -264,7 +334,7 @@ export class GatherableField {
       this._velZ[i] = (this._scratchPos.z - oldZ) * invDelta;
     }
 
-    if (this._scratchPos.distanceToSquared(hand.position) <= p.captureDistance * p.captureDistance) {
+    if (this._scratchPos.distanceToSquared(hand.position) <= captureDistance * captureDistance) {
       this._capture(i);
       p.onCapture?.(i, this.positions[i * 3], this.positions[i * 3 + 1], this.positions[i * 3 + 2], hand.speed);
     }

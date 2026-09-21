@@ -1,5 +1,6 @@
 import {
   AudioListener,
+  BufferGeometry,
   Group,
   Mesh,
   PositionalAudio,
@@ -8,6 +9,7 @@ import {
   Vector3,
   World,
 } from '@iwsdk/core';
+import { loadFbxAllMeshes, normalizeGeometryToUnitRadiusFromOrigin, rotateX180 } from '../geometry/fbx-field-loader.js';
 import { buildOrganicGeometry } from '../geometry/organic-rock-geometry.js';
 import { makeToonRimFlatMaterial } from '../shaders/toon-rim-material.js';
 
@@ -65,6 +67,46 @@ const CROWN_HEAD_OFFSET_Y = 0.045;
 const SPIN_SPEED_EMERGE = 0.4; // rad/s
 const SPIN_SPEED_TRAVEL = 1.1;
 const SPIN_SPEED_ATTACHED = 0.15;
+
+// Real modeled tiara — the single piece worn as the whole crown once it
+// resolves (see _rebuildSpikes' real-geometry branch), replacing the
+// procedural many-spike ring below, which stays only as the instant-visible
+// fallback for the (normally brief) window before this finishes loading.
+// One shared model for every comet/pebble type for now ("I'll eventually
+// have one for each type of comet" per the author) — trigger()'s own color
+// param still retints it per dominant type via the same shared material.
+// Its own origin is deliberately placed by the artist at the bottom-front-
+// center, same convention (and same normalizeGeometryToUnitRadiusFromOrigin
+// treatment) as earth-situations-vfx-system.ts's own King's crown
+// (crownForKing.fbx) — that origin lands exactly at RING_TARGET's own
+// (0,0,0) below (dead center, no ring offset needed for a single complete
+// piece). Despite its baked FBX node transform looking like every other
+// Z-up pack in this project, it reads correctly raw/unconverted in-headset,
+// same as the King's crown (see loadCrownGeometry's own comment) — no axis
+// correction applied here either.
+const TIARA_FBX_URL = '/medium/tiaraGas.fbx';
+// Its own max-distance-from-origin, scaled to this many meters — same order
+// of magnitude as earth-situations-vfx-system.ts's own CROWN_FBX_RADIUS.
+// Starting guess; tune visually in-headset.
+const TIARA_RADIUS = 0.075;
+
+let tiaraGeometryPromise: Promise<BufferGeometry | null> | null = null;
+// Loads (and caches) tiaraGas.fbx's own single mesh, normalized around its
+// own artist-placed origin. rotateX180 — same asset lineage/history as
+// earth-situations-vfx-system.ts's King's crown (crownForKing.fbx), and the
+// same confirmed-correct 180°-about-X fix (see that function's own comment
+// for how it was pinned down). Resolves null (never rejects) if the file
+// isn't available yet, same graceful-degradation idiom every other FBX
+// consumer in this codebase uses.
+function loadTiaraGeometry(): Promise<BufferGeometry | null> {
+  if (!tiaraGeometryPromise) {
+    tiaraGeometryPromise = loadFbxAllMeshes(TIARA_FBX_URL, 1, (geo) => {
+      rotateX180(geo);
+      normalizeGeometryToUnitRadiusFromOrigin(geo);
+    }).then((geos) => geos[0] ?? null);
+  }
+  return tiaraGeometryPromise;
+}
 
 // Same additive-partials-plus-reverb-bus idiom GhostRise's own shimmer/
 // settle audio uses, stretched to cover this mechanic's much longer
@@ -174,6 +216,11 @@ export class CrownRise {
   private _convolver!: ConvolverNode;
   private _shimmer: ShimmerVoice | null = null;
   private _shimmerElapsed = 0;
+  // Set once loadTiaraGeometry() resolves — see _rebuildSpikes' real-geometry
+  // branch. Kicked off here (build() runs once, early, well before any
+  // constellation can actually complete) rather than at trigger() time, so
+  // it's essentially always already resolved by the time it's needed.
+  private _tiaraGeometry: BufferGeometry | null = null;
 
   build(world: World, listener: AudioListener, scene: Scene): void {
     this._group = new Group();
@@ -185,6 +232,10 @@ export class CrownRise {
     // pattern _buildDogs/_buildKing already use, shared across every
     // spike Mesh rather than one material per spike.
     this._material = makeToonRimFlatMaterial([1, 1, 1]);
+
+    loadTiaraGeometry().then((geo) => {
+      this._tiaraGeometry = geo;
+    });
 
     this._listener = listener;
     this._scene = scene;
@@ -214,9 +265,24 @@ export class CrownRise {
   private _rebuildSpikes(): void {
     for (const spike of this._spikes) {
       this._group.remove(spike.mesh);
-      spike.mesh.geometry.dispose();
+      // Never dispose the shared, cached tiara geometry (see
+      // _tiaraGeometry/loadTiaraGeometry) — only each fallback spike's own
+      // one-off buildOrganicGeometry() output.
+      if (spike.mesh.geometry !== this._tiaraGeometry) spike.mesh.geometry.dispose();
     }
     this._spikes = [];
+
+    if (this._tiaraGeometry) {
+      const mesh = new Mesh(this._tiaraGeometry, this._material);
+      const scatterStart = new Vector3(0, -EMERGE_DROP_HEIGHT, 0);
+      const ringTarget = new Vector3(0, 0, 0);
+      const targetScale = new Vector3(TIARA_RADIUS, TIARA_RADIUS, TIARA_RADIUS);
+      mesh.position.copy(scatterStart);
+      mesh.scale.setScalar(0); // grows in during Emerging, see _updateEmerging
+      this._group.add(mesh);
+      this._spikes.push({ mesh, scatterStart, ringTarget, targetScale, staggerOffset: 0 });
+      return;
+    }
 
     const count = SPIKE_COUNT_MIN + Math.floor(Math.random() * (SPIKE_COUNT_MAX - SPIKE_COUNT_MIN + 1));
     for (let i = 0; i < count; i++) {
@@ -239,6 +305,10 @@ export class CrownRise {
       this._spikes.push({ mesh, scatterStart, ringTarget, targetScale, staggerOffset: i / count });
     }
   }
+
+  // Optional: the crown hovers just above the comet at the end of Traveling
+  // until this returns true, then lands.
+  landGate: (() => boolean) | null = null;
 
   update(delta: number, cometPosition: Vector3): void {
     if (this._state === CrownState.Idle) return;
@@ -278,7 +348,7 @@ export class CrownRise {
       this._group.position.copy(this._scratchPos);
       this._group.rotation.y += SPIN_SPEED_TRAVEL * delta;
       if (this._shimmer) this._shimmer.sound.position.copy(this._group.position);
-      if (this._t >= 1) {
+      if (this._t >= 1 && (!this.landGate || this.landGate())) {
         this._travelFrom.copy(this._group.position);
         this._state = CrownState.Landing;
         this._t = 0;

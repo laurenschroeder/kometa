@@ -99,6 +99,50 @@ export function scatterOnSphereCapEven(
   return { positions, normals };
 }
 
+// Two-row variant of scatterSemicircleAroundPoint: the same away-from-player
+// half ring, but `count` slots are spread evenly across it and alternate
+// between an inner (front, `frontAngleRad`) and outer (back, `backAngleRad`)
+// ring, so neighbours along the arc always sit in different rows — a zigzag
+// that keeps anyone from standing directly behind someone else from the
+// player's view, and spaces people out so one sweep can't touch them all.
+export function scatterTwoRowSemicircle(
+  count: number,
+  center: Vector3,
+  radius: number,
+  towardDir: Vector3,
+  frontAngleRad: number,
+  backAngleRad: number,
+): SphereCapScatter {
+  const positions = new Float32Array(count * 3);
+  const normals = new Float32Array(count * 3);
+
+  const worldUp = new Vector3(0, 1, 0);
+  const arbitrary = Math.abs(towardDir.y) < 0.9 ? worldUp : new Vector3(1, 0, 0);
+  const tangentAway = new Vector3().crossVectors(towardDir, arbitrary).normalize();
+  const tangentSide = new Vector3().crossVectors(towardDir, tangentAway).normalize();
+
+  const half = Math.PI / 2;
+  const dir = new Vector3();
+  for (let i = 0; i < count; i++) {
+    const phi = count > 1 ? -half + (Math.PI * i) / (count - 1) : 0;
+    const arcAngleRad = i % 2 === 0 ? frontAngleRad : backAngleRad;
+
+    dir.copy(towardDir).multiplyScalar(Math.cos(arcAngleRad));
+    dir.addScaledVector(tangentAway, Math.cos(phi) * Math.sin(arcAngleRad));
+    dir.addScaledVector(tangentSide, Math.sin(phi) * Math.sin(arcAngleRad));
+    dir.normalize();
+
+    normals[i * 3] = dir.x;
+    normals[i * 3 + 1] = dir.y;
+    normals[i * 3 + 2] = dir.z;
+    positions[i * 3] = center.x + dir.x * radius;
+    positions[i * 3 + 1] = center.y + dir.y * radius;
+    positions[i * 3 + 2] = center.z + dir.z * radius;
+  }
+
+  return { positions, normals };
+}
+
 // Places `count` points along a semicircular ARC at a fixed angular radius
 // from `towardDir` (e.g. a King standing dead-center of the cap — see
 // fate-event-system.ts's KING_EXCLUSION_HALF_ANGLE) instead of filling the

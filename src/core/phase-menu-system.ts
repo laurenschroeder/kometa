@@ -13,6 +13,7 @@ import {
 } from '@iwsdk/core';
 import type { UIKit, UIKitDocument } from '@iwsdk/core';
 import { resetAchievements } from './achievement-store.js';
+import { ART_TEST_ENABLED } from '../phases/art-test/art-test-system.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
@@ -47,7 +48,9 @@ const TAPS_TO_TOGGLE = 5;
 // automatically unreachable once pushed live without needing to remember to
 // flip anything by hand. The panel/systems below are still fully built
 // either way, just never opened while this is false.
-const DEV_MENU_ENABLED = import.meta.env.DEV;
+// Disabled — flip back to `import.meta.env.DEV` to re-enable the dev menu in
+// dev builds.
+const DEV_MENU_ENABLED = false;
 
 const PHASE_BUTTONS: [buttonId: string, phase: Phase][] = [
   ['btn-stardust', Phase.Stardust],
@@ -136,6 +139,14 @@ export class PhaseMenuSystem extends createSystem({
         const doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
         for (const [buttonId, phase] of PHASE_BUTTONS) {
           const button = doc.getElementById(buttonId);
+          if (phase === Phase.ArtTest && !ART_TEST_ENABLED) {
+            // See ART_TEST_ENABLED's own comment — the phase itself isn't
+            // even registered while this is off, so jumpToPhase(ArtTest)
+            // would silently no-op; hide the button rather than leave a
+            // dead end in the dev menu.
+            button?.setProperties({ display: 'none' });
+            continue;
+          }
           button?.addEventListener('click', () => {
             // Clear first — see clearQueue()'s own comment — so the jump's
             // own phase-entry blurb (fired synchronously inside

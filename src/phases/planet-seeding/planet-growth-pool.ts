@@ -1,5 +1,14 @@
-import { BufferGeometry, Entity, Group, InstancedBufferAttribute, InstancedMesh, Matrix4, Vector3, World } from '@iwsdk/core';
-import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
+import {
+  BufferGeometry,
+  DynamicDrawUsage,
+  Entity,
+  InstancedBufferAttribute,
+  InstancedMesh,
+  Matrix4,
+  Quaternion,
+  Vector3,
+  World,
+} from '@iwsdk/core';
 import {
   convertZUpToYUp,
   loadFbxAllMeshes,
@@ -98,18 +107,6 @@ const GROWTH_FINAL_SCALE = GROWTH_TARGET_SCALE * 2.5;
 // read as a quick snap rather than a plant actually growing.
 const GROWTH_EASE_RATE = 0.5; // 1/s exponential ease, same idiom as _easeCoverage
 
-// activate() fires all at once (see its own comment), but swapping every
-// activated slot's placeholder rock geometry for its real plant mesh is NOT
-// cheap — each swap clones a BufferGeometry (attribute arrays included) and
-// disposes the old one's GPU resources. Doing all of that synchronously for
-// every colored cell in one call (up to POOL_SIZE, currently 80) in the same
-// frame startSpinTransition() fires is exactly the kind of one-frame CPU/GPU
-// burst that reads as a hitch right as the spin begins — spreading it across
-// a handful of frames instead is imperceptible (every slot still shows SOME
-// plant immediately, just the rock placeholder for a few extra frames) and
-// keeps any single frame's swap work small.
-const GEOMETRY_SWAPS_PER_FRAME = 6;
-
 // Local-space push straight out along the landing normal, on top of sitting
 // exactly on the unit sphere. Now that the planet mesh itself is a perfect
 // sphere (see planet-seeding-vfx-system.ts's _buildPlanet — ampMin/ampMax
@@ -121,12 +118,12 @@ const GEOMETRY_SWAPS_PER_FRAME = 6;
 const SURFACE_LIFT = 1.002;
 
 // PLANT_DITHER_MAT (below) is an INSTANCED shader — its vertex stage reads
-// the built-in `instanceMatrix` attribute, which three.js only ever provides
-// on an actual InstancedMesh, never a plain Mesh. Each sprout therefore gets
-// its own single-instance (count=1) InstancedMesh rather than a plain Mesh —
-// the parent Group still carries the sprout's real position/scale/rotation
-// exactly as before, so the instance's own matrix is just a fixed identity,
-// set once and left alone.
+// the built-in `instanceMatrix` attribute plus per-instance aBright/aTint/
+// aTinted. Every plant of one species therefore shares ONE InstancedMesh (see
+// PlantBucket) — one draw call per species instead of one per grid cell —
+// with each cell's own position/orientation/growth scale baked into its
+// instance matrix each frame (see PlanetGrowthPool.update) and its own color
+// in aTint.
 const SPROUT_BRIGHT = 0.7; // same base brightness OrganicScene's own instances use
 // Same fixed 5-color set every other production organic surface draws from
 // (see color-scheme.ts's ORGANIC_PALETTE) — setPlantInstanceAttrs picks one
@@ -204,6 +201,17 @@ export function loadFlowerPlantGeos(): Promise<BufferGeometry[]> {
 // surface, which is why they weren't reading as attached to the ground even
 // once grounded on the (wrong) axis.
 
+// One species' shared draw call — see the PLANT_DITHER_MAT comment above.
+// `used` instances are live (mesh.count), the rest of the capacity is never
+// drawn. aTint/aBright/aTinted live on the (per-bucket cloned) geometry.
+interface PlantBucket {
+  mesh: InstancedMesh;
+  capacity: number;
+  used: number;
+  tint: Float32Array;
+  tintAttr: InstancedBufferAttribute;
+}
+
 // Seeding's own "cause life to grow" flourish — no longer Organic-only (the
 // bees in earth-situations-vfx-system.ts are the one thing still unique to
 // that class). Seeding itself only colors the grid (see
@@ -222,9 +230,13 @@ export function loadFlowerPlantGeos(): Promise<BufferGeometry[]> {
 // PlanetSeedingVfxSystem, same idiom as HeartBurstPool. Fixed slots
 // (one per CELL_DIRS cell), no free-list needed: activate() only ever runs
 // once per play(), and reset() zeroes every slot together on a fresh loop.
+//
+// Rendering: every plant species (one per mesh in each FBX pack) is a single
+// InstancedMesh (a PlantBucket) parented under the planet, so the whole grid
+// costs one draw call per species (~13 at most) rather than one per cell.
+// A slot is just an instance index into its bucket; its growth is written
+// into that instance's matrix each frame.
 export class PlanetGrowthPool {
-  private _groups: Group[] = [];
-  private _meshes: InstancedMesh[] = [];
   private _scale = new Float32Array(POOL_SIZE);
   // 1 once activate() has claimed this slot (its cell was colored) —
   // distinct from _scale reaching 0, since a just-activated sprout also has
@@ -237,105 +249,118 @@ export class PlanetGrowthPool {
   // room for a person instead of popping out instantly.
   private _excluded = new Uint8Array(POOL_SIZE);
 
-  // Populated once each pack's own load resolves — empty until then, in
-  // which case activate() just leaves that slot on its rock placeholder.
-  private _desertGeos: BufferGeometry[] = [];
-  private _flowerGeos: BufferGeometry[] = [];
+  // Fixed per-slot placement, derived once from CELL_DIRS in build().
+  private _slotPos: Vector3[] = [];
+  private _slotQuat: Quaternion[] = [];
+  // Per-slot fixed hemisphere — ORGANIC_MATTER_TYPE's own art-style split
+  // (see this file's top comment); Soul/Gas ignore this and commit the whole
+  // grid to one pack instead (see activate()).
+  private _slotIsFlower: boolean[] = [];
+
+  // Populated once each pack's own load resolves — empty until then.
+  private _desertBuckets: PlantBucket[] = [];
+  private _flowerBuckets: PlantBucket[] = [];
   // Round-robin cursor per pack so consecutive activations on the same
   // hemisphere cycle through all its species rather than repeating one.
   private _desertNext = 0;
   private _flowerNext = 0;
-  // Per-slot fixed hemisphere — ORGANIC_MATTER_TYPE's own art-style split
-  // (see build()'s own comment); Soul/Gas ignore this and commit the whole
-  // grid to one pack instead (see activate()). Index-aligned with
-  // _groups/_meshes/CELL_DIRS.
-  private _slotIsFlower: boolean[] = [];
-  // Slots activate() has claimed but whose real-mesh geometry swap hasn't
-  // happened yet — see GEOMETRY_SWAPS_PER_FRAME. FIFO, drained a few at a
-  // time by update().
-  private _pendingSwaps: { slot: number; useFlowers: boolean; color: [number, number, number] }[] = [];
+  // Which bucket/instance each slot landed in (null until _assign succeeds).
+  private _slotBucket: (PlantBucket | null)[] = new Array(POOL_SIZE).fill(null);
+  private _slotInstance = new Int16Array(POOL_SIZE);
+  // Slots activate() claimed whose pack hadn't resolved yet — assigned as
+  // soon as it does (very unlikely this late; both start loading in build()).
+  private _unassigned: { slot: number; useFlowers: boolean; color: [number, number, number] }[] = [];
 
   private _upAxis = new Vector3(0, 1, 0);
-  private _identity = new Matrix4();
+  private _scaleVec = new Vector3();
+  private _matrix = new Matrix4();
 
   // parentEntity is the planet's own transform entity (see
-  // PlanetSeedingVfxSystem's _planetEntity) — sprouts are parented under it
-  // (not the world root) so they inherit the planet's live position for
-  // free as it eases around following the player's head, rather than each
-  // needing its own per-frame re-derivation from a stale spawn-time
-  // snapshot. Position/orientation are fixed from CELL_DIRS and set once
-  // here — every slot lands on its grid point immediately, whether or not
-  // it's ever actually activated.
+  // PlanetSeedingVfxSystem's _planetEntity) — the buckets are parented under
+  // it (not the world root) so they inherit the planet's live position/
+  // rotation for free as it eases around, rather than each needing its own
+  // per-frame re-derivation. Slot position/orientation are fixed from
+  // CELL_DIRS.
   build(world: World, parentEntity: Entity): void {
     const dir = new Vector3();
     for (let i = 0; i < POOL_SIZE; i++) {
-      const group = new Group();
-      const geo = buildOrganicGeometry();
-      const placeholderColor = PLANT_PALETTE[Math.floor(Math.random() * PLANT_PALETTE.length)];
-      stampPlantAttrs(geo, placeholderColor);
-      const mesh = new InstancedMesh(geo, PLANT_DITHER_MAT, 1);
-      mesh.setMatrixAt(0, this._identity);
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.frustumCulled = false;
-      group.add(mesh);
-      group.name = `growth-sprout-${i}`;
-      group.scale.setScalar(0);
-      group.visible = false;
-
       dir.set(CELL_DIRS[i * 3], CELL_DIRS[i * 3 + 1], CELL_DIRS[i * 3 + 2]);
       // Unit-direction local offset (NOT multiplied by PLANET_RADIUS) — the
       // parent mesh's own PLANET_RADIUS scale already stretches this out to
       // sit exactly on the surface; multiplying here too would compound and
       // land it deep inside the planet instead. SURFACE_LIFT nudges it out a
       // little further still — see its own comment.
-      group.position.set(dir.x * SURFACE_LIFT, dir.y * SURFACE_LIFT, dir.z * SURFACE_LIFT);
-      group.quaternion.setFromUnitVectors(this._upAxis, dir);
+      this._slotPos.push(new Vector3(dir.x * SURFACE_LIFT, dir.y * SURFACE_LIFT, dir.z * SURFACE_LIFT));
+      this._slotQuat.push(new Quaternion().setFromUnitVectors(this._upAxis, dir));
       this._slotIsFlower.push(dir.x < 0);
-
-      this._groups.push(group);
-      this._meshes.push(mesh);
-      world.createTransformEntity(group, parentEntity);
     }
 
-    // Both packs now trust their own authored origin instead of re-deriving
-    // a ground point from the bounding box: normalizeGeometryToUnitRadius
+    // Both packs trust their own authored origin instead of re-deriving a
+    // ground point from the bounding box: normalizeGeometryToUnitRadius
     // FromOrigin scales AROUND local (0,0,0) and leaves it exactly where the
     // artist put it. convertZUpToYUp is still needed for both (verified: Z
     // is the tallest axis on every mesh in each pack, same as every other
     // FBX in the project).
     loadDesertPlantGeos().then((geos) => {
-      this._desertGeos = geos;
+      this._desertBuckets = this._buildBuckets(world, parentEntity, geos);
+      this._assignPending();
     });
     loadFlowerPlantGeos().then((geos) => {
-      this._flowerGeos = geos;
+      this._flowerBuckets = this._buildBuckets(world, parentEntity, geos);
+      this._assignPending();
     });
+  }
+
+  private _buildBuckets(world: World, parentEntity: Entity, geos: BufferGeometry[]): PlantBucket[] {
+    const capacity = Math.ceil(POOL_SIZE / Math.max(1, geos.length));
+    const buckets: PlantBucket[] = [];
+    for (const source of geos) {
+      // .clone() — loadConvertedPlantPack's cache hands every caller the
+      // SAME geometry objects (fate-events/seed-blossom.ts shares them), and
+      // the per-instance attributes set below live ON the geometry.
+      const geo = source.clone();
+      const tint = new Float32Array(capacity * 3);
+      const tintAttr = new InstancedBufferAttribute(tint, 3);
+      tintAttr.setUsage(DynamicDrawUsage);
+      geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(capacity).fill(SPROUT_BRIGHT), 1));
+      geo.setAttribute('aTint', tintAttr);
+      geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(capacity).fill(1), 1));
+
+      const mesh = new InstancedMesh(geo, PLANT_DITHER_MAT, capacity);
+      mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+      mesh.count = 0;
+      mesh.frustumCulled = false;
+      mesh.name = 'growth-plants';
+      mesh.visible = false;
+      world.createTransformEntity(mesh, parentEntity);
+      buckets.push({ mesh, capacity, used: 0, tint, tintAttr });
+    }
 
     // PLANT_DITHER_MAT's shader has never actually been compiled yet at this
-    // point — every slot above sits invisible (group.visible = false), and
-    // three.js only compiles a material's program on its first real draw.
-    // Without this, that first-ever compile happens the instant activate()
-    // makes a slot visible (right as Leg A's spin starts, alongside "Many
-    // years later" — see GEOMETRY_SWAPS_PER_FRAME's own comment on the
-    // OTHER hitch already fixed at that same moment), which can itself
-    // stall a frame by several/tens of ms. Pre-warming it here, at build()
-    // time (game boot, minutes before Constellations is ever reached),
-    // moves that one-time cost somewhere it can't be felt. Fire-and-forget —
-    // nothing here depends on it finishing before build() returns.
+    // point, and three.js only compiles a material's program on its first
+    // real draw — which would stall a frame right as Leg A's spin starts
+    // (see activate()). compile() traverses only visible objects
+    // synchronously, so flipping visibility on for that one call and
+    // straight back off warms the program at load time instead, minutes
+    // before Constellations is ever reached.
+    for (const b of buckets) b.mesh.visible = true;
     world.renderer.compileAsync(world.scene, world.camera).catch(() => {});
+    for (const b of buckets) b.mesh.visible = b.used > 0;
+    return buckets;
   }
 
   // Fired once by PlanetSeedingVfxSystem.startSpinTransition() — grows a
   // real plant at every cell PlanetSeedingSystem actually colored during
   // Seeding (coloredMask/cellColors, straight from its own getColoredMask()/
   // getCellColors()), in that cell's own fixed color, and leaves every
-  // uncolored cell's slot alone (hidden, scale 0, forever — Seeding's win
-  // condition already requires the WHOLE grid colored, see
-  // COVERAGE_WIN_FRACTION, so in normal play this should mean every slot;
-  // this still degrades gracefully for a dev-menu skip that jumped into
-  // Seeding and left early with gaps). `dominant` (globals.dominantPebbleType,
-  // read by the caller) decides which pack(s) supply the mesh — see this
-  // file's own top comment: Organic keeps the hemisphere-split art
-  // comparison, Soul/Gas each commit the whole grid to a single pack.
+  // uncolored cell's slot alone (never drawn — Seeding's win condition
+  // already requires the WHOLE grid colored, see COVERAGE_WIN_FRACTION, so in
+  // normal play this should mean every slot; this still degrades gracefully
+  // for a dev-menu skip that jumped into Seeding and left early with gaps).
+  // `dominant` (globals.dominantPebbleType, read by the caller) decides which
+  // pack(s) supply the mesh — see this file's own top comment: Organic keeps
+  // the hemisphere-split art comparison, Soul/Gas each commit the whole grid
+  // to a single pack.
   activate(coloredMask: Uint8Array, cellColors: Float32Array, dominant: number): void {
     for (let slot = 0; slot < POOL_SIZE; slot++) {
       if (!coloredMask[slot]) continue;
@@ -347,55 +372,47 @@ export class PlanetGrowthPool {
         cellColors[slot * 3 + 1],
         cellColors[slot * 3 + 2],
       ];
-
-      // Whichever pack has actually resolved by now supplies the mesh — see
-      // GEOMETRY_SWAPS_PER_FRAME's own comment on why the actual clone/
-      // dispose is deferred to update() instead of happening right here.
       const useFlowers =
         dominant === SOUL_DUST_TYPE ? true : dominant === VOLATILE_GASSES_TYPE ? false : this._slotIsFlower[slot];
-      const pack = useFlowers ? this._flowerGeos : this._desertGeos;
-      if (pack.length > 0) {
-        // group.visible deliberately NOT set here — see _drainPendingSwaps,
-        // which flips it on in lockstep with the same GEOMETRY_SWAPS_PER_FRAME
-        // throttle instead of all ~POOL_SIZE slots turning visible (each its
-        // own InstancedMesh draw call, doubled under stereo XR rendering) in
-        // this one synchronous frame. That used to undo the whole point of
-        // throttling the geometry swap: the swap was spread out, but the
-        // sudden burst of new draw calls right as the spin starts wasn't.
-        this._pendingSwaps.push({ slot, useFlowers, color });
-      } else {
-        // Pack not resolved yet (very unlikely this late — both start
-        // loading back in build(), well before Seeding even begins) — at
-        // least recolor the placeholder rock in place so it matches its
-        // splat instead of showing its random build()-time color. Cheap
-        // (no clone/dispose), so no need to defer this branch or its
-        // visibility.
-        stampPlantAttrs(this._meshes[slot].geometry as BufferGeometry, color);
-        this._groups[slot].visible = true;
-      }
+      if (!this._assign(slot, useFlowers, color)) this._unassigned.push({ slot, useFlowers, color });
     }
   }
 
-  // Drains a few queued real-mesh swaps (see _pendingSwaps/
-  // GEOMETRY_SWAPS_PER_FRAME) every frame instead of all at once.
-  private _drainPendingSwaps(): void {
-    for (let n = 0; n < GEOMETRY_SWAPS_PER_FRAME && this._pendingSwaps.length > 0; n++) {
-      const { slot, useFlowers, color } = this._pendingSwaps.shift()!;
-      const pack = useFlowers ? this._flowerGeos : this._desertGeos;
-      // Each slot gets its own clone (never the cache's shared instance
-      // directly) since PLANT_DITHER_MAT's per-instance attributes live ON
-      // the geometry — two InstancedMeshes sharing one geometry object
-      // would also share (and clobber) each other's aTint/aBright/aTinted.
-      const idx = useFlowers ? this._flowerNext++ : this._desertNext++;
-      const geo = pack[idx % pack.length].clone();
-      stampPlantAttrs(geo, color);
-      this._meshes[slot].geometry.dispose();
-      this._meshes[slot].geometry = geo;
-      // Reveal exactly when the real mesh lands — see activate()'s own
-      // comment on why this moved here instead of all slots going visible
-      // together the instant activate() runs.
-      this._groups[slot].visible = true;
-    }
+  // Claims the next instance in the next-in-rotation bucket of the wanted
+  // pack. Returns false if that pack hasn't resolved yet. The instance
+  // starts at scale 0 (matrix written here) so nothing pops in before
+  // update() eases it up.
+  private _assign(slot: number, useFlowers: boolean, color: readonly [number, number, number]): boolean {
+    const buckets = useFlowers ? this._flowerBuckets : this._desertBuckets;
+    if (buckets.length === 0) return false;
+    const idx = useFlowers ? this._flowerNext++ : this._desertNext++;
+    const bucket = buckets[idx % buckets.length];
+    if (bucket.used >= bucket.capacity) return true; // full (shouldn't happen) — skip this plant
+    const inst = bucket.used++;
+    bucket.tint[inst * 3] = color[0];
+    bucket.tint[inst * 3 + 1] = color[1];
+    bucket.tint[inst * 3 + 2] = color[2];
+    bucket.tintAttr.needsUpdate = true;
+    this._slotBucket[slot] = bucket;
+    this._slotInstance[slot] = inst;
+    bucket.mesh.count = bucket.used;
+    bucket.mesh.visible = true;
+    this._writeInstance(slot, 0);
+    return true;
+  }
+
+  private _assignPending(): void {
+    if (this._unassigned.length === 0) return;
+    this._unassigned = this._unassigned.filter((u) => !this._assign(u.slot, u.useFlowers, u.color));
+  }
+
+  private _writeInstance(slot: number, scale: number): void {
+    const bucket = this._slotBucket[slot];
+    if (!bucket) return;
+    this._scaleVec.setScalar(scale);
+    this._matrix.compose(this._slotPos[slot], this._slotQuat[slot], this._scaleVec);
+    bucket.mesh.setMatrixAt(this._slotInstance[slot], this._matrix);
+    bucket.mesh.instanceMatrix.needsUpdate = true;
   }
 
   // spinProgress is PlanetSpinTransition.getProgress() (0 before Leg A,
@@ -404,15 +421,17 @@ export class PlanetGrowthPool {
   // GROWTH_FINAL_SCALE, so every plant grows in lockstep with the spin, the
   // same beat the planet's own splats/moons already get.
   update(delta: number, spinProgress: number): void {
-    this._drainPendingSwaps();
     const pull = 1 - Math.exp(-GROWTH_EASE_RATE * delta);
     const grownTarget = GROWTH_TARGET_SCALE + (GROWTH_FINAL_SCALE - GROWTH_TARGET_SCALE) * spinProgress;
     for (let i = 0; i < POOL_SIZE; i++) {
       if (!this._spawned[i]) continue;
       const target = this._excluded[i] ? 0 : grownTarget;
-      if (this._scale[i] === target) continue;
-      this._scale[i] += (target - this._scale[i]) * pull;
-      this._groups[i].scale.setScalar(this._scale[i]);
+      const diff = target - this._scale[i];
+      if (diff === 0) continue;
+      // Snap once close enough — the exponential ease otherwise never lands
+      // exactly, which would rewrite (and re-upload) every matrix forever.
+      this._scale[i] = Math.abs(diff) < 1e-6 ? target : this._scale[i] + diff * pull;
+      this._writeInstance(i, this._scale[i]);
     }
   }
 
@@ -424,15 +443,17 @@ export class PlanetGrowthPool {
   }
 
   reset(): void {
-    for (let i = 0; i < POOL_SIZE; i++) {
-      this._groups[i].visible = false;
-      this._groups[i].scale.setScalar(0);
-      this._scale[i] = 0;
+    for (const b of [...this._desertBuckets, ...this._flowerBuckets]) {
+      b.used = 0;
+      b.mesh.count = 0;
+      b.mesh.visible = false;
     }
+    this._slotBucket.fill(null);
+    this._scale.fill(0);
     this._spawned.fill(0);
     this._excluded.fill(0);
     this._desertNext = 0;
     this._flowerNext = 0;
-    this._pendingSwaps.length = 0;
+    this._unassigned.length = 0;
   }
 }
