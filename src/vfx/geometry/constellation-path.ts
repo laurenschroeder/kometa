@@ -1,5 +1,5 @@
 import { Vector3 } from '@iwsdk/core';
-import { CONSTELLATION_SHAPES } from '../../phases/constellations/constellation-shapes.js';
+import { CONSTELLATION_SHAPES, CONSTELLATION_STROKES } from '../../phases/constellations/constellation-shapes.js';
 import { ConstellationDef } from '../../phases/constellations/constellation-set.js';
 
 // N anchors arced around the big Fate Events planet, offset outward from
@@ -14,18 +14,23 @@ import { ConstellationDef } from '../../phases/constellations/constellation-set.
 // planet's own radius changes (see ConstellationsVfxSystem's live tracking
 // through the Seeding->Constellations->FateEvents transitions) can reuse the
 // exact same offset rather than duplicating this number.
-export const ANCHOR_SURFACE_OFFSET = 0.3; // clears most constellations' spreadRadius (max 0.58) from the surface
+// Pulled in from 0.3 to sit closer to the planet — the plane is perpendicular
+// to the anchor direction, so every star stays at least this far from the
+// surface regardless of spread.
+export const ANCHOR_SURFACE_OFFSET = 0.22;
 const ANCHOR_AZIMUTH_SPREAD_DEG = 30; // -30/0/+30 around the planet's vertical axis
 // Tilted up from "straight at the player" ([0,0,1]) rather than level with
 // it — this is what keeps the arc above the people cap instead of sharing it.
-const ANCHOR_ELEVATION: [number, number, number] = [0, 0.55, 1];
+// Was [0, 0.55, 1] (~29° back-tilt); [0, 0.2, 1] (~11°) stands the
+// constellation plane much closer to upright, facing the player.
+const ANCHOR_ELEVATION: [number, number, number] = [0, 0.2, 1];
 
 // Constellations sit at the planet's (far) intermediate distance, but stars
 // must be touchable from where the player stands — every constellation anchor
 // is shifted this far toward the player (+z), on top of the planet-relative
 // placement above. Applied by both ConstellationsSystem (baked layouts) and
 // ConstellationsVfxSystem (baked offsets + live anchor) so they stay in sync.
-export const CONSTELLATION_REACH_SHIFT: readonly [number, number, number] = [0, -.1, 0.35];
+export const CONSTELLATION_REACH_SHIFT: readonly [number, number, number] = [0, 0.22, 0.28]; // was [0, -.1, 0.35] — raised, and less pulled toward the player (closer to the planet)
 
 function rotateAroundY(base: [number, number, number], degrees: number): Vector3 {
   const rad = (degrees * Math.PI) / 180;
@@ -126,7 +131,40 @@ export interface ConstellationLayout {
 // own Y axis only — width is untouched). Tall shapes like Throne put stars
 // too far above/below arm's reach to comfortably gather; this keeps the
 // silhouette recognizable while pulling the top/bottom stars in.
-const VERTICAL_SCALE = 0.5;
+const DEFAULT_VERTICAL_SCALE = 0.5;
+
+// Unit right/up axes of the constellation plane perpendicular to awayDir.
+function planeBasis(awayDir: Vector3): { right: Vector3; up: Vector3 } {
+  const worldUp = new Vector3(0, 1, 0);
+  let right = new Vector3().crossVectors(worldUp, awayDir);
+  if (right.lengthSq() < 1e-6) right = new Vector3().crossVectors(new Vector3(1, 0, 0), awayDir);
+  right.normalize();
+  const up = new Vector3().crossVectors(awayDir, right).normalize();
+  return { right, up };
+}
+
+// The smooth outline strokes (CONSTELLATION_STROKES) for def, as anchor-
+// relative 3D offsets — one Float32Array (xyz triples) per stroke — embedded
+// in the same plane/scale as generateConstellationLayout's stars. null when
+// the shape has no authored strokes (caller falls back to a curve through
+// the stars).
+export function generateConstellationStrokeOffsets(def: ConstellationDef, awayDir: Vector3): Float32Array[] | null {
+  const strokes = CONSTELLATION_STROKES[def.name];
+  if (!strokes) return null;
+  const { right, up } = planeBasis(awayDir);
+  const vScale = def.verticalScale ?? DEFAULT_VERTICAL_SCALE;
+  return strokes.map((stroke) => {
+    const out = new Float32Array(stroke.length * 3);
+    for (let i = 0; i < stroke.length; i++) {
+      const x = stroke[i][0];
+      const y = stroke[i][1] * vScale;
+      out[i * 3] = (right.x * x + up.x * y) * def.spreadRadius;
+      out[i * 3 + 1] = (right.y * x + up.y * y) * def.spreadRadius;
+      out[i * 3 + 2] = (right.z * x + up.z * y) * def.spreadRadius;
+    }
+    return out;
+  });
+}
 
 export function generateConstellationLayout(
   def: ConstellationDef,
@@ -144,17 +182,14 @@ export function generateConstellationLayout(
     );
   }
 
-  const worldUp = new Vector3(0, 1, 0);
-  let right = new Vector3().crossVectors(worldUp, awayDir);
-  if (right.lengthSq() < 1e-6) right = new Vector3().crossVectors(new Vector3(1, 0, 0), awayDir);
-  right.normalize();
-  const up = new Vector3().crossVectors(awayDir, right).normalize();
+  const { right, up } = planeBasis(awayDir);
+  const vScale = def.verticalScale ?? DEFAULT_VERTICAL_SCALE;
 
   const [ax, ay, az] = anchor;
   const starPositions = new Float32Array(shape.length * 3);
   for (let i = 0; i < shape.length; i++) {
     const [x, yRaw] = shape[i];
-    const y = yRaw * VERTICAL_SCALE;
+    const y = yRaw * vScale;
     starPositions[i * 3] = ax + (right.x * x + up.x * y) * def.spreadRadius;
     starPositions[i * 3 + 1] = ay + (right.y * x + up.y * y) * def.spreadRadius;
     starPositions[i * 3 + 2] = az + (right.z * x + up.z * y) * def.spreadRadius;

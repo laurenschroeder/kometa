@@ -20,6 +20,7 @@ import { HapticsSystem } from './core/haptics-system.js';
 import { ContinueButtonSystem } from './core/continue-button-system.js';
 import { HandProgressHudSystem } from './core/hand-progress-hud-system.js';
 import { HudText, NotificationHudSystem } from './core/notification-hud-system.js';
+import { finishLoadingScreen, startLoadingScreen } from './core/loading-screen.js';
 import { GameButton, GameSpan } from './core/ui-font-kit.js';
 import { Phase } from './core/phase.js';
 import { PhaseMenuSystem } from './core/phase-menu-system.js';
@@ -44,32 +45,18 @@ import { PlanetSeedingVfxSystem } from './phases/planet-seeding/planet-seeding-v
 import { StardustSystem } from './phases/stardust/stardust-system.js';
 import { StardustVfxSystem } from './phases/stardust/stardust-vfx-system.js';
 
+startLoadingScreen();
+
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
   assets: {
-    // Comet head decal, keyed by dominant pebble type (see PEBBLE_TYPES) —
-    // replaces the old beepchat/smile expression-cycling face.
+    // Comet head decal, keyed by dominant pebble type (see PEBBLE_TYPES).
     faceSoul: { url: '/textures/faceSoul.png', type: AssetType.Texture },
     faceOrganic: { url: '/textures/faceOrganic.png', type: AssetType.Texture },
     faceGas: { url: '/textures/faceGas.png', type: AssetType.Texture },
-    // Also used by Fate Events' marker sprites (MARKER_TEXTURE_KEY), so it
-    // stays in the manifest even with Art Test off.
-    starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture },
-    // Art Test only (see ArtTestVfxSystem) — billboarded pebble/star sprite
-    // treatments. Skipped entirely while ART_TEST_ENABLED is off: ~5 MB of
-    // download and tens of MB of GPU texture memory nothing else reads.
-    // PNGs (transparent) — swapped from the original opaque JPEGs so the
-    // billboard shader's alpha channel actually has something to read.
+    // Art Test only (see ArtTestVfxSystem) — skipped entirely while
+    // ART_TEST_ENABLED is off.
     ...(ART_TEST_ENABLED
-      ? {
-          fabricGhost1: { url: '/textures/fabricghosts1.png', type: AssetType.Texture },
-          fabricGhost2: { url: '/textures/fabricghosts2.png', type: AssetType.Texture },
-          fabricGhost3: { url: '/textures/fabricghosts3.png', type: AssetType.Texture },
-          fabricGhost4: { url: '/textures/fabricghosts4.png', type: AssetType.Texture },
-          rocksPhotos: { url: '/textures/rocks.png', type: AssetType.Texture },
-          rocksPhotosBW: { url: '/textures/rockBW.png', type: AssetType.Texture },
-          glitter1: { url: '/textures/glitter.png', type: AssetType.Texture },
-          glitter2: { url: '/textures/glitter2.png', type: AssetType.Texture },
-        }
+      ? { starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture } }
       : {}),
     backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
     // Quill-authored, baked vertex-cache animation exported as glTF morph
@@ -116,10 +103,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // NonImmersive on its own if the session ends, which re-shows it — no
   // separate session-end handling needed here.
   const enterVrButton = document.getElementById('enter-vr-button') as HTMLButtonElement | null;
+  // Title panel shown above it in the browser window (see index.html).
+  const kometaPanel = document.getElementById('kometa-panel') as HTMLDivElement | null;
   if (enterVrButton) {
     enterVrButton.addEventListener('click', () => launchXR(world));
     world.visibilityState.subscribe((state) => {
-      enterVrButton.style.display = state === VisibilityState.NonImmersive ? 'block' : 'none';
+      const nonImmersive = state === VisibilityState.NonImmersive;
+      enterVrButton.style.display = nonImmersive ? 'block' : 'none';
+      if (kometaPanel) kometaPanel.style.display = nonImmersive ? 'flex' : 'none';
     });
   }
 
@@ -344,7 +335,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // Collect time alone could exceed the old timeout. Still purely a safety
     // net — a player who moves through the beats quickly advances well
     // before this fires.
-    timeoutSeconds: 100,
+    timeoutSeconds: 300,
   });
 
   // Per-constellation "situation on Earth" — ambient decorations, the
@@ -434,4 +425,6 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // director.start() is deliberately NOT called here — StartMenuSystem
   // calls it once the Start button is dwell-selected, gating the whole
   // game behind the start menu.
+
+  finishLoadingScreen();
 });

@@ -318,7 +318,7 @@ export function makeToonRimInstancedGrainyMaterial(palette: ToonRimPalette): Sha
 // large-scale island. A per-instance aWigglePhase attribute desyncs the
 // wiggle across instances so a whole field of these doesn't pulse in
 // lockstep. Normals are NOT recomputed for the displaced surface (same
-// simplification ghost-wiggle-material.ts's billboard wiggle already makes)
+// simplification the old billboard wiggle also made)
 // — visually fine for a cheap dev-only art-test displacement, and avoids
 // the cost of a real analytic/central-difference normal recalculation.
 export function makeToonRimInstancedWigglyMaterial(
@@ -754,130 +754,6 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette, sizeMultiplier
   return new ShaderMaterial({
     uniforms: {
       uFaceTex: { value: null },
-      uBodyColor: { value: new Vector3(...palette.bodyColorDark) },
-    },
-    vertexShader,
-    fragmentShader,
-    depthWrite: true,
-    transparent: false,
-  });
-}
-
-// Same front-face decal projection as makeToonRimDecalMaterial above, but
-// blends via the decal texture's own alpha channel instead of approximating
-// a cutout from luma — for a real transparent-PNG decal (e.g.
-// ArtTestVfxSystem's fabric-ghost-textured pebbles, "plastered on... the
-// same way we did for the comet") rather than the light-background line-art
-// textures makeToonRimDecalMaterial was built for (the comet head's own
-// beepchat/smile faces). Kept as its own function rather than adding an
-// alpha-mode flag to that one, so the comet head's real production
-// rendering is never at risk of a regression from a change made for this
-// art-test use case.
-// Only ever used by ArtTestVfxSystem's ghost-decal pebbles (checked — no
-// other caller), so unlike the shared-with-production shaders elsewhere in
-// this file, the look asked for is baked in here directly rather than split
-// into yet another sibling function. Wiggle uses the same radial-
-// displacement-off-unit-direction technique makeToonRimInstancedWigglyMaterial
-// documents (see its own comment for why raw position would be the wrong
-// basis), just non-instanced (each ghost-decal pebble is its own real Mesh,
-// not an InstancedMesh) — default amplitude matches the islands' own
-// (was bumped up to a "big wiggle" briefly, reduced back down since).
-// aWigglePhase here is a per-VERTEX (not per-instance) attribute set once
-// per pebble's own geometry, since each pebble already has its own
-// BufferGeometry — that's what desyncs the wiggle across the ~90 pebbles
-// sharing just 4 materials (one per fabric-ghost texture) despite there
-// being far fewer materials than pebbles. vDecalUV is computed from the
-// ORIGINAL (pre-wiggle) position, not the displaced one — the decal image
-// stays glued to each vertex's own fixed identity as it wiggles, like a
-// sticker on a wobbling balloon, rather than swimming around independently
-// of the surface it's projected onto. The decal blends in at 90% opacity
-// (mixed with a contrast-boosted version of its own color) rather than
-// fully replacing the body color.
-export function makeToonRimAlphaDecalMaterial(
-  palette: ToonRimPalette,
-  params: { amplitude?: number; speed?: number; grainStrength?: number } = {},
-): ShaderMaterial {
-  const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
-  const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
-  const amplitude = params.amplitude ?? 0.15; // matches the islands' own wiggly amplitude — was 0.4 ("big wiggle"), reduced back down
-  const speed = params.speed ?? 1.4;
-  // How strongly the (desaturated) decal shape shows up as grain-brightness
-  // variation — see the fragment shader's own comment for why this replaced
-  // displaying the decal's actual colors.
-  const grainStrength = params.grainStrength ?? 0.35;
-
-  const vertexShader = `
-    uniform float uTime;
-    attribute float aWigglePhase;
-    varying vec3 vViewNormal;
-    varying vec3 vViewDir;
-    varying vec3 vLocalPos;
-    varying vec2 vDecalUV;
-
-    void main() {
-      vDecalUV = vec2(0.5 + position.z * 0.5, 0.5 - position.y * 0.5);
-
-      vec3 dir = length(position) > 0.0001 ? normalize(position) : vec3(0.0, 1.0, 0.0);
-      float wiggle = sin(dir.x * 6.0 + dir.y * 4.5 - dir.z * 5.0 + uTime * ${speed.toFixed(4)} + aWigglePhase * 6.2831) * 0.5
-                   + sin(dir.y * 7.0 - dir.x * 3.0 + uTime * ${(speed * 0.8).toFixed(4)} + aWigglePhase * 3.1) * 0.3;
-      vec3 wiggled = position * (1.0 + wiggle * ${amplitude.toFixed(4)});
-
-      vLocalPos = wiggled;
-      vec4 mvPosition = modelViewMatrix * vec4(wiggled, 1.0);
-      vViewNormal = normalize(normalMatrix * normal);
-      vViewDir    = normalize(-mvPosition.xyz);
-      gl_Position = projectionMatrix * mvPosition;
-    }
-  `;
-
-  const fragmentShader = `
-    uniform sampler2D uDecalTex;
-    uniform vec3 uBodyColor;
-    varying vec3 vViewNormal;
-    varying vec3 vViewDir;
-    varying vec3 vLocalPos;
-    varying vec2 vDecalUV;
-
-    // Same cheap 3D hash makeToonRimInstancedWigglyMaterial's own body
-    // texture noise uses (coarse + fine, multiplied into body brightness) —
-    // reused here so the ghost shape folds into the rock's existing grain
-    // instead of introducing a different visual language.
-    float hash13(vec3 p) {
-      p = fract(p * 0.3183099 + 0.1);
-      p *= 17.0;
-      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-    }
-
-    void main() {
-      vec3  n     = normalize(vViewNormal);
-      vec3  v     = normalize(vViewDir);
-      float ndotv = max(0.0, dot(n, v));
-
-      ${OUTLINE_GLSL}
-      float outline = smoothstep(${outlineLow.toFixed(4)}, ${outlineHigh.toFixed(4)}, edge);
-
-      vec4  decal = texture2D(uDecalTex, vDecalUV);
-      float lum   = dot(decal.rgb, vec3(0.299, 0.587, 0.114));
-
-      float coarse = hash13(floor(vLocalPos * 45.0));
-      float fine   = hash13(floor(vLocalPos * 120.0 + 7.0));
-      float grain  = coarse * 0.6 + fine * 0.4;
-
-      // Desaturated ghost shape folded into the rock's own grain noise as a
-      // brightness modulation (never the decal's actual colors) — a carved
-      // relief reads as texture variation, not a picture stamped on top.
-      float ghostGrain = mix(grain, lum, decal.a * ${grainStrength.toFixed(4)});
-      vec3  col        = uBodyColor * (0.55 + ghostGrain * 0.9);
-
-      col = mix(col, ${vec3Glsl(palette.rimColor)}, outline);
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `;
-
-  return new ShaderMaterial({
-    uniforms: {
-      uTime: { value: 0 },
-      uDecalTex: { value: null },
       uBodyColor: { value: new Vector3(...palette.bodyColorDark) },
     },
     vertexShader,

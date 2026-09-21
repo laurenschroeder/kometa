@@ -3,7 +3,6 @@ import {
   AnimationAction,
   AnimationClip,
   AnimationMixer,
-  AssetManager,
   AudioListener,
   Bone,
   BufferGeometry,
@@ -49,13 +48,13 @@ import {
   PERSON_BODY_COLOR,
 } from '../../vfx/geometry/animated-person.js';
 import {
+  centerAndNormalizeGeometryToUnitSize,
   convertZUpToYUp,
   loadFbxAllMeshes,
   loadFbxMeshesByName,
   normalizeGeometryToUnitRadius,
   normalizeGeometryToUnitRadiusFromOrigin,
 } from '../../vfx/geometry/fbx-field-loader.js';
-import { loadObjMeshGeometry } from '../../vfx/geometry/obj-field-loader.js';
 import { placePlanets } from '../../vfx/geometry/weave-path.js';
 import { sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
 import { fontReady, labelFont, roundRectPath } from '../../vfx/textures/canvas-label.js';
@@ -64,6 +63,7 @@ import {
   makeToonRimFlatMaterial,
   makeToonRimInstancedWigglyLiveRimMaterial,
   makeToonRimSkinnedMaterial,
+  type ToonRimPalette,
 } from '../../vfx/shaders/toon-rim-material.js';
 import { hexToRgb, NAMED_RIM, ORGANIC_PALETTE, VOLATILE_GASSES, WHITE } from '../../vfx/color/color-scheme.js';
 import { ConstellationsSystem } from '../constellations/constellations-system.js';
@@ -106,15 +106,28 @@ const BUBBLE_CANVAS_H = 250;
 // ambient chatter), but every visible person for Gas (see
 // FateEventSystem.getNamedCount()) — whoever's "named" is worth calling out
 // from across the crowd. Reuses the existing
-// starIllustration texture (already in the asset manifest, see index.ts)
-// rather than drawing a new glyph — quicker, and its bright four-point-star
-// shape already reads as "notice me" at a glance. Floats well above
+// flourish.fbx (toon-shaded like the crowd, gold rim while it's the player's
+// objective — see update()) — an ornament that reads as "notice me" at a
+// glance. Floats well above
 // PERSON_HEIGHT + BUBBLE_GAP's own bubble height so it's visible over the
 // whole crowd cap, not just up close, and disappears for good the instant
 // that figure's own dialogue actually shows (see _talkedTo/update()) — a
 // one-way "found them" signal, not a repeating reminder.
-const MARKER_TEXTURE_KEY = 'starIllustration';
-const MARKER_SIZE = 0.11;
+const MARKER_FBX_URL = '/medium/flourish.fbx';
+// On-screen WIDTH of the flourish (meters; 2/3 of its original 0.14). The old star quad was 0.11 square;
+// the flourish is ~1.74:1 wide, so this keeps a similar visual footprint.
+const MARKER_WIDTH = 0.14 * (2 / 3);
+let markerGeometryPromise: Promise<BufferGeometry | null> | null = null;
+// Unit-width, centered geometry (raw export is already face-on to +Z — thin
+// axis is Z — so no up-axis conversion here, unlike the Z-up packs).
+function loadMarkerGeometry(): Promise<BufferGeometry | null> {
+  if (!markerGeometryPromise) {
+    markerGeometryPromise = loadFbxAllMeshes(MARKER_FBX_URL, 1, centerAndNormalizeGeometryToUnitSize).then(
+      (geos) => geos[0] ?? null,
+    );
+  }
+  return markerGeometryPromise;
+}
 // Star height itself now lives in FateEventSystem (TALK_STAR_HEIGHT) so the
 // touch test and this mesh agree on where the star is.
 // Default (non-objective) rim — matches makeToonRimSkinnedMaterial's own
@@ -318,6 +331,15 @@ export const SKULL_RADIUS = 0.025;
 // map, just this toon-rim body color, same shader every other prop in this
 // file uses.
 export const SKULL_COLOR = hexToRgb(VOLATILE_GASSES);
+// Skull meshes themselves: black toon body with a red rim.
+export const SKULL_BODY_COLOR: [number, number, number] = [0, 0, 0];
+// Flying skulls: near-black (not pure black — the wobbly mottle multiplies the
+// body color, so true black would hide it) with a red rim.
+const SKULL_PALETTE: ToonRimPalette = {
+  bodyColorDark: [0.03, 0.03, 0.03],
+  bodyColorLight: [0.16, 0.16, 0.16],
+  rimColor: SKULL_COLOR,
+};
 
 const enum SkullState {
   Hidden,
@@ -610,6 +632,7 @@ export class FateEventVfxSystem extends createSystem({
 
   // Beat 4 — Gas's skull-symbol flight (see SkullState/SKULL_* constants).
   private _skullMeshes: Mesh[] = [];
+  private _skullMaterials: ShaderMaterial[] = [];
   private _skullState!: Uint8Array;
   private _skullT!: Float32Array;
   private _skullFromX!: Float32Array;
@@ -975,23 +998,25 @@ export class FateEventVfxSystem extends createSystem({
     }
   }
 
-  // See MARKER_* constants' own comment — one shared material (one texture,
-  // no per-instance tint needed) across both named figures' markers.
+  // See MARKER_* constants' own comment. One material PER marker (not shared)
+  // so each can blink its own rim gold (uRimColor is a per-material uniform),
+  // same reason the named figures each have their own material. Starts on a
+  // placeholder sphere, swapped in place for the real flourish geometry the
+  // moment (if ever) it resolves — same idiom as _buildSkulls.
   private _buildTalkMarkers(): void {
-    const material = new MeshBasicMaterial({
-      map: AssetManager.getTexture(MARKER_TEXTURE_KEY),
-      transparent: true,
-      depthWrite: false,
-      side: DoubleSide,
-      blending: AdditiveBlending,
-    });
-    const geo = new PlaneGeometry(MARKER_SIZE, MARKER_SIZE);
+    const placeholderGeo = new SphereGeometry(0.3, 8, 6);
     for (let i = 0; i < MAX_NAMED_FIGURES; i++) {
-      const mesh = new Mesh(geo, material);
+      const material = makeToonRimFlatMaterial(PERSON_BODY_COLOR);
+      const mesh = new Mesh(placeholderGeo, material);
+      mesh.scale.setScalar(MARKER_WIDTH);
       mesh.visible = false;
       this._markerMeshes.push(mesh);
       this.world.createTransformEntity(mesh);
     }
+    loadMarkerGeometry().then((geo) => {
+      if (!geo) return;
+      for (const mesh of this._markerMeshes) mesh.geometry = geo;
+    });
   }
 
   private _buildFire(): void {
@@ -1029,10 +1054,17 @@ export class FateEventVfxSystem extends createSystem({
   // — the moment (if ever) it resolves.
   private _buildSkulls(): void {
     const count = this._fateEvents.getPersonCount();
-    const material = makeToonRimFlatMaterial(SKULL_COLOR);
-    const placeholderGeo = new SphereGeometry(SKULL_RADIUS, 8, 6);
+    this._skullMaterials = [];
     for (let i = 0; i < count; i++) {
-      const mesh = new Mesh(placeholderGeo, material);
+      const geo = new SphereGeometry(SKULL_RADIUS, 8, 6);
+      stampSoulIslandInstanceAttrs(geo);
+      // One material per skull (like the ghosts) so each keeps its own uTime.
+      const material = makeToonRimInstancedWigglyLiveRimMaterial(SKULL_PALETTE, { amplitude: 0.19 });
+      this._skullMaterials.push(material);
+      const mesh = new InstancedMesh(geo, material, 1);
+      mesh.setMatrixAt(0, IDENTITY_MAT4);
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.frustumCulled = false;
       mesh.visible = false;
       this._skullMeshes.push(mesh);
       this.world.createTransformEntity(mesh);
@@ -1040,8 +1072,17 @@ export class FateEventVfxSystem extends createSystem({
     loadSkullGeometry().then((geo) => {
       if (!geo) return;
       for (const mesh of this._skullMeshes) {
-        mesh.geometry = geo;
-        mesh.scale.setScalar(SKULL_RADIUS);
+        // Size baked into the geometry (not mesh.scale), same as the ghosts,
+        // so the wiggle/mottle shader's fixed frequencies read the same way.
+        const own = geo.clone();
+        const pos = own.getAttribute('position');
+        for (let v = 0; v < pos.count; v++) {
+          pos.setXYZ(v, pos.getX(v) * SKULL_RADIUS, pos.getY(v) * SKULL_RADIUS, pos.getZ(v) * SKULL_RADIUS);
+        }
+        pos.needsUpdate = true;
+        stampSoulIslandInstanceAttrs(own);
+        (mesh.geometry as BufferGeometry).dispose();
+        mesh.geometry = own;
       }
     });
   }
@@ -1490,7 +1531,18 @@ export class FateEventVfxSystem extends createSystem({
             markerMesh.quaternion.setFromUnitVectors(this._zAxis, this._faceDir);
           }
           const pulse = MARKER_PULSE_MIN_SCALE + (1 - MARKER_PULSE_MIN_SCALE) * (0.5 + 0.5 * Math.sin(time * MARKER_PULSE_FREQ * Math.PI * 2));
-          markerMesh.scale.setScalar(pulse);
+          markerMesh.scale.setScalar(MARKER_WIDTH * pulse);
+          // Gold blink while this figure is the player's next objective (same
+          // cadence/phase as the figure's own rim, so they read as one), plain
+          // white rim otherwise — mutated in place, no per-frame allocation.
+          const markerRim = (markerMesh.material as ShaderMaterial).uniforms.uRimColor.value as Vector3;
+          if (this._fateEvents.isObjectiveTarget(i)) {
+            const markerBlink = 0.5 + 0.5 * Math.sin(time * RIM_FLASH_FREQUENCY * Math.PI * 2 + this._namedRimPhase[i] * Math.PI * 2);
+            const markerBright = RIM_FLASH_MIN + (RIM_FLASH_MAX - RIM_FLASH_MIN) * markerBlink;
+            markerRim.set(NAMED_RIM_COLOR[0] * markerBright, NAMED_RIM_COLOR[1] * markerBright, NAMED_RIM_COLOR[2] * markerBright);
+          } else {
+            markerRim.set(NORMAL_RIM_COLOR[0], NORMAL_RIM_COLOR[1], NORMAL_RIM_COLOR[2]);
+          }
         }
 
         // Gold rim blinks dim<->bright on the same cadence as constellations-
@@ -1533,7 +1585,7 @@ export class FateEventVfxSystem extends createSystem({
       } else {
         this._scratchCometBack.set(0, 0, 0);
       }
-      this._updateSkulls(delta, dominant, phase);
+      this._updateSkulls(delta, time, dominant, phase);
 
       const trail = this._trailSystem.getBuffer(entity);
       if (trail) {
@@ -1718,7 +1770,7 @@ export class FateEventVfxSystem extends createSystem({
   // to the comet, then holds it at a small fixed per-person ring slot (see
   // this file's own top comment on why person-index alone is a stable ring
   // slot here).
-  private _updateSkulls(delta: number, dominant: number, phase: Phase): void {
+  private _updateSkulls(delta: number, time: number, dominant: number, phase: Phase): void {
     const visited = this._fateEvents.getVisitedMask();
     const count = this._fateEvents.getPersonCount();
     const gasActive = dominant === VOLATILE_GASSES_TYPE && phase === Phase.FateEvents;
@@ -1740,6 +1792,7 @@ export class FateEventVfxSystem extends createSystem({
         continue;
       }
       mesh.visible = true;
+      this._skullMaterials[i].uniforms.uTime.value = time;
 
       if (this._skullState[i] === SkullState.Flying) {
         this._skullT[i] = Math.min(1, this._skullT[i] + delta / SKULL_FLIGHT_DURATION);

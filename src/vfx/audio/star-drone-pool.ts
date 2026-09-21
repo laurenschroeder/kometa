@@ -1,6 +1,11 @@
 import { AudioListener, PositionalAudio, Scene } from '@iwsdk/core';
 
-const MAX_VOICES = 10;
+const MAX_VOICES = 24; // highest star index that can hold a drone
+// Most drones sounding at once. Each is 3 oscillators + filter + panner, and
+// building/running 24 of them together made the audio glitch as a
+// constellation started (worst in Harvest, with the most stars) — a spread-out
+// subset still reads as one ambient cluster.
+const MAX_ACTIVE_VOICES = 8;
 const BASE_FREQ = 110; // A2 — low and ambient, not melodic
 // Two octaves of major pentatonic, one fixed degree per voice index — with
 // up to MAX_VOICES drones sounding at once, this keeps however many are
@@ -70,11 +75,15 @@ export class StarDronePool {
     context.resume().catch(() => {});
   }
 
-  // Starts (or restarts) drones for star indices [0, count), positioned
+  // Starts (or restarts) drones for a spread subset of star indices in [0, count), positioned
   // from posArray (a star-position Float32Array, xyz per star — same array
   // ConstellationsVfxSystem live-updates every frame).
   startAll(count: number, posArray: Float32Array): void {
-    for (let i = 0; i < count && i < MAX_VOICES; i++) {
+    // Every `stride`-th star gets a drone so the active voices stay spread
+    // across the whole shape; the rest are silent (stop()/updatePositions()
+    // already skip indices with no voice).
+    const stride = Math.max(1, Math.ceil(count / MAX_ACTIVE_VOICES));
+    for (let i = 0; i < count && i < MAX_VOICES; i += stride) {
       this._start(i, posArray[i * 3], posArray[i * 3 + 1], posArray[i * 3 + 2]);
     }
   }

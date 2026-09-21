@@ -34,9 +34,7 @@ import { playKingDeathTone } from '../../vfx/audio/king-death-tone.js';
 import { playKingHorn } from '../../vfx/audio/king-horn.js';
 import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import {
-  convertZUpToYUp,
   loadFbxAllMeshes,
-  normalizeGeometryToUnitRadius,
   normalizeGeometryToUnitRadiusFromOrigin,
   rotateX180,
 } from '../../vfx/geometry/fbx-field-loader.js';
@@ -58,7 +56,7 @@ import { COMET_HEAD, CROWN, GRAVE, hexToRgb, ORGANIC_PALETTE } from '../../vfx/c
 import { celestialSymbolMessage, FATE_GAS_INTRO_TEXT } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
 import { CROWD_CAP_DIRECTION, FateBeat, FateEventSystem, GAS_DEATH_START_SECONDS } from './fate-event-system.js';
-import { loadSkullGeometry, SKULL_COLOR } from './fate-event-vfx-system.js';
+import { loadSkullGeometry, SKULL_BODY_COLOR, SKULL_COLOR } from './fate-event-vfx-system.js';
 import { kHeadGeo } from '../pebbles/pebble-comet-presentation-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
@@ -864,7 +862,7 @@ export class EarthSituationsVfxSystem extends createSystem({
   // _buildSkulls, whose loadSkullGeometry/SKULL_COLOR this reuses
   // directly rather than re-deriving them.
   private _buildBannerSkull(): Mesh {
-    const material = makeToonRimFlatMaterial(SKULL_COLOR);
+    const material = makeToonRimFlatMaterial(SKULL_BODY_COLOR, SKULL_COLOR);
     const placeholderGeo = new SphereGeometry(BANNER_SKULL_RADIUS, 8, 6);
     const mesh: Mesh = new Mesh(placeholderGeo, material);
     loadSkullGeometry().then((geo) => {

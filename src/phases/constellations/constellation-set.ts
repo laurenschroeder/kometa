@@ -17,6 +17,7 @@
 export interface ConstellationDef {
   name: string;
   spreadRadius: number; // bounding size of the shape's region, meters
+  verticalScale?: number; // squash of the shape's Y axis (default 0.5, see constellation-path.ts)
   starCount: number; // number of points in this name's CONSTELLATION_SHAPES entry — also the number of interactive stars
 }
 
@@ -33,7 +34,11 @@ export interface ConstellationDef {
 // anchor is active, so the chosen constellation reads as picked out of a
 // real sky instead of floating alone.
 export const CONSTELLATION_SETS: Record<number, ConstellationDef[]> = {
-  0: [{ name: 'Shepherd', spreadRadius: 0.9, starCount: 6 }], // soul dust
-  1: [{ name: 'Harvest', spreadRadius: 1.3, starCount: 10 }], // organic matter
-  2: [{ name: 'Throne', spreadRadius: 0.9, starCount: 8 }], // volatile gasses
+  // These three are authored directly in meters (see constellation-shapes.ts),
+  // hence spreadRadius 1 / verticalScale 1, and exceed the 10-star cap above:
+  // the shapes are now arm-sized loops (infinity / circles) that want a star
+  // every ~15-20 cm to sweep up with one arm motion.
+  0: [{ name: 'Shepherd', spreadRadius: 1, verticalScale: 1, starCount: 12 }], // soul dust — horizontal infinity
+  1: [{ name: 'Harvest', spreadRadius: 1, verticalScale: 1, starCount: 16 }], // organic matter — two small circles
+  2: [{ name: 'Throne', spreadRadius: 1, verticalScale: 1, starCount: 17 }], // volatile gasses — two circles, figure-eight line
 };

@@ -473,7 +473,9 @@ export class PebbleCometPresentationSystem extends createSystem({
 
     // Starts on the soul face — retinted to whichever type is actually
     // dominant once that's known (see the Seeding-entry block in init()).
-    const headMat = makeHeadMat();
+    // 4x the original face decal (2x, then doubled again) — the face read too
+    // small on the rock.
+    const headMat = makeHeadMat(4);
     headMat.uniforms.uFaceTex.value = getFaceTextures()[0];
     const headMesh = new Mesh(kHeadGeo, headMat);
     headMesh.name = 'comet-head';

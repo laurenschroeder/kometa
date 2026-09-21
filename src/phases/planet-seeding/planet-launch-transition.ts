@@ -90,6 +90,10 @@ export class PlanetLaunchTransition {
   getCurrentRadius(): number {
     return this._currentRadius;
   }
+  // Raw 0-1 elapsed/RECEDE_DURATION — 0 before start(), 1 once settled.
+  getProgress(): number {
+    return this._active ? Math.min(1, this._elapsed / RECEDE_DURATION) : this._started ? 1 : 0;
+  }
 
   reset(planetPosition: Float32Array, radius: number): void {
     this._currentPos.fromArray(planetPosition);

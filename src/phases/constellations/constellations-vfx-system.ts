@@ -4,11 +4,13 @@ import {
   BufferGeometry,
   createSystem,
   DynamicDrawUsage,
+  Group,
   Mesh,
   Points,
   ShaderMaterial,
   Vector3,
 } from '@iwsdk/core';
+import type { ConstellationDef } from './constellation-set.js';
 import { getGlobals } from '../../core/globals.js';
 import { CONSTELLATIONS_PRE_HINT_TEXT } from '../../core/notification-copy.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
@@ -18,6 +20,7 @@ import { TwinkleSynth } from '../../vfx/audio/twinkle-synth.js';
 import {
   ANCHOR_SURFACE_OFFSET,
   CONSTELLATION_REACH_SHIFT,
+  generateConstellationStrokeOffsets,
   placeConstellationAnchorsAroundPlanet,
   sampleSmoothPath,
 } from '../../vfx/geometry/constellation-path.js';
@@ -134,6 +137,12 @@ const TWINKLE_FIXED_SPEED = 1.1;
 // position/radius every frame (not a fixed baked layout) so a completed
 // constellation's stars correctly follow through Leg B's later zoom into
 // Fate Events too, instead of only matching one fixed final layout.
+// Launch far-side placement: how far behind the planet's surface (from the
+// player's view) the constellation's plane sits, and how far above the
+// planet's center.
+const FAR_SIDE_STANDOFF = 0.5;
+const FAR_SIDE_HEIGHT = 0.1;
+
 export class ConstellationsVfxSystem extends createSystem({}) {
   private _constellations!: ConstellationsSystem;
   private _planetSeeding!: PlanetSeedingVfxSystem;
@@ -159,7 +168,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   // one rigid Mesh rather than a Points cloud representing many independent
   // things.
   private _ribbonMat!: ShaderMaterial;
-  private _ribbonMeshes: Mesh[][] = [];
+  private _ribbonMeshes: Group[][] = [];
 
   // All indexed [type][slot].
   private _starPoints: Points[][] = [];
@@ -186,6 +195,15 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   private _anchorDir!: Vector3[];
   private _liveAnchor!: Vector3[];
   private _scratchLiveCenter!: Vector3;
+  // Launch: the constellation (and the hero star, which rides its centroid)
+  // moves to the planet's far side as the planet repositions — see
+  // _updateLiveAnchor. Yaw rotates the baked (world +Z-facing) plane to face
+  // the player from there; 0 through Constellations/Fate Events.
+  private _scratchHead = new Vector3();
+  private _scratchFarAnchor = new Vector3();
+  private _liveYaw = 0;
+  private _yawCos = 1;
+  private _yawSin = 0;
 
   // Background field stars — single shared cloud, not indexed by
   // type/slot (see FIELD_STAR_COUNT's own comment).
@@ -255,7 +273,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
       const flashPhaseRow: Float32Array[] = [];
       const offsetRow: Float32Array[] = [];
       const wasTracedRow: Uint8Array[] = [];
-      const ribbonRow: Mesh[] = [];
+      const ribbonRow: Group[] = [];
 
       for (let slot = 0; slot < defs.length; slot++) {
         const anchor = bakedAnchors[slot];
@@ -272,7 +290,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
         const localOffset = this._computeOffsets(built.posAttr.array as Float32Array, anchor);
         offsetRow.push(localOffset);
         wasTracedRow.push(new Uint8Array(defs[slot].starCount));
-        ribbonRow.push(this._buildRibbon(localOffset));
+        ribbonRow.push(this._buildRibbon(localOffset, defs[slot], this._anchorDir[slot]));
       }
       this._starPoints.push(pointsRow);
       this._starPosAttrs.push(posAttrRow);
@@ -379,18 +397,24 @@ export class ConstellationsVfxSystem extends createSystem({}) {
   // touched again; live anchor tracking (see update()) just moves the whole
   // Mesh's own .position each frame, no per-vertex rewrite needed the way
   // the stars' Points cloud requires.
-  private _buildRibbon(localOffset: Float32Array): Mesh {
-    const localPoints: Vector3[] = [];
-    for (let i = 0; i < localOffset.length; i += 3) {
-      localPoints.push(new Vector3(localOffset[i], localOffset[i + 1], localOffset[i + 2]));
+  private _buildRibbon(localOffset: Float32Array, def: ConstellationDef, awayDir: Vector3): Group {
+    // Authored strokes when the shape has them (each its own ribbon so
+    // separate loops aren't joined); otherwise one curve through the stars.
+    const strokes = generateConstellationStrokeOffsets(def, awayDir) ?? [localOffset];
+    const group = new Group();
+    for (const stroke of strokes) {
+      const localPoints: Vector3[] = [];
+      for (let i = 0; i < stroke.length; i += 3) {
+        localPoints.push(new Vector3(stroke[i], stroke[i + 1], stroke[i + 2]));
+      }
+      const curve = sampleSmoothPath(localPoints, RIBBON_SEGMENTS);
+      const mesh = new Mesh(buildStreakRibbonGeometry(curve, RIBBON_WIDTH, ribbonWidthProfile), this._ribbonMat);
+      mesh.frustumCulled = false;
+      group.add(mesh);
     }
-    const curve = sampleSmoothPath(localPoints, RIBBON_SEGMENTS);
-    const geo = buildStreakRibbonGeometry(curve, RIBBON_WIDTH, ribbonWidthProfile);
-    const mesh = new Mesh(geo, this._ribbonMat);
-    mesh.frustumCulled = false;
-    mesh.visible = false;
-    this.world.createTransformEntity(mesh);
-    return mesh;
+    group.visible = false;
+    this.world.createTransformEntity(group);
+    return group;
   }
 
   private _buildStars(
@@ -534,6 +558,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     // moving the whole Mesh, not rewriting per-vertex positions like the
     // stars/field stars above.
     this._ribbonMeshes[dominant][activeSlot].position.copy(this._liveAnchor[activeSlot]);
+    this._ribbonMeshes[dominant][activeSlot].rotation.y = this._liveYaw;
 
     const activePositions = this._starPosAttrs[dominant][activeSlot].array as Float32Array;
     const def = this._constellations.getDefs(dominant)[activeSlot];
@@ -638,14 +663,44 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     this._liveAnchor[activeSlot].x += CONSTELLATION_REACH_SHIFT[0];
     this._liveAnchor[activeSlot].y += CONSTELLATION_REACH_SHIFT[1];
     this._liveAnchor[activeSlot].z += CONSTELLATION_REACH_SHIFT[2];
+
+    // Launch (Leg C): swing around to the far side of the planet — behind it
+    // as seen from the player, no reach shift, plane turned to face them.
+    // Eased in by Leg C's own progress so it travels with the receding planet
+    // instead of popping.
+    const t = this._planetSeeding.getLaunchProgress();
+    const w = t * t * (3 - 2 * t);
+    this._liveYaw = 0;
+    if (w > 0) {
+      const c = this._scratchLiveCenter;
+      this.camera.getWorldPosition(this._scratchHead);
+      let dx = c.x - this._scratchHead.x;
+      let dz = c.z - this._scratchHead.z;
+      const len = Math.sqrt(dx * dx + dz * dz);
+      if (len > 1e-4) {
+        dx /= len;
+        dz /= len;
+      } else {
+        dx = 0;
+        dz = -1;
+      }
+      const behind = liveRadius + FAR_SIDE_STANDOFF;
+      this._scratchFarAnchor.set(c.x + dx * behind, c.y + FAR_SIDE_HEIGHT, c.z + dz * behind);
+      this._liveAnchor[activeSlot].lerp(this._scratchFarAnchor, w);
+      this._liveYaw = w * Math.atan2(-dx, -dz);
+    }
+    this._yawCos = Math.cos(this._liveYaw);
+    this._yawSin = Math.sin(this._liveYaw);
   }
 
   private _applyLiveOffsets(offsets: Float32Array, attr: BufferAttribute, anchor: Vector3): void {
     const positions = attr.array as Float32Array;
     for (let i = 0; i < positions.length; i += 3) {
-      positions[i] = offsets[i] + anchor.x;
+      const ox = offsets[i];
+      const oz = offsets[i + 2];
+      positions[i] = ox * this._yawCos + oz * this._yawSin + anchor.x;
       positions[i + 1] = offsets[i + 1] + anchor.y;
-      positions[i + 2] = offsets[i + 2] + anchor.z;
+      positions[i + 2] = -ox * this._yawSin + oz * this._yawCos + anchor.z;
     }
     attr.needsUpdate = true;
   }

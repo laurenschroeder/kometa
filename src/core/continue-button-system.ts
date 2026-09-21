@@ -1,4 +1,4 @@
-import { createSystem, Entity, FollowBehavior, Follower, Vector3 } from '@iwsdk/core';
+import { createSystem, Entity, FollowBehavior, Follower, Pressed, Vector3 } from '@iwsdk/core';
 import { getSharedTwinkleSynth, PokeCubeButton } from '../vfx/ui/poke-button.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
@@ -22,7 +22,14 @@ const BUTTON_SCALE = 0.7;
 // label sits above its diamond, so it needs the extra room to stay clear of
 // the box. Tune this to move the button up/down.
 const BUTTON_BELOW_NOTIFICATION = 0.18;
-const HOLD_SECONDS = 1.2;
+const HOLD_SECONDS = 1.8;
+// The button pops up head-locked, in front of the player's face, right when a
+// phase's readiness hits 1 — i.e. usually mid-gameplay with a hand (or the
+// comet) already swinging through that space. Poking is ignored for this long
+// after it appears, AND until no finger/controller is touching it, so a hand
+// that happened to be there can't start the hold — the player has to
+// deliberately reach in afterward.
+const ARM_DELAY_SECONDS = 1.5;
 const CHIME_SPEED = 1.5;
 
 type ContinueState = 'locked' | 'ready' | 'done';
@@ -38,6 +45,8 @@ export class ContinueButtonSystem extends createSystem({}) {
   private _root!: Entity;
   private _button!: PokeCubeButton;
   private _state: ContinueState = 'locked';
+  private _armed = false;
+  private _sinceUnlock = 0;
   private _lastPhase: Phase | null = null;
   private _scratchPos = new Vector3();
 
@@ -97,7 +106,11 @@ export class ContinueButtonSystem extends createSystem({}) {
     this._root.object3D!.visible = true;
     this._button.setBaseColor(config.getColorHex?.() ?? null);
 
-    const fired = this._button.update(delta, this._state === 'ready');
+    if (!this._armed) {
+      this._sinceUnlock += delta;
+      if (this._sinceUnlock >= ARM_DELAY_SECONDS && !this._button.entity.hasComponent(Pressed)) this._armed = true;
+    }
+    const fired = this._button.update(delta, this._state === 'ready' && this._armed);
     if (fired) {
       this._state = 'done';
       this._hide();
@@ -107,6 +120,8 @@ export class ContinueButtonSystem extends createSystem({}) {
 
   private _unlock(): void {
     this._state = 'ready';
+    this._armed = false;
+    this._sinceUnlock = 0;
     this._button.setEnabled(true);
 
     this._root.object3D!.getWorldPosition(this._scratchPos);

@@ -67,7 +67,7 @@ const CHARGE_VISUAL_EASE_RATE = 8;
 // 10% wider than the original 0.16 so longer labels (e.g. "Continue when
 // Ready") fit — the label canvas is widened by the same factor (see
 // LABEL_WIDTH_SCALE) so text isn't stretched.
-const LABEL_WIDTH_SCALE = 1.1;
+const LABEL_WIDTH_SCALE = 1.265; // 1.1 widened another 15% — "Continue when Ready" still overflowed
 const LABEL_WIDTH = 0.16 * LABEL_WIDTH_SCALE;
 const LABEL_HEIGHT = 0.06;
 const LABEL_GAP = 0.045; // above the diamond's own top vertex

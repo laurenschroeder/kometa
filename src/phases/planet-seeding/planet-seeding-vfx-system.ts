@@ -1,13 +1,13 @@
 import {
+  AdditiveBlending,
   AudioListener,
+  BufferAttribute,
+  BufferGeometry,
   createSystem,
   DynamicDrawUsage,
   Entity,
-  InstancedBufferAttribute,
-  InstancedMesh,
-  Matrix4,
   Mesh,
-  Quaternion,
+  Points,
   ShaderMaterial,
   SphereGeometry,
   Vector3,
@@ -18,11 +18,10 @@ import { Phase } from '../../core/phase.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
 import { playGroundImpact } from '../../vfx/audio/ground-impact.js';
 import { PlanetSpinSynth } from '../../vfx/audio/planet-spin-synth.js';
-import { kOrganicGlitterMat } from '../../vfx/shaders/pebble-material.js';
+import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
 import { makePlanetStainMaterial, MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
 import { makeToonRimFlatMaterial } from '../../vfx/shaders/toon-rim-material.js';
-import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
-import { hexToRgb, MOON, PLANET_BASE } from '../../vfx/color/color-scheme.js';
+import { hexToRgb, MOON, PLANET_BASE, STARDUST } from '../../vfx/color/color-scheme.js';
 import { CROWD_CAP_DIRECTION, PLANT_EXCLUSION_HALF_ANGLE } from '../fate-events/fate-event-system.js';
 import { PlanetFateTransition } from './planet-fate-transition.js';
 import { PlanetGrowthPool } from './planet-growth-pool.js';
@@ -30,13 +29,9 @@ import { PlanetLaunchTransition } from './planet-launch-transition.js';
 import { PlanetSpinTransition, TOTAL_ROTATION_DELTA } from './planet-spin-transition.js';
 import { CELL_DIRS, N_MOONS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
 
-// Falling motes now render as actual organic-pebble meshes — same geometry/
-// material AND size distribution the comet's own tail pebbles use
-// (kOrganicGlitterMat + pebbleSizeFromSample()*PEBBLE_MESH_SCALE) — instead
-// of the old tiny point-sprite dust (DUST_SIZE=0.03, a screen-space
-// heuristic). See _launchQueued's spawn site for the actual per-mote size
-// draw — a plausible (t, r) sample fed through the exact same sizing
-// function the tail uses, not an independently-tuned constant.
+// Falling motes render as stardust — the same sparkle point sprites (color/
+// shader) the Stardust phase's own ambient motes use — so what falls onto the
+// planet is the stardust the player gathered, not organic pebbles.
 // Bumped from 1.2 — pebbles now launch from much farther out (see
 // SURFACE_TRIGGER_DISTANCE's own increase in planet-seeding-system.ts), so a
 // slower fall keeps the motion readable as an actual fall rather than a
@@ -46,7 +41,10 @@ const FLIGHT_DURATION = 2.2;
 // cooldown (planet-seeding-system.ts's FALL_COOLDOWN_FAST) many more motes
 // are in the air at once; without headroom here they'd hit the "in-flight
 // capacity exceeded" fallback (instant-land, no visible fall) far too often.
+const STARDUST_COLOR: [number, number, number] = hexToRgb(STARDUST);
 const MAX_INFLIGHT = 32;
+const DUST_SIZE_MIN = 0.05;
+const DUST_SIZE_MAX = 0.09;
 const SPLAT_FADE_EASE_RATE = 1.5; // 1/s — see _applyHumanZoneExclusion/_updateSplatFade
 const BASE_COLOR: [number, number, number] = hexToRgb(PLANET_BASE);
 
@@ -137,8 +135,10 @@ export class PlanetSeedingVfxSystem extends createSystem({
   // Rewritten in full every frame from _flightColorR/G/B (see
   // _advanceFlights) — cheap at MAX_INFLIGHT's small size, and avoids having
   // to track partial per-slot dirtiness through the swap-remove below.
-  private _dustTintAttr!: InstancedBufferAttribute;
-  private _dustMesh!: InstancedMesh;
+  private _dustPosAttr!: BufferAttribute;
+  private _dustSizeAttr!: BufferAttribute;
+  private _dustMaterial!: ShaderMaterial;
+  private _dustMesh!: Points;
   private _dustEntity!: Entity;
 
   // In-flight dust motes — fixed-capacity, kept compact (swap-remove on
@@ -165,28 +165,16 @@ export class PlanetSeedingVfxSystem extends createSystem({
   // Picked once at launch — fixed per-mote rotation/size, same idiom the
   // comet's own tail pebbles use, so a falling mote doesn't look like a
   // perfectly uniform, unrotated stamp.
-  private _flightRotX!: Float32Array;
-  private _flightRotY!: Float32Array;
-  private _flightRotZ!: Float32Array;
-  private _flightRotW!: Float32Array;
   private _flightScale!: Float32Array;
   private _flightT!: Float32Array;
   private _flightCount = 0;
 
-  private _scratchRotAxis!: Vector3;
   private _scratchDustPos!: Vector3;
-  private _scratchDustQuat!: Quaternion;
-  private _scratchDustScale!: Vector3;
-  private _scratchMat4!: Matrix4;
 
   init(): void {
     this._planetSeeding = this.world.getSystem(PlanetSeedingSystem)!;
 
-    this._scratchRotAxis = new Vector3();
     this._scratchDustPos = new Vector3();
-    this._scratchDustQuat = new Quaternion();
-    this._scratchDustScale = new Vector3();
-    this._scratchMat4 = new Matrix4();
     this._scratchCellDir = new Vector3();
     this._yAxis = new Vector3(0, 1, 0);
 
@@ -222,10 +210,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._flightColorR = new Float32Array(MAX_INFLIGHT);
     this._flightColorG = new Float32Array(MAX_INFLIGHT);
     this._flightColorB = new Float32Array(MAX_INFLIGHT);
-    this._flightRotX = new Float32Array(MAX_INFLIGHT);
-    this._flightRotY = new Float32Array(MAX_INFLIGHT);
-    this._flightRotZ = new Float32Array(MAX_INFLIGHT);
-    this._flightRotW = new Float32Array(MAX_INFLIGHT).fill(1);
     this._flightScale = new Float32Array(MAX_INFLIGHT);
     this._flightT = new Float32Array(MAX_INFLIGHT);
 
@@ -305,29 +289,23 @@ export class PlanetSeedingVfxSystem extends createSystem({
   }
 
   private _buildDustCloud(): void {
-    const geo = buildOrganicGeometry();
-    geo.setAttribute('aBright', new InstancedBufferAttribute(new Float32Array(MAX_INFLIGHT).fill(0.7), 1));
-    this._dustTintAttr = new InstancedBufferAttribute(new Float32Array(MAX_INFLIGHT * 3), 3);
-    geo.setAttribute('aTint', this._dustTintAttr);
-    // kOrganicGlitterMat's fragment shader caps the tint blend at
-    // vTinted*0.35 (see makeToonRimInstancedGrainyMaterial) — plenty subtle
-    // for the tail's own pebbles, but it left these motes reading as
-    // generic organic rock with barely a hint of the color they're about to
-    // land as, so the mote-color/patch-color relationship (see
-    // _launchQueued's cellColors lookup — they DO already carry the exact
-    // same RGB) never actually read on screen. 1/0.35 here (only on this
-    // mesh's own attribute buffer, not the shared material, so every other
-    // consumer of kOrganicGlitterMat — the tail, seed-blossom's burst, etc.
-    // — is untouched) cancels that 0.35 out, so a falling mote shows its
-    // landing cell's true color at full strength, same as the splat and the
-    // eventual plant.
-    geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(MAX_INFLIGHT).fill(1 / 0.35), 1));
+    const geo = new BufferGeometry();
+    this._dustPosAttr = new BufferAttribute(new Float32Array(MAX_INFLIGHT * 3), 3);
+    this._dustPosAttr.setUsage(DynamicDrawUsage);
+    this._dustSizeAttr = new BufferAttribute(new Float32Array(MAX_INFLIGHT).fill(DUST_SIZE_MIN), 1);
+    this._dustSizeAttr.setUsage(DynamicDrawUsage);
+    const phases = new Float32Array(MAX_INFLIGHT);
+    for (let i = 0; i < MAX_INFLIGHT; i++) phases[i] = Math.random();
+    geo.setAttribute('position', this._dustPosAttr);
+    geo.setAttribute('aSize', this._dustSizeAttr);
+    geo.setAttribute('aBright', new BufferAttribute(new Float32Array(MAX_INFLIGHT).fill(1), 1));
+    geo.setAttribute('aPhase', new BufferAttribute(phases, 1));
+    geo.setDrawRange(0, 0);
 
-    this._dustMesh = new InstancedMesh(geo, kOrganicGlitterMat, MAX_INFLIGHT);
-    this._dustMesh.name = 'seeding-falling-pebbles';
-    this._dustMesh.instanceMatrix.setUsage(DynamicDrawUsage);
+    this._dustMaterial = makeSparkleMaterial({ color: STARDUST_COLOR, blending: AdditiveBlending });
+    this._dustMesh = new Points(geo, this._dustMaterial);
+    this._dustMesh.name = 'seeding-falling-stardust';
     this._dustMesh.frustumCulled = false;
-    this._dustMesh.count = 0;
     this._dustEntity = this.world.createTransformEntity(this._dustMesh);
   }
 
@@ -337,7 +315,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     this._humanZoneMask.fill(0);
     this._splatFade.fill(0);
     this._flightCount = 0;
-    this._dustMesh.count = 0;
+    this._dustMesh.geometry.setDrawRange(0, 0);
 
     this._growthPool.reset();
 
@@ -444,6 +422,13 @@ export class PlanetSeedingVfxSystem extends createSystem({
   // choice zones until the planet has visibly finished receding/shrinking
   // into its left-side spot, rather than letting a player standing right
   // there commit mid-animation.
+  // 0-1 progress of Leg C (0 until Launch's recede starts, 1 once settled) —
+  // read by ConstellationsVfxSystem to carry the constellation around to the
+  // planet's far side as it repositions.
+  getLaunchProgress(): number {
+    return this._launchTransition.getProgress();
+  }
+
   isLaunchTransitionSettled(): boolean {
     return this._launchTransition.hasStarted() && !this._launchTransition.isActive();
   }
@@ -466,6 +451,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     // pebbles use too — its uTime is already kept fresh by
     // PebbleCometPresentationSystem, which is always-on.
     this._planetMaterial.uniforms.uTime.value = time;
+    this._dustMaterial.uniforms.uTime.value = time;
     // 0 until Leg A (the spin+recede transition) starts, then ramps 0->1
     // across its own duration, staying 1 forever after — see
     // planet-stain-material.ts's own comment on uFinalGrowT for why this is
@@ -643,19 +629,8 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightColorR[slot] = color[0];
         this._flightColorG[slot] = color[1];
         this._flightColorB[slot] = color[2];
-        this._scratchRotAxis
-          .set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1)
-          .normalize();
-        this._scratchDustQuat.setFromAxisAngle(this._scratchRotAxis, Math.random() * Math.PI * 2);
-        this._flightRotX[slot] = this._scratchDustQuat.x;
-        this._flightRotY[slot] = this._scratchDustQuat.y;
-        this._flightRotZ[slot] = this._scratchDustQuat.z;
-        this._flightRotW[slot] = this._scratchDustQuat.w;
-        // Same sizing function + world-space scale the tail's own organic
-        // pebbles use (pebble-comet-presentation-system.ts) — a plausible
-        // (t, r) sample rather than an independently-tuned range, so a
-        // falling mote is never bigger than a pebble already riding the tail.
-        this._flightScale[slot] = pebbleSizeFromSample(Math.random(), Math.random() * 2.5) * PEBBLE_MESH_SCALE;
+        // Point-sprite size (sparkle material's aSize), a little varied per mote.
+        this._flightScale[slot] = DUST_SIZE_MIN + Math.random() * (DUST_SIZE_MAX - DUST_SIZE_MIN);
         this._flightT[slot] = 0;
       } else {
         // In-flight capacity exceeded (only possible during a mass force-
@@ -739,10 +714,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
 
       const radius = fromRadius + (landRadius - fromRadius) * easedRadius;
       this._scratchDustPos.set(px + dirX * radius, py + dirY * radius, pz + dirZ * radius);
-      this._scratchDustQuat.set(this._flightRotX[i], this._flightRotY[i], this._flightRotZ[i], this._flightRotW[i]);
-      this._scratchDustScale.setScalar(this._flightScale[i]);
-      this._scratchMat4.compose(this._scratchDustPos, this._scratchDustQuat, this._scratchDustScale);
-      this._dustMesh.setMatrixAt(i, this._scratchMat4);
+      this._dustPosAttr.setXYZ(i, this._scratchDustPos.x, this._scratchDustPos.y, this._scratchDustPos.z);
 
       if (t >= 1) {
         this._applyLanding(this._flightCellIndex[i], this._flightDirX[i], this._flightDirY[i], this._flightDirZ[i], [
@@ -763,10 +735,6 @@ export class PlanetSeedingVfxSystem extends createSystem({
         this._flightColorR[i] = this._flightColorR[last];
         this._flightColorG[i] = this._flightColorG[last];
         this._flightColorB[i] = this._flightColorB[last];
-        this._flightRotX[i] = this._flightRotX[last];
-        this._flightRotY[i] = this._flightRotY[last];
-        this._flightRotZ[i] = this._flightRotZ[last];
-        this._flightRotW[i] = this._flightRotW[last];
         this._flightScale[i] = this._flightScale[last];
         this._flightT[i] = this._flightT[last];
         this._flightCount--;
@@ -775,13 +743,10 @@ export class PlanetSeedingVfxSystem extends createSystem({
       }
     }
 
-    for (let s = 0; s < this._flightCount; s++) {
-      this._dustTintAttr.setXYZ(s, this._flightColorR[s], this._flightColorG[s], this._flightColorB[s]);
-    }
-    this._dustTintAttr.needsUpdate = true;
-
-    this._dustMesh.count = this._flightCount;
-    this._dustMesh.instanceMatrix.needsUpdate = true;
+    for (let s = 0; s < this._flightCount; s++) this._dustSizeAttr.setX(s, this._flightScale[s]);
+    this._dustPosAttr.needsUpdate = true;
+    this._dustSizeAttr.needsUpdate = true;
+    this._dustMesh.geometry.setDrawRange(0, this._flightCount);
   }
 
   // Writes straight into cellIndex's own permanent slot — never a rotating
