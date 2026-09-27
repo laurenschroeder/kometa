@@ -6,7 +6,12 @@ import { HandAnchor, HandSide } from '../../comet/hand-anchor-component.js';
 import { getGlobals } from '../../core/globals.js';
 import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import { NotificationHudSystem } from '../../core/notification-hud-system.js';
-import { PEBBLE_TYPE_REVEAL_SECONDS, pebbleCompletionMessage } from '../../core/notification-copy.js';
+import {
+  PEBBLE_COLLECT_TEXT,
+  PEBBLE_THREE_PATHS_TEXT,
+  PEBBLE_TYPE_REVEAL_SECONDS,
+  pebbleCompletionMessage,
+} from '../../core/notification-copy.js';
 import { samplePebbleSizes } from '../../vfx/particles/pebble-size.js';
 import { assignPebbleSpawnPoint, closestGroupOriginForType } from './pebble-layout.js';
 import { PEBBLE_TYPE_HEX, PEBBLE_TYPES } from './pebble-type.js';
@@ -57,6 +62,10 @@ const CAPTURED_DEPTH_RATIO = 1.6;
 const TYPE_REVEAL_AT_SECONDS = PEBBLE_TYPE_REVEAL_SECONDS;
 const TYPE_REVEAL_GROW_SECONDS = 0.5;
 
+// Fallback in case the intro never shows (e.g. a dev-menu jump that clears the
+// notification queue) — counts from phase start.
+const GATHER_UNLOCK_FALLBACK_SECONDS = 30;
+
 function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
 }
@@ -94,6 +103,8 @@ export class PebbleWeavingSystem extends createSystem({
   // Seconds since this phase's own play() — drives getTypeRevealProgress()
   // below, see TYPE_REVEAL_AT_SECONDS's own comment.
   private _elapsed = 0;
+  // See GATHER_UNLOCK_FALLBACK_SECONDS.
+  private _gatherUnlocked = false;
 
   // Which hand currently holds the comet, refreshed each update() before
   // this._field.step() runs — read by the onCapture/onAttractStart closures
@@ -179,6 +190,7 @@ export class PebbleWeavingSystem extends createSystem({
     this._captureEvents.length = 0;
     this._attractEvents.length = 0;
     this._elapsed = 0;
+    this._gatherUnlocked = false;
     this.camera.getWorldDirection(this._refForward);
   }
 
@@ -205,6 +217,23 @@ export class PebbleWeavingSystem extends createSystem({
       this._hand.speed = this._scratchVel.length();
       this._hand.seen = true;
       this._currentHand = entity.getValue(HandAnchor, 'hand') as string;
+    }
+
+    // Gathering opens once the "Three paths" intro has finished and the
+    // "Collect what you'd like..." line has started showing. With
+    // notifications off in Settings there's nothing to wait for.
+    if (!this._gatherUnlocked) {
+      const hud = this.world.getSystem(NotificationHudSystem);
+      if (
+        !getGlobals(this.world).notificationsEnabled.peek() ||
+        (hud?.hasFinished(PEBBLE_THREE_PATHS_TEXT) && hud.hasShown(PEBBLE_COLLECT_TEXT)) ||
+        this._elapsed >= GATHER_UNLOCK_FALLBACK_SECONDS
+      ) {
+        this._gatherUnlocked = true;
+      } else {
+        // A hand the field can't see attracts/captures nothing.
+        this._hand.seen = false;
+      }
     }
 
     this._field.step(this._hand, delta);

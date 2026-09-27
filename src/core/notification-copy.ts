@@ -86,6 +86,13 @@ export const PEBBLE_TYPE_REVEAL_SECONDS: readonly [number, number, number] = [
   PEBBLE_INTRO_LINE_START_SECONDS[3] + PEBBLE_INTRO_LINE_FADE_SECONDS + PEBBLE_INTRO_WAIT_SECONDS,
 ];
 
+// Exported so PebbleWeavingSystem can hold off pebble gathering until the
+// first has finished and the second has started showing (see
+// NotificationHudSystem.hasFinished()/hasShown()).
+export const PEBBLE_THREE_PATHS_TEXT =
+  'Three paths call to you\nthe blue forms of souls\nthe green pulse of living things\nthe red spectacle of volatile gasses.';
+export const PEBBLE_COLLECT_TEXT = "Collect what you'd like to bring along with you.";
+
 export const STARDUST_INTRO_TEXT = 'You are stardust unformed. Move your hand around to gather yourself into being.';
 
 // Exported so PlanetSeedingSystem can hold the planet at its far-away
@@ -143,7 +150,7 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
   ],
   [Phase.Pebbles]: [
     {
-      text: 'Three paths call to you\nthe blue forms of souls\nthe green pulse of living things\nthe red spectacle of volatile gasses.',
+      text: PEBBLE_THREE_PATHS_TEXT,
       // Hold starts once the last line is fully visible; the last type's
       // pebbles appear 2.5s after that line starts, so leave a few seconds
       // after that to take them in.
@@ -152,7 +159,7 @@ export const NOTIFICATION_COPY: Record<Phase, NotificationCopy[]> = {
       lineStartSeconds: PEBBLE_INTRO_LINE_START_SECONDS,
     },
     {
-      text: "Collect what you'd like to bring along with you.",
+      text: PEBBLE_COLLECT_TEXT,
       holdSeconds: 4.5,
     },
 

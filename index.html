@@ -100,18 +100,29 @@
         white-space: nowrap;
         user-select: none;
       }
+      /* Corner flourishes are scaled up for the larger panel (the button's own
+         are a fixed 24px). */
+      #kometa-panel .corner {
+        width: clamp(42px, 7.5vmin, 108px);
+        height: clamp(42px, 7.5vmin, 108px);
+      }
       #kometa-panel .title-row {
         display: flex;
         align-items: center;
         justify-content: center;
       }
       #kometa-panel .tagline {
+        text-align: center;
         margin-top: 3vmin;
         font-family: 'CarroisGothicSC', sans-serif;
         font-size: clamp(14px, 2.4vmin, 32px);
         letter-spacing: 0.14em;
         line-height: 1.2;
         color: #d4d4d8;
+      }
+      /* Studio credit: a bit larger than the tagline above it, flanked by dots. */
+      #kometa-panel .tagline-studio {
+        font-size: 1.3em;
       }
       #kometa-panel .title-k {
         font-family: 'ImperialScript', cursive;
@@ -146,38 +157,42 @@
         cursor: pointer;
         display: none;
       }
-      #enter-vr-button .corner {
+      [id] > .corner {
         position: absolute;
         width: 24px;
         height: 24px;
       }
-      #enter-vr-button .corner-bl {
+      [id] > .corner-bl {
         left: 0;
         bottom: 0;
         transform: rotate(0deg);
       }
-      #enter-vr-button .corner-tl {
+      [id] > .corner-tl {
         left: 0;
         top: 0;
         transform: rotate(90deg);
       }
-      #enter-vr-button .corner-tr {
+      [id] > .corner-tr {
         right: 0;
         top: 0;
         transform: rotate(180deg);
       }
-      #enter-vr-button .corner-br {
+      [id] > .corner-br {
         right: 0;
         bottom: 0;
         transform: rotate(270deg);
       }
     </style>
     <div id="kometa-panel">
+      <img class="corner corner-bl" src="/textures/corner.png" />
+      <img class="corner corner-tl" src="/textures/corner.png" />
+      <img class="corner corner-tr" src="/textures/corner.png" />
+      <img class="corner corner-br" src="/textures/corner.png" />
       <div class="title-row">
         <span class="title-k">K</span>
         <span class="title-rest">ometa</span>
       </div>
-      <div class="tagline">AN EXPERIENCE OF STARDUST AND FATE · VIRTUALPEBBLE</div>
+      <div class="tagline">AN EXPERIENCE OF STARDUST AND FATE<br><span class="tagline-studio">· VIRTUALPEBBLE ·</span></div>
     </div>
     <button id="enter-vr-button">
       <img class="corner corner-bl" src="/textures/corner.png" />
