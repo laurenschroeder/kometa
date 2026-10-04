@@ -14,13 +14,13 @@ export interface AchievementDef {
 // no longer drives unlocks itself; each one is fired directly by whichever
 // system owns that moment.
 export const ACHIEVEMENTS: AchievementDef[] = [
-  { id: 'stargazer', title: 'Stargazer', description: 'Wander far enough from the comet to gather a distant speck of stardust.' },
-  { id: 'far-side', title: 'Far Side', description: 'Seed the side of the planet facing directly away from where you started.' },
-  { id: 'second-thoughts', title: 'Second Thoughts', description: 'Linger at both choice zones before finally committing to one.' },
+  { id: 'stargazer', title: 'Stargazer', description: 'Collect a speck of stardust from far away.' },
+  { id: 'far-side', title: 'Far Side', description: 'Seed the far side of the planet' },
+  { id: 'second-thoughts', title: 'Second Thoughts', description: 'Linger at both orbital launch choices before finally committing to one.' },
   { id: 'full-sweep', title: 'Full Sweep', description: 'Clear every mote from all three Stardust swirls before the phase ends.' },
   { id: 'ambidextrous', title: 'Ambidextrous', description: 'Toss the comet to your other hand and catch it.' },
-  { id: 'true-believer', title: 'True Believer', description: "Finish Pebbles with one type making up 90% or more of what you gathered." },
-  { id: 'perfect-balance', title: 'Perfect Balance', description: 'Finish Pebbles with all three types gathered in close to even measure.' },
+  { id: 'true-believer', title: 'True Believer', description: "Finish collecting pebbles with one type making up 90% or more of what you gathered." },
+  { id: 'perfect-balance', title: 'Perfect Balance', description: 'Finish collecting pebbles with all three types gathered in close to even measure.' },
   { id: 'soul-collector', title: 'Soul Collector', description: 'Gather every detached soul in the graveyard.' },
   { id: 'green-thumb', title: 'Green Thumb', description: 'Gather every seed offered to you.' },
   { id: 'faced-the-mob', title: 'Faced the Mob', description: 'Face every last member of the angry, grieving crowd.' },

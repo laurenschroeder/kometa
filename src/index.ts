@@ -44,8 +44,28 @@ import { PlanetSeedingSystem } from './phases/planet-seeding/planet-seeding-syst
 import { PlanetSeedingVfxSystem } from './phases/planet-seeding/planet-seeding-vfx-system.js';
 import { StardustSystem } from './phases/stardust/stardust-system.js';
 import { StardustVfxSystem } from './phases/stardust/stardust-vfx-system.js';
+import { createPlatform } from './core/platform/platform.js';
+import { platformUser, startProgressSync } from './core/progress-sync.js';
+import { initTelemetry, setTelemetryUserProps } from './core/telemetry.js';
+import { TelemetrySystem } from './core/telemetry-system.js';
 
 startLoadingScreen();
+
+// Analytics + host platform (cloud save) both start in parallel with world
+// creation and never block it — see telemetry.ts / progress-sync.ts. Both
+// are optional extras: any failure in either is logged and swallowed, and
+// the game plays exactly the same without them.
+initTelemetry();
+const platformReady = createPlatform();
+platformReady
+  .then((platform) => {
+    setTelemetryUserProps({ platform: platform.name });
+    return startProgressSync(platform);
+  })
+  .catch((err) => console.warn('[platform] progress sync failed to start', err));
+platformUser.subscribe((user) => {
+  if (user !== undefined) setTelemetryUserProps({ signed_in: user !== null });
+});
 
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
   assets: {
@@ -112,6 +132,25 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
       enterVrButton.style.display = nonImmersive ? 'block' : 'none';
       if (kometaPanel) kometaPanel.style.display = nonImmersive ? 'flex' : 'none';
     });
+  }
+
+  // Optional sign-in for cloud-saved progress (see progress-sync.ts) — only
+  // offered in the 2D browser view, since the platform's login flow can
+  // redirect/reload the page, and only once the platform has confirmed the
+  // player is a guest. Hosts without a login (LOCAL_ONLY) never show it.
+  const loginButton = document.getElementById('login-button') as HTMLButtonElement | null;
+  if (loginButton) {
+    platformReady.then((platform) => {
+      if (!platform.supportsLogin) return;
+      loginButton.addEventListener('click', () => platform.login());
+      const refresh = () => {
+        const show =
+          world.visibilityState.peek() === VisibilityState.NonImmersive && platformUser.peek() === null;
+        loginButton.style.display = show ? 'block' : 'none';
+      };
+      world.visibilityState.subscribe(refresh);
+      platformUser.subscribe(refresh);
+    }).catch((err) => console.warn('[platform] sign-in button setup failed', err));
   }
 
   // Clear color/alpha and the virtual sky backdrop (replacing DomeGradient,
@@ -200,6 +239,11 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // comments) — order relative to NotificationHudSystem doesn't matter,
   // it looks NotificationHudSystem up lazily via getSystem() on unlock.
   world.registerSystem(AchievementSystem, { priority: 36 });
+
+  // Signal-driven analytics events (see its own comment) — no update(), so
+  // priority is irrelevant; registered before director.start() so the first
+  // phase_entered isn't missed.
+  world.registerSystem(TelemetrySystem, { priority: 36 });
 
   // Ambient background music for the whole run — always-on, never
   // GameDirector-managed (see its own comments); starts itself once

@@ -5,6 +5,7 @@ import { unlockAchievement } from './achievement-store.js';
 import { getGlobals } from './globals.js';
 import { HapticPattern, HapticsSystem } from './haptics-system.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
+import { track } from './telemetry.js';
 
 // A shared "unlock" service, not a self-driving one — every achievement in
 // achievement-list.ts is now tied to a specific mission/gameplay outcome
@@ -39,6 +40,7 @@ export class AchievementSystem extends createSystem({}) {
   // message) rather than landing mid-cinematic.
   unlock(id: string): void {
     if (!unlockAchievement(id)) return;
+    track('achievement_unlocked', { id });
     const def = ACHIEVEMENTS.find((a) => a.id === id);
     if (!def) return;
     // notify() itself already self-mutes its box/chime when notifications

@@ -18,11 +18,12 @@
     "@iwsdk/core": "0.4.1",
     "@pmndrs/msdfonts": "1.0.73",
     "@preact/signals-core": "^1.14.2",
+    "firebase": "^12.19.0",
     "three": "npm:super-three@0.181.0"
   },
   "devDependencies": {
-    "@iwsdk/reference": "0.4.1",
     "@iwsdk/cli": "0.4.1",
+    "@iwsdk/reference": "0.4.1",
     "@iwsdk/vite-plugin-dev": "0.4.1",
     "@iwsdk/vite-plugin-uikitml": "0.4.1",
     "@meta-quest/hzdb": "^1.0.0",

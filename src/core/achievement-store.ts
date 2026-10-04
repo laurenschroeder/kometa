@@ -1,15 +1,30 @@
 import { signal, Signal } from '@preact/signals-core';
 
 const STORAGE_KEY = 'kometa:achievements';
+const COMBO_STORAGE_KEY = 'kometa:achievement-combos';
 
-function load(): Set<string> {
+// Every localStorage access goes through these two — storage can throw at
+// any time (blocked in an embedding iframe, private browsing, quota full),
+// and an unlock is called from the middle of gameplay code, so a storage
+// failure must only ever cost persistence, never the unlock itself or the
+// caller's frame. In-memory signals stay correct for the session either way.
+function loadSet(key: string): Set<string> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? new Set(parsed) : new Set();
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.filter((v): v is string => typeof v === 'string')) : new Set();
   } catch {
     return new Set();
+  }
+}
+
+function persistSet(key: string, value: Set<string> | null): void {
+  try {
+    if (value) localStorage.setItem(key, JSON.stringify([...value]));
+    else localStorage.removeItem(key);
+  } catch (err) {
+    console.warn(`[achievement-store] couldn't persist ${key} — progress kept for this session only`, err);
   }
 }
 
@@ -17,7 +32,7 @@ function load(): Set<string> {
 // globals.ts (whose signals reset every boot) since this one deliberately
 // doesn't. Any future system can read/write this directly; it isn't owned
 // by AchievementSystem.
-export const unlockedAchievements: Signal<Set<string>> = signal(load());
+export const unlockedAchievements: Signal<Set<string>> = signal(loadSet(STORAGE_KEY));
 
 export function isUnlocked(id: string): boolean {
   return unlockedAchievements.value.has(id);
@@ -33,21 +48,8 @@ export function unlockAchievement(id: string): boolean {
   const next = new Set(unlockedAchievements.value);
   next.add(id);
   unlockedAchievements.value = next;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify([...next]));
+  persistSet(STORAGE_KEY, next);
   return true;
-}
-
-const COMBO_STORAGE_KEY = 'kometa:achievement-combos';
-
-function loadCombos(): Set<string> {
-  try {
-    const raw = localStorage.getItem(COMBO_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? new Set(parsed) : new Set();
-  } catch {
-    return new Set();
-  }
 }
 
 // Persisted set of "<dominantPebbleType>-<launchChoice>" combos the player
@@ -55,7 +57,7 @@ function loadCombos(): Set<string> {
 // unlockedAchievements since this tracks raw history, not a single unlock
 // flag. Drives the 'complete-collection' achievement (see hasAllCombos) once
 // all 3 pebble types x 2 launch choices have each been seen at least once.
-export const seenCombos: Signal<Set<string>> = signal(loadCombos());
+export const seenCombos: Signal<Set<string>> = signal(loadSet(COMBO_STORAGE_KEY));
 
 export function recordCombo(dominantType: number, choice: 'orbit' | 'launch'): void {
   const key = `${dominantType}-${choice}`;
@@ -63,7 +65,7 @@ export function recordCombo(dominantType: number, choice: 'orbit' | 'launch'): v
   const next = new Set(seenCombos.value);
   next.add(key);
   seenCombos.value = next;
-  localStorage.setItem(COMBO_STORAGE_KEY, JSON.stringify([...next]));
+  persistSet(COMBO_STORAGE_KEY, next);
 }
 
 // 3 pebble types x 2 launch choices — see recordCombo's own comment.
@@ -71,11 +73,29 @@ export function hasAllCombos(): boolean {
   return seenCombos.value.size >= 6;
 }
 
+// Unions a cloud-saved copy (see progress-sync.ts) into both persisted sets.
+// Union is always safe here since neither set ever loses entries in normal
+// play, so there's no "which side wins" conflict to resolve.
+export function mergeProgress(achievements: readonly string[], combos: readonly string[]): void {
+  const nextAchievements = new Set([...unlockedAchievements.value, ...achievements]);
+  if (nextAchievements.size !== unlockedAchievements.value.size) {
+    unlockedAchievements.value = nextAchievements;
+    persistSet(STORAGE_KEY, nextAchievements);
+  }
+  const nextCombos = new Set([...seenCombos.value, ...combos]);
+  if (nextCombos.size !== seenCombos.value.size) {
+    seenCombos.value = nextCombos;
+    persistSet(COMBO_STORAGE_KEY, nextCombos);
+  }
+}
+
 // Dev/debug utility — wipes persisted unlock state so achievement unlocks
 // can be re-triggered/re-tested without waiting on their real conditions.
+// When cloud sync is active (see progress-sync.ts) the emptied sets are
+// saved to the cloud too, so a reset doesn't get merged right back in.
 export function resetAchievements(): void {
   unlockedAchievements.value = new Set();
-  localStorage.removeItem(STORAGE_KEY);
+  persistSet(STORAGE_KEY, null);
   seenCombos.value = new Set();
-  localStorage.removeItem(COMBO_STORAGE_KEY);
+  persistSet(COMBO_STORAGE_KEY, null);
 }

@@ -25,6 +25,11 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          # Selects src/core/platform/viverse.ts (cloud-saved progress via
+          # VIVERSE login). Builds without these fall back to local-only.
+          VITE_PLATFORM: viverse
+          VITE_VIVERSE_APP_ID: ${{ secrets.VVS_APP_ID }}
 
       - name: Install VIVERSE CLI
         run: npm install -g @viverse/cli
