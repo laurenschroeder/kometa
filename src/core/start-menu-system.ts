@@ -174,7 +174,10 @@ export class StartMenuSystem extends createSystem({
       maxAngle: 10,
     });
 
-    this._mainRow = this._buildCubeRow(['Achievements', 'Start', 'Settings']);
+    // Lowered (same LOWER_CUBE_HEIGHT as the achievements/leaderboard rows)
+    // so the cubes' labels sit clear below the title panel instead of
+    // covering its bottom edge — where the shared comet-count lines live.
+    this._mainRow = this._buildCubeRow(['Achievements', 'Start', 'Settings'], [0, LOWER_CUBE_HEIGHT, -CUBE_DISTANCE]);
     [this._achievementsButton, this._startButton, this._settingsButton] = this._mainRow.buttons;
 
     // Same distance as every other row, but lower — see the comment above
@@ -469,7 +472,9 @@ export class StartMenuSystem extends createSystem({
     // read as orbit here — kept separate only in the stored data.
     setLine(
       'community-split',
-      stats ? `${formatCount(stats.orbit + stats.drifted)} orbit | ${formatCount(stats.launch)} into the unknown` : null,
+      stats
+        ? `${formatCount(stats.orbit + stats.drifted)} into orbit and ${formatCount(stats.launch)} into the unknown`
+        : null,
     );
 
     const mine = cometsReleased.peek();
