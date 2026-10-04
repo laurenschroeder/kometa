@@ -104,12 +104,91 @@
     color: #71717a;
     margin-top: 0.3;
   }
+
+  /* Shared "comets released" lines under the title (see StartMenuSystem's
+     _refreshCommunityLines) — hidden until their data has loaded, and stay
+     hidden if it never does. ASCII only: the hud font atlas has no middle
+     dot, so separators are "|" and "-". */
+  .community-lines {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .community {
+    display: none;
+    font-size: 1.8;
+    color: #d4d4d8;
+    margin-top: 0.4;
+  }
+
+  .community-sub {
+    display: none;
+    font-size: 1.5;
+    color: #a1a1aa;
+    margin-top: 0.4;
+  }
+
+  /* Reached from the Achievements page's Leaderboard cube, which itself
+     only exists once leaderboard data has loaded (see StartMenuSystem). */
+  .page-leaderboard {
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lb-row {
+    display: none;
+    flex-direction: row;
+    align-items: center;
+    padding: 0.6;
+    margin-top: 0.4;
+    border-width: 0.08;
+    border-color: #3f3f46;
+    border-radius: 0;
+  }
+
+  .lb-rank {
+    width: 8;
+    font-size: 1.8;
+    color: #a1a1aa;
+  }
+
+  .lb-name {
+    flex-grow: 1;
+    font-size: 1.8;
+    color: #fafafa;
+  }
+
+  .lb-value {
+    font-size: 1.8;
+    color: #fafafa;
+  }
+
+  .lb-me {
+    display: none;
+    font-size: 1.8;
+    color: #4ade80;
+    margin-top: 1;
+  }
+
+  .lb-hint {
+    display: none;
+    font-size: 1.4;
+    color: #71717a;
+    margin-top: 0.6;
+  }
 </style>
 <div class="menu-root">
   <div id="page-main" class="page-main">
     <div class="title-row">
       <span class="title-k">K</span>
       <span class="title-rest">ometa</span>
+    </div>
+    <div class="community-lines">
+      <span id="community-total" class="community">-</span>
+      <span id="community-split" class="community-sub">-</span>
+      <span id="community-me" class="community-sub">-</span>
     </div>
   </div>
   <div id="page-achievements" class="page-achievements">
@@ -196,6 +275,61 @@
         </div>
       </div>
     </div>
+  </div>
+  <div id="page-leaderboard" class="page-leaderboard">
+    <hudtext class="title">Most Comets Released</hudtext>
+    <div id="lb-row-0" class="lb-row">
+      <span id="lb-rank-0" class="lb-rank">-</span>
+      <span id="lb-name-0" class="lb-name">-</span>
+      <span id="lb-value-0" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-1" class="lb-row">
+      <span id="lb-rank-1" class="lb-rank">-</span>
+      <span id="lb-name-1" class="lb-name">-</span>
+      <span id="lb-value-1" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-2" class="lb-row">
+      <span id="lb-rank-2" class="lb-rank">-</span>
+      <span id="lb-name-2" class="lb-name">-</span>
+      <span id="lb-value-2" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-3" class="lb-row">
+      <span id="lb-rank-3" class="lb-rank">-</span>
+      <span id="lb-name-3" class="lb-name">-</span>
+      <span id="lb-value-3" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-4" class="lb-row">
+      <span id="lb-rank-4" class="lb-rank">-</span>
+      <span id="lb-name-4" class="lb-name">-</span>
+      <span id="lb-value-4" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-5" class="lb-row">
+      <span id="lb-rank-5" class="lb-rank">-</span>
+      <span id="lb-name-5" class="lb-name">-</span>
+      <span id="lb-value-5" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-6" class="lb-row">
+      <span id="lb-rank-6" class="lb-rank">-</span>
+      <span id="lb-name-6" class="lb-name">-</span>
+      <span id="lb-value-6" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-7" class="lb-row">
+      <span id="lb-rank-7" class="lb-rank">-</span>
+      <span id="lb-name-7" class="lb-name">-</span>
+      <span id="lb-value-7" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-8" class="lb-row">
+      <span id="lb-rank-8" class="lb-rank">-</span>
+      <span id="lb-name-8" class="lb-name">-</span>
+      <span id="lb-value-8" class="lb-value">-</span>
+    </div>
+    <div id="lb-row-9" class="lb-row">
+      <span id="lb-rank-9" class="lb-rank">-</span>
+      <span id="lb-name-9" class="lb-name">-</span>
+      <span id="lb-value-9" class="lb-value">-</span>
+    </div>
+    <span id="lb-me" class="lb-me">-</span>
+    <span id="lb-hint" class="lb-hint">Sign in on the Kometa page before entering VR to join.</span>
   </div>
   <div id="page-settings" class="page-settings">
     <hudtext class="title">Settings</hudtext>

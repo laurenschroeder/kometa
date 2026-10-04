@@ -2,8 +2,9 @@ import { signal, Signal } from '@preact/signals-core';
 
 const STORAGE_KEY = 'kometa:achievements';
 const COMBO_STORAGE_KEY = 'kometa:achievement-combos';
+const COMETS_STORAGE_KEY = 'kometa:comets-released';
 
-// Every localStorage access goes through these two — storage can throw at
+// Every localStorage access goes through these helpers — storage can throw at
 // any time (blocked in an embedding iframe, private browsing, quota full),
 // and an unlock is called from the middle of gameplay code, so a storage
 // failure must only ever cost persistence, never the unlock itself or the
@@ -19,13 +20,26 @@ function loadSet(key: string): Set<string> {
   }
 }
 
-function persistSet(key: string, value: Set<string> | null): void {
+function loadCount(key: string): number {
   try {
-    if (value) localStorage.setItem(key, JSON.stringify([...value]));
+    const n = Number(localStorage.getItem(key));
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function persist(key: string, raw: string | null): void {
+  try {
+    if (raw !== null) localStorage.setItem(key, raw);
     else localStorage.removeItem(key);
   } catch (err) {
     console.warn(`[achievement-store] couldn't persist ${key} — progress kept for this session only`, err);
   }
+}
+
+function persistSet(key: string, value: Set<string> | null): void {
+  persist(key, value ? JSON.stringify([...value]) : null);
 }
 
 // Persisted, session-independent unlock state — kept separate from
@@ -73,10 +87,29 @@ export function hasAllCombos(): boolean {
   return seenCombos.value.size >= 6;
 }
 
-// Unions a cloud-saved copy (see progress-sync.ts) into both persisted sets.
-// Union is always safe here since neither set ever loses entries in normal
-// play, so there's no "which side wins" conflict to resolve.
-export function mergeProgress(achievements: readonly string[], combos: readonly string[]): void {
+// Lifetime count of comets this player has released (one per run that
+// reaches Launch's detach — see OrbitalLaunchSystem). Feeds the VIVERSE
+// "comets released" leaderboard via progress-sync.ts. Like the sets above
+// it only ever grows, so merging with a cloud copy is just max().
+export const cometsReleased: Signal<number> = signal(loadCount(COMETS_STORAGE_KEY));
+
+export function recordCometRelease(): void {
+  cometsReleased.value = cometsReleased.value + 1;
+  persist(COMETS_STORAGE_KEY, String(cometsReleased.value));
+}
+
+// Unions a cloud-saved copy (see progress-sync.ts) into both persisted sets,
+// and takes the larger comet count. Both are always safe since none of this
+// ever shrinks in normal play, so there's no "which side wins" conflict.
+export function mergeProgress(
+  achievements: readonly string[],
+  combos: readonly string[],
+  comets = 0,
+): void {
+  if (comets > cometsReleased.value) {
+    cometsReleased.value = comets;
+    persist(COMETS_STORAGE_KEY, String(comets));
+  }
   const nextAchievements = new Set([...unlockedAchievements.value, ...achievements]);
   if (nextAchievements.size !== unlockedAchievements.value.size) {
     unlockedAchievements.value = nextAchievements;

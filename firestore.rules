@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// Firestore security rules for Kometa. Not deployed automatically — paste
+// into Firebase console → Firestore Database → Rules and click Publish.
+//
+// The only data is the shared "comets released" counter written by
+// src/core/community-stats.ts (stats/comets, plus stats/comets-debug for
+// local/dev testing). Anyone can read it; a write must be exactly one comet:
+// total +1 and exactly one of orbit/launch/drifted +1, nothing else.
+// Everything else in the database is closed.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function counterDoc(docId) {
+      return docId in ['comets', 'comets-debug'];
+    }
+
+    // Missing fields count as 0, so the very first write can create the doc.
+    function before(field) {
+      return resource == null ? 0 : resource.data.get(field, 0);
+    }
+    function after(field) {
+      return request.resource.data.get(field, 0);
+    }
+    function bumped(field) {
+      return after(field) == before(field) + 1;
+    }
+    function same(field) {
+      return after(field) == before(field);
+    }
+
+    function isOneRelease() {
+      return request.resource.data.keys().hasOnly(['total', 'orbit', 'launch', 'drifted'])
+        && bumped('total')
+        && ((bumped('orbit') && same('launch') && same('drifted'))
+          || (same('orbit') && bumped('launch') && same('drifted'))
+          || (same('orbit') && same('launch') && bumped('drifted')));
+    }
+
+    match /stats/{docId} {
+      allow read: if counterDoc(docId);
+      allow create, update: if counterDoc(docId) && isOneRelease();
+    }
+  }
+}

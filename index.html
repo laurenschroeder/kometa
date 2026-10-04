@@ -120,6 +120,13 @@
         line-height: 1.2;
         color: #d4d4d8;
       }
+      /* Shared "comets released" count (see src/index.ts) — quieter than the
+         tagline, and only shown once the count has loaded. */
+      #kometa-panel #community-line {
+        margin-top: 2vmin;
+        font-size: clamp(12px, 1.9vmin, 26px);
+        color: #a1a1aa;
+      }
       /* Studio credit: a bit larger than the tagline above it, flanked by dots. */
       #kometa-panel .tagline-studio {
         font-size: 1.3em;
@@ -212,6 +219,7 @@
         <span class="title-rest">ometa</span>
       </div>
       <div class="tagline">AN EXPERIENCE OF STARDUST AND FATE<br><span class="tagline-studio">· VIRTUALPEBBLE ·</span></div>
+      <div id="community-line" class="tagline" style="display: none"></div>
     </div>
     <button id="enter-vr-button">
       <img class="corner corner-bl" src="/textures/corner.png" />

@@ -12,10 +12,13 @@ import {
 } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
 import { ACHIEVEMENTS } from './achievement-list.js';
-import { isUnlocked } from './achievement-store.js';
+import { cometsReleased, isUnlocked } from './achievement-store.js';
+import { cometStats, fetchCometStats } from './community-stats.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
 import { HapticPattern, HapticsSystem } from './haptics-system.js';
+import { cometLeaderboard, platformUser, refreshLeaderboard } from './progress-sync.js';
+import { track } from './telemetry.js';
 import { cubeRowOffsets, CUBE_DISTANCE, CUBE_HEIGHT, LOWER_CUBE_HEIGHT, PokeCubeButton } from '../vfx/ui/poke-button.js';
 
 // Start no longer uses a dwell button — pinching with BOTH hands at once
@@ -41,7 +44,24 @@ const PANEL_MAX_HEIGHT = 0.6;
 // CUBE_DISTANCE but lower than the other rows (LOWER_CUBE_HEIGHT, about 3
 // inches), so it clears the taller four-column achievement list above it.
 
-type MenuPage = 'main' | 'achievements' | 'settings';
+// Max rows the leaderboard page has markup for (lb-row-0..9 in
+// ui/start-menu.uikitml).
+const LEADERBOARD_ROWS = 10;
+
+type MenuPage = 'main' | 'achievements' | 'settings' | 'leaderboard';
+
+// Player display names come from VIVERSE and can contain anything, but the
+// panel's MSDF font atlas only has printable ASCII — anything else would
+// render as missing glyphs, so it's stripped (falling back to a neutral name).
+function displayName(raw: string): string {
+  const clean = raw.replace(/[^\x20-\x7e]/g, '').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Traveler';
+  return clean.length > 24 ? `${clean.slice(0, 23)}-` : clean;
+}
+
+function formatCount(n: number): string {
+  return n.toLocaleString('en-US');
+}
 
 interface CubeRow {
   rootEntity: Entity;
@@ -72,7 +92,13 @@ export class StartMenuSystem extends createSystem({
   private _page: MenuPage = 'main';
 
   private _mainRow!: CubeRow;
+  // Two alternative rows for the achievements page — the Leaderboard cube
+  // only exists once leaderboard data has actually loaded (see _activeRow),
+  // so on any failure (or a host without a leaderboard) the page looks
+  // exactly as it did before the leaderboard existed.
   private _achievementsRow!: CubeRow;
+  private _achievementsLeaderboardRow!: CubeRow;
+  private _leaderboardRow!: CubeRow;
   private _settingsRow!: CubeRow;
   private _startButton!: PokeCubeButton;
   private _achievementsButton!: PokeCubeButton;
@@ -156,6 +182,14 @@ export class StartMenuSystem extends createSystem({
     this._achievementsRow = this._buildCubeRow(['Back'], [0, LOWER_CUBE_HEIGHT, -CUBE_DISTANCE]);
     this._achievementsRow.rootObject.visible = false;
     for (const button of this._achievementsRow.buttons) button.setEnabled(false);
+    this._achievementsLeaderboardRow = this._buildCubeRow(['Leaderboard', 'Back'], [0, LOWER_CUBE_HEIGHT, -CUBE_DISTANCE]);
+    this._achievementsLeaderboardRow.rootObject.visible = false;
+    for (const button of this._achievementsLeaderboardRow.buttons) button.setEnabled(false);
+    // Same lowered spot — the leaderboard list is as tall as the
+    // achievements one.
+    this._leaderboardRow = this._buildCubeRow(['Back'], [0, LOWER_CUBE_HEIGHT, -CUBE_DISTANCE]);
+    this._leaderboardRow.rootObject.visible = false;
+    for (const button of this._leaderboardRow.buttons) button.setEnabled(false);
 
     const globals = getGlobals(this.world);
     this._settingsRow = this._buildCubeRow([
@@ -178,6 +212,23 @@ export class StartMenuSystem extends createSystem({
         const doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
         this._docRef = doc;
 
+        // Shared comet count / own count / own rank under the title — each
+        // line only appears once its own data exists (see
+        // _refreshCommunityLines). Subscribed only once the document exists,
+        // since the lines live in it.
+        const refreshLines = () => this._refreshCommunityLines(doc);
+        this.cleanupFuncs.push(cometStats.subscribe(refreshLines));
+        this.cleanupFuncs.push(cometsReleased.subscribe(refreshLines));
+        this.cleanupFuncs.push(
+          cometLeaderboard.subscribe(() => {
+            refreshLines();
+            // Leaderboard data arriving (or refreshing) while the player is
+            // already on a page that depends on it — re-open in place so the
+            // Leaderboard cube appears / the rows update.
+            if (this._page === 'achievements' || this._page === 'leaderboard') this._openPage(this._page);
+          }),
+        );
+
         this._startAction = () => {
           this._recenterToHead();
           this._director.start();
@@ -189,9 +240,19 @@ export class StartMenuSystem extends createSystem({
     );
   }
 
+  private _allRows(): CubeRow[] {
+    return [
+      this._mainRow,
+      this._achievementsRow,
+      this._achievementsLeaderboardRow,
+      this._leaderboardRow,
+      this._settingsRow,
+    ];
+  }
+
   private _hideAll(): void {
     this._panelObject.visible = false;
-    for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
+    for (const row of this._allRows()) {
       row.rootObject.visible = false;
       for (const button of row.buttons) button.setEnabled(false);
     }
@@ -248,7 +309,15 @@ export class StartMenuSystem extends createSystem({
       if (this._firedPoke(this._achievementsButton, delta, pokeReady)) this._openPage('achievements');
       if (this._firedPoke(this._settingsButton, delta, pokeReady)) this._openPage('settings');
     } else if (this._page === 'achievements') {
-      if (this._firedPoke(this._achievementsRow.buttons[0], delta, pokeReady)) this._openPage('main');
+      const row = this._activeRow();
+      if (row === this._achievementsLeaderboardRow) {
+        if (this._firedPoke(row.buttons[0], delta, pokeReady)) this._openPage('leaderboard');
+        else if (this._firedPoke(row.buttons[1], delta, pokeReady)) this._openPage('main');
+      } else if (this._firedPoke(row.buttons[0], delta, pokeReady)) {
+        this._openPage('main');
+      }
+    } else if (this._page === 'leaderboard') {
+      if (this._firedPoke(this._leaderboardRow.buttons[0], delta, pokeReady)) this._openPage('achievements');
     } else if (this._page === 'settings') {
       if (this._firedPoke(this._passthroughButton, delta, pokeReady)) {
         const globals = getGlobals(this.world);
@@ -282,7 +351,10 @@ export class StartMenuSystem extends createSystem({
   }
 
   private _activeRow(): CubeRow {
-    if (this._page === 'achievements') return this._achievementsRow;
+    if (this._page === 'achievements') {
+      return cometLeaderboard.peek() ? this._achievementsLeaderboardRow : this._achievementsRow;
+    }
+    if (this._page === 'leaderboard') return this._leaderboardRow;
     if (this._page === 'settings') return this._settingsRow;
     return this._mainRow;
   }
@@ -352,14 +424,17 @@ export class StartMenuSystem extends createSystem({
   // only: title/hint on main, title+list on achievements, title on
   // settings) and which cube row is visible/pokeable.
   private _openPage(page: MenuPage): void {
+    const previousPage = this._page;
     this._page = page;
     const doc = this._doc();
     doc?.getElementById('page-main')?.setProperties({ display: page === 'main' ? 'flex' : 'none' });
     doc?.getElementById('page-achievements')?.setProperties({ display: page === 'achievements' ? 'flex' : 'none' });
     doc?.getElementById('page-settings')?.setProperties({ display: page === 'settings' ? 'flex' : 'none' });
+    doc?.getElementById('page-leaderboard')?.setProperties({ display: page === 'leaderboard' ? 'flex' : 'none' });
 
-    for (const row of [this._mainRow, this._achievementsRow, this._settingsRow]) {
-      const active = row === this._activeRow();
+    const activeRow = this._activeRow();
+    for (const row of this._allRows()) {
+      const active = row === activeRow;
       row.rootObject.visible = active;
       for (const button of row.buttons) {
         button.setEnabled(active);
@@ -368,6 +443,64 @@ export class StartMenuSystem extends createSystem({
     }
 
     if (page === 'achievements' && doc) this._refreshAchievementRows(doc);
+    if (page === 'leaderboard' && doc) this._refreshLeaderboardRows(doc);
+    // Not on an in-place re-open (data refresh while already viewing it).
+    if (page === 'leaderboard' && previousPage !== 'leaderboard') track('leaderboard_opened');
+  }
+
+  // Each line is independent and hidden whenever its own data is missing —
+  // a failed shared-count fetch hides only that line, a failed rank lookup
+  // only drops the "#rank" suffix, and so on. Runs only when one of the
+  // underlying signals changes, never per-frame.
+  private _refreshCommunityLines(doc: UIKitDocument): void {
+    const setLine = (id: string, text: string | null) => {
+      doc.getElementById(id)?.setProperties({
+        display: text ? 'flex' : 'none',
+        ...(text ? { text } : {}),
+      } as Record<string, unknown>);
+    };
+
+    const stats = cometStats.peek();
+    setLine(
+      'community-total',
+      stats ? `${formatCount(stats.total)} ${stats.total === 1 ? 'comet' : 'comets'} released` : null,
+    );
+    // Drifted comets (timed out without choosing) end up orbiting, so they
+    // read as orbit here — kept separate only in the stored data.
+    setLine(
+      'community-split',
+      stats ? `${formatCount(stats.orbit + stats.drifted)} orbit | ${formatCount(stats.launch)} into the unknown` : null,
+    );
+
+    const mine = cometsReleased.peek();
+    const rank = cometLeaderboard.peek()?.me?.rank;
+    setLine(
+      'community-me',
+      mine > 0
+        ? `You: ${formatCount(mine)} ${mine === 1 ? 'comet' : 'comets'}${rank ? ` - #${formatCount(rank)}` : ''}`
+        : null,
+    );
+  }
+
+  private _refreshLeaderboardRows(doc: UIKitDocument): void {
+    const view = cometLeaderboard.peek();
+    const entries = view?.entries ?? [];
+    for (let i = 0; i < LEADERBOARD_ROWS; i++) {
+      const entry = entries[i];
+      doc.getElementById(`lb-row-${i}`)?.setProperties({ display: entry ? 'flex' : 'none' });
+      if (!entry) continue;
+      doc.getElementById(`lb-rank-${i}`)?.setProperties({ text: `#${entry.rank}` } as Record<string, unknown>);
+      doc.getElementById(`lb-name-${i}`)?.setProperties({ text: displayName(entry.name) } as Record<string, unknown>);
+      doc.getElementById(`lb-value-${i}`)?.setProperties({ text: formatCount(entry.value) } as Record<string, unknown>);
+    }
+
+    const me = view?.me;
+    doc.getElementById('lb-me')?.setProperties({
+      display: me ? 'flex' : 'none',
+      ...(me ? { text: `You are #${formatCount(me.rank)} with ${formatCount(me.value)}` } : {}),
+    } as Record<string, unknown>);
+    // Only for guests, and only alongside a leaderboard that did load.
+    doc.getElementById('lb-hint')?.setProperties({ display: view && platformUser.peek() === null ? 'flex' : 'none' });
   }
 
   private _doc(): UIKitDocument | null {
@@ -385,6 +518,10 @@ export class StartMenuSystem extends createSystem({
     this._startTriggered = false;
     this._panelObject.visible = true;
     this._openPage('main');
+    // A run just ended — pick up this player's own new comet and everyone
+    // else's since boot. Both are fire-and-forget and never reject.
+    void fetchCometStats();
+    void refreshLeaderboard();
   }
 
   private _refreshAchievementRows(doc: UIKitDocument): void {

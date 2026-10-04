@@ -2,7 +2,9 @@ import { AudioListener, createSystem, Vector3 } from '@iwsdk/core';
 import { CometBody } from '../../comet/comet-body-component.js';
 import { HandAnchor, HandSide } from '../../comet/hand-anchor-component.js';
 import { AchievementSystem } from '../../core/achievement-system.js';
-import { hasAllCombos, recordCombo } from '../../core/achievement-store.js';
+import { hasAllCombos, recordCombo, recordCometRelease } from '../../core/achievement-store.js';
+import { recordCometReleased, type ReleaseKind } from '../../core/community-stats.js';
+import { track } from '../../core/telemetry.js';
 import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
 import {
   FINAL_CHOICE_MESSAGE,
@@ -123,6 +125,10 @@ export class OrbitalLaunchSystem extends createSystem({
 }) {
   private _state: LaunchState = 'choosing';
   private _choice: LaunchChoice | null = null;
+  // True when stop()'s timeout fallback had to pick 'orbit' for a player
+  // who never chose — counted as its own "drifted" fate in the shared
+  // comet counter (see _recordRelease), even though it plays out as orbit.
+  private _drifted = false;
   // Flipped by the onComplete callback on the LAST message in _commit()'s
   // notify() chain (commit message + LAUNCH_BUILDUP_SEQUENCE) — see the
   // class comment on why this can't be a hand-timed guess.
@@ -256,6 +262,7 @@ export class OrbitalLaunchSystem extends createSystem({
     this._hasPlayed = true;
     this._state = 'choosing';
     this._choice = null;
+    this._drifted = false;
     this._buildupComplete = false;
     this._timeoutDeferred = false;
     this._postDetachElapsed = 0;
@@ -323,6 +330,7 @@ export class OrbitalLaunchSystem extends createSystem({
       if (this._state === 'choosing' && this._elapsed >= LAUNCH_TIMEOUT_SECONDS - 1) {
         this.world.getSystem(AchievementSystem)?.unlock('indecisive');
       }
+      this._drifted = this._choice === null;
       this._choice = this._choice ?? 'orbit';
       this._detach();
     }
@@ -569,6 +577,20 @@ export class OrbitalLaunchSystem extends createSystem({
       entity.removeComponent(HandAnchor);
     }
     this._synth.playDetach(this._scratchPos);
+    this._recordRelease();
+  }
+
+  // The comet has left the player's hand — every run detaches exactly once
+  // (a real swing-out, or stop()'s timeout fallback), so this is the single
+  // place a run counts as "a comet released": the player's own lifetime
+  // count (VIVERSE leaderboard, via progress-sync.ts), the shared
+  // everyone-counter (Firestore, via community-stats.ts — fire-and-forget,
+  // never awaited, never throws), and analytics.
+  private _recordRelease(): void {
+    const kind: ReleaseKind = this._drifted ? 'drifted' : (this._choice ?? 'orbit');
+    recordCometRelease();
+    void recordCometReleased(kind);
+    track('comet_released', { choice: kind });
   }
 
   // Read-only accessors for OrbitalLaunchVfxSystem/CometAutopilotSystem.

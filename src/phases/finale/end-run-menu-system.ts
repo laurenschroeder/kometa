@@ -1,4 +1,6 @@
 import { createSystem, Entity, Follower, FollowBehavior, Object3D, PanelDocument, PanelUI, Vector3 } from '@iwsdk/core';
+import type { UIKitDocument } from '@iwsdk/core';
+import { cometStats, lastRelease } from '../../core/community-stats.js';
 import { GameDirectorSystem } from '../../core/game-director-system.js';
 import { getGlobals } from '../../core/globals.js';
 import { HapticPattern, HapticsSystem } from '../../core/haptics-system.js';
@@ -37,6 +39,9 @@ export class EndRunMenuSystem extends createSystem({
   private _mainMenuButton!: PokeCubeButton;
   private _elapsed = 0;
   private _shown = false;
+  // Set once the panel's JSON has loaded (same qualify idiom as
+  // StartMenuSystem's own _docRef).
+  private _doc: UIKitDocument | null = null;
   private _scratchPokePos = new Vector3();
   // Bumped on every play()/stop() so a finale message's onComplete from an
   // earlier run can't reveal the panel during a later one.
@@ -78,6 +83,54 @@ export class EndRunMenuSystem extends createSystem({
     const offsets = cubeRowOffsets(1);
     this._mainMenuButton = new PokeCubeButton(this.world, cubeRootEntity, 'Main Menu', [offsets[0], 0, 0]);
     this._mainMenuButton.setEnabled(false);
+
+    // The query matches ANY [PanelUI, PanelDocument] entity in the scene
+    // (same caveat as StartMenuSystem/NotificationHudSystem) — only this
+    // system's own panel matters.
+    this.queries.panel.subscribe(
+      'qualify',
+      (panelEntity) => {
+        if (panelEntity.index !== entity.index) return;
+        this._doc = panelEntity.getValue(PanelDocument, 'document') as UIKitDocument;
+        this._fillCometLines();
+      },
+      true,
+    );
+    // The shared counter's write/refresh is async (kicked off at Launch's
+    // detach, see OrbitalLaunchSystem._recordRelease) and may land after
+    // this panel is already showing — refill whenever either arrives.
+    this.cleanupFuncs.push(lastRelease.subscribe(() => this._fillCometLines()));
+    this.cleanupFuncs.push(cometStats.subscribe(() => this._fillCometLines()));
+  }
+
+  // "Yours was comet #N." and the share of comets that met the same fate as
+  // this one. Each line is hidden unless its own data loaded — a failed
+  // shared-counter write/fetch just means the panel reads as it always did.
+  private _fillCometLines(): void {
+    const doc = this._doc;
+    if (!doc) return;
+    const setLine = (id: string, text: string | null) => {
+      doc.getElementById(id)?.setProperties({
+        display: text ? 'flex' : 'none',
+        ...(text ? { text } : {}),
+      } as Record<string, unknown>);
+    };
+
+    const release = lastRelease.peek();
+    setLine('end-run-comet', release ? `Yours was comet #${release.number.toLocaleString('en-US')}.` : null);
+
+    const stats = cometStats.peek();
+    const choice = this.world.getSystem(OrbitalLaunchSystem)?.getChoice() ?? 'orbit';
+    let split: string | null = null;
+    if (stats && stats.total > 0) {
+      // Drifted comets (never chose) end up orbiting, so they count as orbit.
+      const orbitShare = Math.round(((stats.orbit + stats.drifted) / stats.total) * 100);
+      split =
+        choice === 'orbit'
+          ? `${orbitShare}% of comets orbit forever, like yours.`
+          : `${100 - orbitShare}% of comets launched into the unknown, like yours.`;
+    }
+    setLine('end-run-split', split);
   }
 
   play(): void {
