@@ -61,8 +61,9 @@ const TRAVEL_ARC_HEIGHT = 0.35;
 // Fixed local offset above the comet's tracked position once attached —
 // own constant rather than importing PebbleCometPresentationSystem's
 // HEAD_RADIUS, same "stay decoupled" reasoning GhostRise's own orbit offset
-// already follows.
-const CROWN_HEAD_OFFSET_Y = 0.045;
+// already follows. Tuned with DevCrownPreviewSystem so the tiara's band rests
+// right on top of the head.
+export const CROWN_HEAD_OFFSET_Y = 0.025;
 
 const SPIN_SPEED_EMERGE = 0.4; // rad/s
 const SPIN_SPEED_TRAVEL = 1.1;
@@ -87,8 +88,8 @@ const SPIN_SPEED_ATTACHED = 0.15;
 const TIARA_FBX_URL = '/medium/tiaraGas.fbx';
 // Its own max-distance-from-origin, scaled to this many meters — same order
 // of magnitude as earth-situations-vfx-system.ts's own CROWN_FBX_RADIUS.
-// Starting guess; tune visually in-headset.
-const TIARA_RADIUS = 0.075;
+// Tuned with DevCrownPreviewSystem to just about match the head's width.
+export const TIARA_RADIUS = 0.062;
 
 let tiaraGeometryPromise: Promise<BufferGeometry | null> | null = null;
 // Loads (and caches) tiaraGas.fbx's own single mesh, normalized around its
@@ -103,6 +104,13 @@ function loadTiaraGeometry(): Promise<BufferGeometry | null> {
     tiaraGeometryPromise = loadFbxAllMeshes(TIARA_FBX_URL, 1, (geo) => {
       rotateX180(geo);
       normalizeGeometryToUnitRadiusFromOrigin(geo);
+      // The artist's origin is at the band's bottom-FRONT, so the crown sat
+      // off-center on the head and wobbled around it as the group spins —
+      // recenter horizontally (keeping the bottom at y=0) so it spins in
+      // place, centered over the comet's head.
+      geo.computeBoundingBox();
+      const box = geo.boundingBox!;
+      geo.translate(-(box.min.x + box.max.x) / 2, 0, -(box.min.z + box.max.z) / 2);
     }).then((geos) => geos[0] ?? null);
   }
   return tiaraGeometryPromise;
@@ -222,8 +230,14 @@ export class CrownRise {
   // it's essentially always already resolved by the time it's needed.
   private _tiaraGeometry: BufferGeometry | null = null;
 
+  // Instance copies of TIARA_RADIUS/CROWN_HEAD_OFFSET_Y so
+  // DevCrownPreviewSystem can tune them live — see devAttachNow().
+  tiaraRadius = TIARA_RADIUS;
+  headOffsetY = CROWN_HEAD_OFFSET_Y;
+
   build(world: World, listener: AudioListener, scene: Scene): void {
     this._group = new Group();
+    this._group.name = 'comet-crown';
     this._group.visible = false;
     world.createTransformEntity(this._group);
 
@@ -276,7 +290,7 @@ export class CrownRise {
       const mesh = new Mesh(this._tiaraGeometry, this._material);
       const scatterStart = new Vector3(0, -EMERGE_DROP_HEIGHT, 0);
       const ringTarget = new Vector3(0, 0, 0);
-      const targetScale = new Vector3(TIARA_RADIUS, TIARA_RADIUS, TIARA_RADIUS);
+      const targetScale = new Vector3(this.tiaraRadius, this.tiaraRadius, this.tiaraRadius);
       mesh.position.copy(scatterStart);
       mesh.scale.setScalar(0); // grows in during Emerging, see _updateEmerging
       this._group.add(mesh);
@@ -359,7 +373,7 @@ export class CrownRise {
     if (this._state === CrownState.Landing) {
       this._t = Math.min(1, this._t + delta / LAND_DURATION);
       const eased = smoothstep(this._t);
-      this._scratchOffset.set(cometPosition.x, cometPosition.y + CROWN_HEAD_OFFSET_Y, cometPosition.z);
+      this._scratchOffset.set(cometPosition.x, cometPosition.y + this.headOffsetY, cometPosition.z);
       this._group.position.lerpVectors(this._travelFrom, this._scratchOffset, eased);
       // Settle "pop" — a brief overshoot past 1.0 scale, back to 1.0 — a
       // simple sin envelope rather than a spring simulation.
@@ -377,8 +391,30 @@ export class CrownRise {
     // Attached — permanently worn at a fixed offset above the comet's live
     // head position (not an orbit, per this class's own comment — a crown
     // that circled the comet wouldn't read as "worn").
-    this._group.position.set(cometPosition.x, cometPosition.y + CROWN_HEAD_OFFSET_Y, cometPosition.z);
+    this._group.position.set(cometPosition.x, cometPosition.y + this.headOffsetY, cometPosition.z);
     this._group.rotation.y += SPIN_SPEED_ATTACHED * delta;
+  }
+
+  // Dev-only (DevCrownPreviewSystem) — lets the preview reparent the crown
+  // under its own enlarged stand-in head.
+  get devGroup(): Group {
+    return this._group;
+  }
+
+  // Dev-only (DevCrownPreviewSystem): skips the whole rise/travel/land
+  // sequence and puts a freshly built crown straight into Attached, using
+  // the current tiaraRadius/headOffsetY. Silent — no shimmer/settle audio.
+  devAttachNow(color: [number, number, number]): void {
+    this._hardStopShimmer();
+    (this._material.uniforms.uBodyColor.value as Vector3).set(...color);
+    this._rebuildSpikes();
+    for (const spike of this._spikes) {
+      spike.mesh.position.copy(spike.ringTarget);
+      spike.mesh.scale.copy(spike.targetScale);
+    }
+    this._group.scale.setScalar(1);
+    this._group.visible = true;
+    this._state = CrownState.Attached;
   }
 
   // Each spike lerps from its scatterStart (underground) to ringTarget

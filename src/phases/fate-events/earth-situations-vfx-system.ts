@@ -111,12 +111,14 @@ const CROWN_FBX_URL = '/medium/crownForKing.fbx';
 // roughly the same overall reach as the procedural fallback's own band-
 // radius/spike-height combined. Starting guess; tune visually in-headset.
 const CROWN_FBX_RADIUS = PERSON_HEIGHT * 0.18;
-// Small tuning offset from the head-top attach point (head-bone local
-// space: +Y up, +Z toward the face). At (-CROWN_EMBED, 0) the model sat
-// too far back and slightly low on the head, so it's nudged forward and
-// up to rest centered right on top.
+// Tuning offset from the head-top attach point, in head-bone local space —
+// which is NOT aligned with the figure: +Z is mostly forward but angled
+// toward the King's right, +X is roughly toward his left. Tuned with
+// DevCrownPreviewSystem (front + both profiles) to sit centered right on
+// top of the head.
+const CROWN_FBX_OFFSET_X = PERSON_HEIGHT * 0.075;
 const CROWN_FBX_OFFSET_Y = PERSON_HEIGHT * 0.02;
-const CROWN_FBX_OFFSET_Z = PERSON_HEIGHT * 0.05;
+const CROWN_FBX_OFFSET_Z = PERSON_HEIGHT * 0.094;
 
 let crownGeometryPromise: Promise<BufferGeometry | null> | null = null;
 // Loads (and caches) crownForKing.fbx's own single mesh, converted to Y-up
@@ -152,7 +154,7 @@ export function buildKingCrownProp(): Group {
     while (group.children.length > 0) group.remove(group.children[0]);
     const mesh = new Mesh(geo, crownMaterial);
     mesh.scale.setScalar(CROWN_FBX_RADIUS);
-    mesh.position.set(0, CROWN_FBX_OFFSET_Y, CROWN_FBX_OFFSET_Z);
+    mesh.position.set(CROWN_FBX_OFFSET_X, CROWN_FBX_OFFSET_Y, CROWN_FBX_OFFSET_Z);
     group.add(mesh);
   });
 
@@ -672,6 +674,28 @@ export class EarthSituationsVfxSystem extends createSystem({
   // swapped for the real crownForKing.fbx model the moment (if ever) it
   // resolves — same "instant placeholder, upgrade in place" idiom as
   // buildFbxField/buildObjNamedGroupField.
+  // Dev-only (DevCrownPreviewSystem): puts the comet's crown straight onto
+  // its head with the given size/height (<= 0 keeps the current value).
+  devAttachCometCrown(tiaraRadius: number, headOffsetY: number): void {
+    if (tiaraRadius > 0) this._crown.tiaraRadius = tiaraRadius;
+    if (headOffsetY > 0) this._crown.headOffsetY = headOffsetY;
+    const dominant = getGlobals(this.world).dominantPebbleType.peek();
+    this._crown.devAttachNow(PEBBLE_TYPES[dominant]?.color ?? PEBBLE_TYPES[VOLATILE_GASSES_TYPE].color);
+    console.info(
+      `[DevCrownPreview] comet crown attached: tiaraRadius=${this._crown.tiaraRadius} headOffsetY=${this._crown.headOffsetY} ` +
+        `cometPos=${this._scratchCometPos.toArray().map((v) => v.toFixed(3)).join(',')}`,
+    );
+  }
+
+  // Dev-only (DevCrownPreviewSystem): replays the real constellation-
+  // completion crown sequence (rise, hover, travel, land) from the start.
+  devReplayCometCrownRise(): void {
+    this._crown.reset();
+    this._crownWasAttached = false;
+    this._onCompletion(this._planetSeeding.getLivePlanetRadius() + SURFACE_OFFSET);
+    console.info('[DevCrownPreview] comet crown rise replayed.');
+  }
+
   private _buildCrownProp(): Group {
     return buildKingCrownProp();
   }
