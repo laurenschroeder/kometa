@@ -18,10 +18,18 @@ export class TelemetrySystem extends createSystem({}) {
   init(): void {
     const globals = getGlobals(this.world);
 
+    // subscribe() fires once immediately with the boot state (NonImmersive),
+    // so xr_exited is only tracked after a session has actually been entered.
+    let wasInXR = false;
     this.cleanupFuncs.push(
       this.world.visibilityState.subscribe((state) => {
-        if (state === VisibilityState.Visible) track('xr_entered');
-        else if (state === VisibilityState.NonImmersive) track('xr_exited');
+        if (state === VisibilityState.Visible && !wasInXR) {
+          wasInXR = true;
+          track('xr_entered');
+        } else if (state === VisibilityState.NonImmersive && wasInXR) {
+          wasInXR = false;
+          track('xr_exited');
+        }
       }),
     );
 

@@ -183,6 +183,52 @@
         cursor: pointer;
         display: none;
       }
+      /* Same black / thin white border / square-corner language as
+         #enter-vr-button, which this replaces on browsers that can't enter
+         VR — smaller type so two buttons fit side by side on a phone. */
+      #headset-panel {
+        position: fixed;
+        left: 50%;
+        bottom: 32px;
+        transform: translateX(-50%);
+        z-index: 10;
+        width: min(92vw, 560px);
+        box-sizing: border-box;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        font-family: 'CarroisGothicSC', sans-serif;
+        color: #ffffff;
+        text-align: center;
+      }
+      #headset-panel .headset-message {
+        font-size: 20px;
+        font-weight: bold;
+        letter-spacing: 0.06em;
+      }
+      #headset-panel .headset-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 12px;
+      }
+      #headset-panel .headset-button {
+        display: inline-block;
+        padding: 14px 26px;
+        font-size: 18px;
+        font-weight: bold;
+        color: #ffffff;
+        text-decoration: none;
+        background-color: #000000;
+        border: 2px solid #ffffff;
+        border-radius: 0;
+      }
+      #headset-panel .headset-hint {
+        font-size: 14px;
+        color: #a1a1aa;
+        letter-spacing: 0.04em;
+      }
       [id] > .corner {
         position: absolute;
         width: 24px;
@@ -229,6 +275,22 @@
       Enter VR
     </button>
     <button id="login-button">Sign in to save progress</button>
+    <!-- Shown INSTEAD of #enter-vr-button when this browser can't run an
+         immersive session at all — e.g. Messenger/Facebook/Instagram's
+         in-app browser, phones, desktop without a headset (see
+         src/core/browser-support.ts). Links are filled in by
+         initHeadsetPanel(). -->
+    <div id="headset-panel">
+      <div class="headset-message">Kometa is played in a VR headset.</div>
+      <div class="headset-actions">
+        <a id="send-to-headset" class="headset-button" target="_blank" rel="noopener">Send to my headset</a>
+        <a id="open-in-chrome" class="headset-button" target="_top" style="display: none">Open in Chrome</a>
+      </div>
+      <div class="headset-hint">Or open this page in Meta Quest Browser.</div>
+      <div id="open-in-browser-hint" class="headset-hint" style="display: none">
+        Tap the ••• menu and choose to open this page in your browser.
+      </div>
+    </div>
     <script type="module" src="/src/index.ts"></script>
   </body>
 </html>

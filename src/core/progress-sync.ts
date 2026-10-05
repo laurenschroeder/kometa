@@ -29,8 +29,10 @@ const SAVE_DEBOUNCE_MS = 2000;
 const LEADERBOARD_TOP = 10;
 const LEADERBOARD_CACHE_MS = 60000;
 
-// Undefined until the platform has answered; null for a guest. Drives the
-// 2D sign-in button in index.ts.
+// Undefined until the platform has answered — and stays undefined if the
+// platform failed to start at all (e.g. the VIVERSE SDK didn't load), since
+// there's then no working login to offer. Null for a confirmed guest. Drives
+// the 2D sign-in button in index.ts.
 export const platformUser: Signal<PlatformUser | null | undefined> = signal(undefined);
 
 // Null until a leaderboard fetch has fully succeeded — and stays null on
@@ -84,7 +86,6 @@ export async function startProgressSync(): Promise<void> {
     user = await platform.init();
   } catch (err) {
     console.warn('[progress-sync] platform init failed — local-only this session', err);
-    platformUser.value = null;
     resolveInitSettled();
     return;
   }

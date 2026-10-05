@@ -60,7 +60,14 @@ export function initTelemetry(): void {
         disable('analytics not supported in this browser');
         return;
       }
-      analytics = analyticsModule.getAnalytics(initializeApp(firebaseConfig));
+      // Debug mode has to be set on gtag's config, not per event: passed as
+      // an event param it's sent as a plain custom value (ep.debug_mode) and
+      // DebugView never sees the session — only the config-level flag makes
+      // gtag mark every hit with its real debug marker (_dbg=1).
+      analytics = analyticsModule.initializeAnalytics(
+        initializeApp(firebaseConfig),
+        DEBUG ? { config: { debug_mode: true } } : {},
+      );
       logEventFn = analyticsModule.logEvent;
       setUserPropertiesFn = analyticsModule.setUserProperties;
       const queued = pending.splice(0);
@@ -81,8 +88,7 @@ export function track(name: string, params: Params = {}): void {
   if (disabled) return;
   try {
     if (DEBUG) console.info('[telemetry]', name, params);
-    const sent = DEBUG ? { ...params, debug_mode: true } : params;
-    whenReady(() => logEventFn!(analytics!, name, sent));
+    whenReady(() => logEventFn!(analytics!, name, params));
   } catch (err) {
     disable('track threw', err);
   }

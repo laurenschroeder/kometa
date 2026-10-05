@@ -44,12 +44,18 @@ import { PlanetSeedingSystem } from './phases/planet-seeding/planet-seeding-syst
 import { PlanetSeedingVfxSystem } from './phases/planet-seeding/planet-seeding-vfx-system.js';
 import { StardustSystem } from './phases/stardust/stardust-system.js';
 import { StardustVfxSystem } from './phases/stardust/stardust-vfx-system.js';
+import { canEnterXR, initHeadsetPanel } from './core/browser-support.js';
 import { cometStats, fetchCometStats } from './core/community-stats.js';
 import { getPlatform, platformUser, startProgressSync } from './core/progress-sync.js';
 import { initTelemetry, setTelemetryUserProps } from './core/telemetry.js';
 import { TelemetrySystem } from './core/telemetry-system.js';
 
 startLoadingScreen();
+
+// Answered in parallel with world creation — decides between Enter VR and
+// the "Send to my headset" panel (see browser-support.ts).
+const xrSupport = canEnterXR();
+initHeadsetPanel();
 
 // Analytics, host platform (cloud save + leaderboard) and the shared comet
 // counter all start in parallel with world creation and never block it —
@@ -74,7 +80,9 @@ void fetchCometStats();
 const communityLine = document.getElementById('community-line');
 if (communityLine) {
   cometStats.subscribe((stats) => {
-    communityLine.textContent = stats ? `${stats.total.toLocaleString('en-US')} COMETS RELEASED` : '';
+    communityLine.textContent = stats
+      ? `${stats.total.toLocaleString('en-US')} ${stats.total === 1 ? 'COMET' : 'COMETS'} RELEASED`
+      : '';
     communityLine.style.display = stats ? 'block' : 'none';
   });
 }
@@ -134,22 +142,36 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // and hidden the instant a session starts; VisibilityState returns to
   // NonImmersive on its own if the session ends, which re-shows it — no
   // separate session-end handling needed here.
+  //
+  // On a browser that definitively can't run an immersive session (see
+  // canEnterXR — e.g. Messenger's in-app browser, phones), Enter VR is
+  // swapped for #headset-panel's "Send to my headset" path instead. Starts
+  // optimistic (Enter VR) until the check answers, which normally happens
+  // long before the loading screen lifts.
   const enterVrButton = document.getElementById('enter-vr-button') as HTMLButtonElement | null;
   // Title panel shown above it in the browser window (see index.html).
   const kometaPanel = document.getElementById('kometa-panel') as HTMLDivElement | null;
-  if (enterVrButton) {
-    enterVrButton.addEventListener('click', () => launchXR(world));
-    world.visibilityState.subscribe((state) => {
-      const nonImmersive = state === VisibilityState.NonImmersive;
-      enterVrButton.style.display = nonImmersive ? 'block' : 'none';
-      if (kometaPanel) kometaPanel.style.display = nonImmersive ? 'flex' : 'none';
-    });
-  }
+  const headsetPanel = document.getElementById('headset-panel') as HTMLDivElement | null;
+  enterVrButton?.addEventListener('click', () => launchXR(world));
+  let xrSupported = true;
+  const refreshEntry = () => {
+    const nonImmersive = world.visibilityState.peek() === VisibilityState.NonImmersive;
+    if (enterVrButton) enterVrButton.style.display = nonImmersive && xrSupported ? 'block' : 'none';
+    if (headsetPanel) headsetPanel.style.display = nonImmersive && !xrSupported ? 'flex' : 'none';
+    if (kometaPanel) kometaPanel.style.display = nonImmersive ? 'flex' : 'none';
+  };
+  world.visibilityState.subscribe(refreshEntry);
+  void xrSupport.then((supported) => {
+    xrSupported = supported;
+    refreshEntry();
+  });
 
   // Optional sign-in for cloud-saved progress (see progress-sync.ts) — only
   // offered in the 2D browser view, since the platform's login flow can
   // redirect/reload the page, and only once the platform has confirmed the
-  // player is a guest. Hosts without a login (LOCAL_ONLY) never show it.
+  // player is a guest. Hosts without a login (LOCAL_ONLY) never show it, and
+  // neither does a browser that can't run the game anyway (see
+  // canEnterXR) — signing in there would only be a confusing detour.
   const loginButton = document.getElementById('login-button') as HTMLButtonElement | null;
   if (loginButton) {
     platformReady.then((platform) => {
@@ -157,11 +179,14 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
       loginButton.addEventListener('click', () => platform.login());
       const refresh = () => {
         const show =
-          world.visibilityState.peek() === VisibilityState.NonImmersive && platformUser.peek() === null;
+          xrSupported &&
+          world.visibilityState.peek() === VisibilityState.NonImmersive &&
+          platformUser.peek() === null;
         loginButton.style.display = show ? 'block' : 'none';
       };
       world.visibilityState.subscribe(refresh);
       platformUser.subscribe(refresh);
+      void xrSupport.then(refresh);
     }).catch((err) => console.warn('[platform] sign-in button setup failed', err));
   }
 
@@ -483,4 +508,15 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // game behind the start menu.
 
   finishLoadingScreen();
+}).catch(async (err) => {
+  // The 3D world failed to build at all — most likely a constrained in-app
+  // browser (Messenger etc.) running out of memory/WebGL. Without this the
+  // loading cover would stay up forever; instead show the title panel, plus
+  // the "Send to my headset" path when this browser can't run XR anyway.
+  console.error('[Kometa] world failed to start', err);
+  finishLoadingScreen();
+  const kometaPanel = document.getElementById('kometa-panel');
+  if (kometaPanel) kometaPanel.style.display = 'flex';
+  const headsetPanel = document.getElementById('headset-panel');
+  if (headsetPanel && !(await xrSupport)) headsetPanel.style.display = 'flex';
 });
