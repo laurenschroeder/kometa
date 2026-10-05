@@ -60,6 +60,7 @@ import { loadSkullGeometry, SKULL_BODY_COLOR, SKULL_COLOR } from './fate-event-v
 import { kHeadGeo } from '../pebbles/pebble-comet-presentation-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 const VOLATILE_GASSES_TYPE = 2;
 const ORGANIC_MATTER_TYPE = 1;
@@ -110,13 +111,12 @@ const CROWN_FBX_URL = '/medium/crownForKing.fbx';
 // roughly the same overall reach as the procedural fallback's own band-
 // radius/spike-height combined. Starting guess; tune visually in-headset.
 const CROWN_FBX_RADIUS = PERSON_HEIGHT * 0.18;
-// Small tuning offset from the head-top attach point — mirrors CROWN_EMBED's
-// own "sink slightly into the head" idiom. No Z (forward/back) offset yet:
-// the model's own front-biased origin (see this const's own comment above)
-// means one will likely read better, but its correct sign/magnitude needs
-// visual confirmation in-headset before guessing at a number.
-const CROWN_FBX_OFFSET_Y = -CROWN_EMBED;
-const CROWN_FBX_OFFSET_Z = 0;
+// Small tuning offset from the head-top attach point (head-bone local
+// space: +Y up, +Z toward the face). At (-CROWN_EMBED, 0) the model sat
+// too far back and slightly low on the head, so it's nudged forward and
+// up to rest centered right on top.
+const CROWN_FBX_OFFSET_Y = PERSON_HEIGHT * 0.02;
+const CROWN_FBX_OFFSET_Z = PERSON_HEIGHT * 0.05;
 
 let crownGeometryPromise: Promise<BufferGeometry | null> | null = null;
 // Loads (and caches) crownForKing.fbx's own single mesh, converted to Y-up
@@ -139,6 +139,39 @@ function loadCrownGeometry(): Promise<BufferGeometry | null> {
     }).then((geos) => geos[0] ?? null);
   }
   return crownGeometryPromise;
+}
+
+// The King's worn crown prop (see _buildCrownProp's own comment). Exported
+// for DevCrownPreviewSystem's close-up placement check.
+export function buildKingCrownProp(): Group {
+  const group = new Group();
+  populateProceduralCrown(group);
+
+  loadCrownGeometry().then((geo) => {
+    if (!geo) return;
+    while (group.children.length > 0) group.remove(group.children[0]);
+    const mesh = new Mesh(geo, crownMaterial);
+    mesh.scale.setScalar(CROWN_FBX_RADIUS);
+    mesh.position.set(0, CROWN_FBX_OFFSET_Y, CROWN_FBX_OFFSET_Z);
+    group.add(mesh);
+  });
+
+  return group;
+}
+
+function populateProceduralCrown(group: Group): void {
+  const band = new Mesh(new CylinderGeometry(CROWN_BAND_RADIUS, CROWN_BAND_RADIUS * 1.08, CROWN_BAND_HEIGHT, 10), crownMaterial);
+  band.position.y = CROWN_BAND_HEIGHT / 2 - CROWN_EMBED;
+  group.add(band);
+
+  const spikeGeo = new ConeGeometry(CROWN_SPIKE_RADIUS, CROWN_SPIKE_HEIGHT, 6);
+  const spikeY = CROWN_BAND_HEIGHT - CROWN_EMBED + CROWN_SPIKE_HEIGHT / 2;
+  for (let i = 0; i < CROWN_SPIKE_COUNT; i++) {
+    const angle = (i / CROWN_SPIKE_COUNT) * Math.PI * 2;
+    const spike = new Mesh(spikeGeo, crownMaterial);
+    spike.position.set(Math.cos(angle) * CROWN_BAND_RADIUS * 0.85, spikeY, Math.sin(angle) * CROWN_BAND_RADIUS * 0.85);
+    group.add(spike);
+  }
 }
 
 const GRAVE_COLOR = new Color(GRAVE);
@@ -493,8 +526,7 @@ export class EarthSituationsVfxSystem extends createSystem({
     // buffer-only). Passed into CrownRise, which owns its own ascension/
     // settle sounds since they're entirely driven by its own state machine,
     // and reused directly for Beat 5's shared payoff chime.
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
 
     this._crown = new CrownRise();
     this._crown.build(this.world, this._audioListener, this.scene);
@@ -641,34 +673,7 @@ export class EarthSituationsVfxSystem extends createSystem({
   // resolves — same "instant placeholder, upgrade in place" idiom as
   // buildFbxField/buildObjNamedGroupField.
   private _buildCrownProp(): Group {
-    const group = new Group();
-    this._populateProceduralCrown(group);
-
-    loadCrownGeometry().then((geo) => {
-      if (!geo) return;
-      while (group.children.length > 0) group.remove(group.children[0]);
-      const mesh = new Mesh(geo, crownMaterial);
-      mesh.scale.setScalar(CROWN_FBX_RADIUS);
-      mesh.position.set(0, CROWN_FBX_OFFSET_Y, CROWN_FBX_OFFSET_Z);
-      group.add(mesh);
-    });
-
-    return group;
-  }
-
-  private _populateProceduralCrown(group: Group): void {
-    const band = new Mesh(new CylinderGeometry(CROWN_BAND_RADIUS, CROWN_BAND_RADIUS * 1.08, CROWN_BAND_HEIGHT, 10), crownMaterial);
-    band.position.y = CROWN_BAND_HEIGHT / 2 - CROWN_EMBED;
-    group.add(band);
-
-    const spikeGeo = new ConeGeometry(CROWN_SPIKE_RADIUS, CROWN_SPIKE_HEIGHT, 6);
-    const spikeY = CROWN_BAND_HEIGHT - CROWN_EMBED + CROWN_SPIKE_HEIGHT / 2;
-    for (let i = 0; i < CROWN_SPIKE_COUNT; i++) {
-      const angle = (i / CROWN_SPIKE_COUNT) * Math.PI * 2;
-      const spike = new Mesh(spikeGeo, crownMaterial);
-      spike.position.set(Math.cos(angle) * CROWN_BAND_RADIUS * 0.85, spikeY, Math.sin(angle) * CROWN_BAND_RADIUS * 0.85);
-      group.add(spike);
-    }
+    return buildKingCrownProp();
   }
 
   private _buildKing(): void {

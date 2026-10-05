@@ -65,6 +65,9 @@ coverage/
 public/gltf/generated/
 public/glxf/
 public/ui/
+# Generated promo/store art (scripts/promo-art/render.mjs)
+promo/
+
 # Blender files
 *.blend
 *.blend1

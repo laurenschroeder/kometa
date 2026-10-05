@@ -27,6 +27,7 @@ import { playPayoffChime } from '../../vfx/audio/payoff-chime.js';
 import {
   kGasCloudMat,
   kOrganicGlitterMat,
+  kOrganicRockMat,
   kSoulIslandMat,
   PEBBLE_ISLAND_MESH_NAMES,
   PEBBLE_ISLAND_MESH_URL,
@@ -34,6 +35,7 @@ import {
 } from '../../vfx/shaders/pebble-material.js';
 import { PEBBLE_TYPES } from './pebble-type.js';
 import { PebbleWeavingSystem } from './pebble-weaving-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // PEBBLE_TYPES' own index order — soul dust (0), organic matter (1),
 // volatile gasses (2) — doubles as this system's art-style dispatch key
@@ -66,7 +68,7 @@ const LINE_CUE_DECAY_SCALE = 0.3;
 
 const N_ORGANIC_VARIANTS = 6;
 // Only organic-type pebbles use these now (previously shared by all three
-// types) — see kOrganicGlitterMat.
+// types) — see kOrganicRockMat.
 const kOrganicGeos: BufferGeometry[] = Array.from({ length: N_ORGANIC_VARIANTS }, () => buildOrganicGeometry());
 
 // Most organic pebbles stay at their normal sampled size, but a minority
@@ -135,7 +137,7 @@ export class PebbleFieldVfxSystem extends createSystem({
   private _typeReveal!: Float32Array;
 
   // Organic (type 1) — same 6-variant rock geometry every pebble used to
-  // share, now exclusively organic, with kOrganicGlitterMat instead of the
+  // share, now exclusively organic, with kOrganicRockMat instead of the
   // old single tinted material.
   private _organicVariant!: Uint8Array;
   private _organicLocalIdx!: Uint16Array;
@@ -193,8 +195,7 @@ export class PebbleFieldVfxSystem extends createSystem({
     this._assignedType = this._pebbles.getAssignedType();
     this._typeReveal = new Float32Array(PEBBLE_TYPES.length);
 
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._pebbleSynth = new PebbleSynth();
     this._pebbleSynth.build(this._audioListener, this.scene);
     this._scratchCapturePos = new Vector3();
@@ -252,7 +253,7 @@ export class PebbleFieldVfxSystem extends createSystem({
       const tintAttr = new InstancedBufferAttribute(new Float32Array(bucketCounts[v] * 3), 3);
       geo.setAttribute('aTint', tintAttr);
       geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(bucketCounts[v]).fill(1), 1));
-      const mesh = new InstancedMesh(geo, kOrganicGlitterMat, bucketCounts[v]);
+      const mesh = new InstancedMesh(geo, kOrganicRockMat, bucketCounts[v]);
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
       mesh.frustumCulled = false;
       zeroInstanceMatrices(mesh, bucketCounts[v]);

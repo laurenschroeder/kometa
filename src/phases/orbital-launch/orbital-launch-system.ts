@@ -18,6 +18,7 @@ import { FADE_SECONDS, NotificationHudSystem } from '../../core/notification-hud
 import { OrbitalLaunchSynth } from '../../vfx/audio/orbital-launch-synth.js';
 import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from '../planet-seeding/planet-seeding-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // 45 degrees front-left/front-right — used both as the fixed placeholder
 // direction before this system has ever played (see init()) and as the
@@ -195,8 +196,7 @@ export class OrbitalLaunchSystem extends createSystem({
   private _currentHand: string = HandSide.Left;
 
   init(): void {
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._synth = new OrbitalLaunchSynth();
     this._synth.build(this._audioListener, this.scene);
 

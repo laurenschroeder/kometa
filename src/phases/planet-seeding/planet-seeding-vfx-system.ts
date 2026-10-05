@@ -28,6 +28,7 @@ import { PlanetGrowthPool } from './planet-growth-pool.js';
 import { PlanetLaunchTransition } from './planet-launch-transition.js';
 import { PlanetSpinTransition, TOTAL_ROTATION_DELTA } from './planet-spin-transition.js';
 import { CELL_DIRS, N_MOONS, PLANET_RADIUS, PlanetSeedingSystem } from './planet-seeding-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // Falling motes render as stardust — the same sparkle point sprites (color/
 // shader) the Stardust phase's own ambient motes use — so what falls onto the
@@ -195,8 +196,7 @@ export class PlanetSeedingVfxSystem extends createSystem({
     // StardustVfxSystem/PebbleFieldVfxSystem each need one: IWSDK's own
     // AudioSource/AudioUtils layer only plays pre-loaded buffers, with no
     // hook for generative/synthesized audio.
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._spinSynth = new PlanetSpinSynth();
     this._spinSynth.build(this._audioListener, this.scene);
 

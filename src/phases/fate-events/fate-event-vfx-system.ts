@@ -78,6 +78,7 @@ import {
   NAMED_FIGURE_COUNT,
 } from './fate-event-system.js';
 import { SeedBlossom } from './seed-blossom.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 const JUMP_FREQUENCY = 5; // Hz — speed of the single hop, see _jumpElapsed
 const JUMP_AMPLITUDE = 0.135; // scaled with PERSON_HEIGHT's 2.2x then 3x bumps (0.045 -> 0.135)
@@ -751,8 +752,7 @@ export class FateEventVfxSystem extends createSystem({
     this._scratchCometPos = new Vector3();
     this._scratchCometBack = new Vector3();
 
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._voiceSynth = new PebbleSynth();
     this._voiceSynth.build(this._audioListener, this.scene);
     this._twinkleSynth = new TwinkleSynth();

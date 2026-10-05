@@ -25,6 +25,7 @@ import { makePixelCrtMaterial } from '../../vfx/shaders/pixel-crt-material.js';
 import { makeSparkleMaterial } from '../../vfx/shaders/sparkle-material.js';
 import { hexToRgb, STARDUST, SWIRL_GOLD } from '../../vfx/color/color-scheme.js';
 import { STARDUST_TYPE_DISTANT, STARDUST_TYPE_NEAR, StardustSystem } from './stardust-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // The swirl finale's collectible gold gather-field (see
 // StardustSystem.getSwirlField()) — a warm gold, distinct from the cream
@@ -158,8 +159,7 @@ export class StardustVfxSystem extends createSystem({
     this._trailSystem = this.world.getSystem(CometTrailSystem)!;
     this._material = makeSparkleMaterial({ color: STARDUST_COLOR, blending: AdditiveBlending });
 
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._twinkleSynth = new TwinkleSynth();
     this._twinkleSynth.build(this._audioListener, this.scene);
     this._swirlSynth = new SwirlSynth();

@@ -16,6 +16,7 @@ import { Phase } from './phase.js';
 import { hexToRgb, NOTIFICATION_TEXT_DEFAULT } from '../vfx/color/color-scheme.js';
 import { playNotificationChime } from '../vfx/audio/notification-chime.js';
 import { HUD_FONT_FAMILIES } from '../vfx/fonts/font-registry.js';
+import { getSharedAudioListener } from '../vfx/audio/shared-audio-listener.js';
 
 // A `fontFamilies` value only takes effect if present at component
 // construction time (setProperties() on an already-built Text/Container
@@ -179,8 +180,7 @@ export class NotificationHudSystem extends createSystem({
     panelObject.visible = true;
     this._panelObject = panelObject;
 
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._scratchSoundPos = new Vector3();
 
     entity.addComponent(PanelUI, {

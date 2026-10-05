@@ -478,11 +478,10 @@ export class StartMenuSystem extends createSystem({
     );
 
     const mine = cometsReleased.peek();
-    const rank = cometLeaderboard.peek()?.me?.rank;
     setLine(
       'community-me',
       mine > 0
-        ? `You: ${formatCount(mine)} ${mine === 1 ? 'comet' : 'comets'}${rank ? ` - #${formatCount(rank)}` : ''}`
+        ? `You released ${formatCount(mine)} ${mine === 1 ? 'comet' : 'comets'}`
         : null,
     );
   }

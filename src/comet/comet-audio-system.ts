@@ -3,6 +3,7 @@ import { CometInteractionSynth } from '../vfx/audio/comet-interaction-synth.js';
 import { CometBody } from './comet-body-component.js';
 import { CometCaught, CometReleased, CometSnapped } from './comet-event-tags.js';
 import { HandAnchor } from './hand-anchor-component.js';
+import { getSharedAudioListener } from '../vfx/audio/shared-audio-listener.js';
 
 // Comet grab/throw/hand-catch sounds. Always-on, never phase-gated — same
 // reasoning as the comet/ mechanic itself (comet-handoff-system.ts et al.):
@@ -25,8 +26,7 @@ export class CometAudioSystem extends createSystem({
   private _scratchPos!: Vector3;
 
   init(): void {
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._synth = new CometInteractionSynth();
     this._synth.build(this._audioListener, this.scene);
     this._scratchPos = new Vector3();

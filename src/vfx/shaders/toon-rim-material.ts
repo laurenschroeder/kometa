@@ -128,9 +128,24 @@ export function makeToonRimInstancedTintedMaterial(palette: ToonRimPalette): Sha
 // regular/grid-like look an ordered (Bayer) dither would give. The outline
 // itself stays a smooth smoothstep (undithered) — only the body shading
 // stipples.
-export function makeToonRimInstancedDitherMaterial(palette: ToonRimPalette): ShaderMaterial {
+//
+// `antialias` (opt-in, default off so existing callers like the planet
+// sprouts render unchanged): once a dot cell shrinks below about a pixel —
+// small pebbles at arm's length in the headset — the per-cell hash turns
+// into shimmering noise that crawls as the head moves. With antialias on,
+// the stipple fades (via fwidth) into its own average, a smooth tint *
+// coverage shade, so distant pebbles keep the same darker-center /
+// brighter-edge read without the shimmer, and still stipple up close.
+export function makeToonRimInstancedDitherMaterial(
+  palette: ToonRimPalette,
+  params: { antialias?: boolean; dotFrequency?: number } = {},
+): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
+  const antialias = params.antialias ?? false;
+  // Dot cells per local unit — coarser dots stay readable as speckle on
+  // small objects (see kOrganicRockMat) where the default is sub-pixel.
+  const dotFrequency = params.dotFrequency ?? INK_DOT_FREQUENCY;
 
   const vertexShader = `
     attribute float aBright;
@@ -193,10 +208,18 @@ export function makeToonRimInstancedDitherMaterial(palette: ToonRimPalette): Sha
       // the same shading term OUTLINE_GLSL's own edge already leans on —
       // sampled per-cell off object-space position so the pattern stays
       // glued to the surface (not swimming in screen space) and stereo-safe.
-      float grain    = hash13(floor(vLocalPos * ${INK_DOT_FREQUENCY.toFixed(1)}));
+      float grain    = hash13(floor(vLocalPos * ${dotFrequency.toFixed(1)}));
       float shade    = 1.0 - ndotv;
       float coverage = mix(${INK_MIN_COVERAGE.toFixed(4)}, ${INK_MAX_COVERAGE.toFixed(4)}, shade);
       float ink      = step(1.0 - coverage, grain);
+      ${
+        antialias
+          ? `// cells per pixel — 1.0 means one dot cell spans one pixel
+      vec3  cellFw   = fwidth(vLocalPos * ${dotFrequency.toFixed(1)});
+      float cellPx   = max(cellFw.x, max(cellFw.y, cellFw.z));
+      ink            = mix(ink, coverage, smoothstep(0.35, 0.9, cellPx));`
+          : ''
+      }
 
       // Flipped from the original black-grain-on-color read: base is now
       // black and the grain itself carries the color, so this reads as
@@ -695,10 +718,81 @@ const FACE_DECAL_SCALE = 3.0;
 // comment), a caller asking for a 2x bigger face passes sizeMultiplier=2 and
 // this divides it in, rather than callers having to know/invert that
 // relationship themselves.
-export function makeToonRimDecalMaterial(palette: ToonRimPalette, sizeMultiplier = 1): ShaderMaterial {
+// Optional "carved stone" treatment for the decal (see makeHeadMat for the
+// tuned values the comet head uses). All noise is sampled in the head's
+// local space, so it's glued to the surface rather than swimming. Omit it
+// entirely for the original flat `mix(body, face, isFace * 0.96)` look.
+export interface RockyFaceParams {
+  faceGrain: number; // 0..1 granite mottling/speckle inside the face lines
+  faceTint: number; // 0..1 pull the face's white toward warm stone
+  faceEdgeFade: number; // 0..1 fade the face where the surface turns away
+  bodyGrain: number; // 0..1+ rock patches/mottling/flecks on the dark body
+}
+
+// Warm pale stone the face is pulled toward by RockyFaceParams.faceTint.
+const FACE_STONE: [number, number, number] = [0.86, 0.82, 0.74];
+
+function rockyFaceGlsl(rocky: RockyFaceParams): { pars: string; blend: string } {
+  const f = (n: number) => n.toFixed(4);
+  return {
+    pars: `
+    float rh3(vec3 p) {
+      p = fract(p * 0.3183099 + 0.1);
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+    // Smooth value noise — unlike the per-cell hash used elsewhere in this
+    // file, this reads as natural stone mottling rather than dots.
+    float rnoise(vec3 p) {
+      vec3 i = floor(p), f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(
+        mix(mix(rh3(i), rh3(i + vec3(1, 0, 0)), f.x), mix(rh3(i + vec3(0, 1, 0)), rh3(i + vec3(1, 1, 0)), f.x), f.y),
+        mix(mix(rh3(i + vec3(0, 0, 1)), rh3(i + vec3(1, 0, 1)), f.x), mix(rh3(i + vec3(0, 1, 1)), rh3(i + vec3(1, 1, 1)), f.x), f.y),
+        f.z);
+    }
+    float rfbm(vec3 p) {
+      float v = 0.0, a = 0.5;
+      for (int i = 0; i < 4; i++) { v += a * rnoise(p); p = p * 2.07 + 11.3; a *= 0.5; }
+      return v;
+    }
+    // Fades a fine noise term to its 0.5 mean once its features shrink
+    // below about a pixel, so it can't shimmer on a small head in VR.
+    float rfine(float n, float freq, float fw) {
+      return mix(n, 0.5, smoothstep(0.35, 1.0, fw * freq));
+    }`,
+    blend: `
+      float fw      = length(fwidth(vLocalPos));
+      float rock    = rfbm(vLocalPos * 7.0);
+      float pits    = rfine(rnoise(vLocalPos * 70.0), 70.0, fw);
+      float speck   = rfine(rnoise(vLocalPos * 140.0), 140.0, fw);
+      float facing  = smoothstep(0.1, 0.9, ndotv);
+      float fade    = isFace * 0.96 * mix(1.0, facing, ${f(rocky.faceEdgeFade)});
+      // tonal stone variation only — kept well above black so it never
+      // reads as missing pixels
+      vec3  stone   = face.rgb * mix(1.0, 0.5 + 0.3 * rock + 0.2 * pits + 0.2 * speck, ${f(rocky.faceGrain)});
+      stone         = mix(stone, stone * ${vec3Glsl(FACE_STONE)}, ${f(rocky.faceTint)});
+      // The body is near-black, so multiplying alone barely shows — lift
+      // broad lighter rock patches, finer mottling and sparse pale mineral
+      // flecks additively on top (still dark, so the face keeps its pop).
+      float patches = smoothstep(0.38, 0.78, rfbm(vLocalPos * 3.5 + 20.0));
+      vec3  body    = uBodyColor * mix(1.0, (0.45 + 1.1 * rock) * (0.8 + 0.4 * pits), ${f(rocky.bodyGrain)})
+                    + ${f(rocky.bodyGrain)} * (vec3(0.075, 0.08, 0.095) * patches
+                                              + vec3(0.035, 0.037, 0.045) * rock * pits
+                                              + vec3(0.12, 0.12, 0.13) * pow(speck, 9.0));
+      vec3  col     = mix(body, stone, fade);`,
+  };
+}
+
+export function makeToonRimDecalMaterial(
+  palette: ToonRimPalette,
+  sizeMultiplier = 1,
+  rocky?: RockyFaceParams,
+): ShaderMaterial {
   const outlineLow = palette.outlineLow ?? DEFAULT_OUTLINE_LOW;
   const outlineHigh = palette.outlineHigh ?? DEFAULT_OUTLINE_HIGH;
   const decalScale = FACE_DECAL_SCALE / sizeMultiplier;
+  const rockyGlsl = rocky ? rockyFaceGlsl(rocky) : null;
 
   const vertexShader = `
     varying vec3 vViewNormal;
@@ -726,6 +820,7 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette, sizeMultiplier
     varying vec3 vViewDir;
     varying vec3 vLocalPos;
     varying vec2 vDecalUV;
+    ${rockyGlsl?.pars ?? ''}
 
     void main() {
       vec3  n     = normalize(vViewNormal);
@@ -744,7 +839,7 @@ export function makeToonRimDecalMaterial(palette: ToonRimPalette, sizeMultiplier
       float inBounds  = step(0.0, vDecalUV.x) * step(vDecalUV.x, 1.0)
                        * step(0.0, vDecalUV.y) * step(vDecalUV.y, 1.0);
       float isFace = smoothstep(0.3, 0.7, face.a) * inBounds;
-      vec3  col     = mix(uBodyColor, face.rgb, isFace * 0.96);
+      ${rockyGlsl?.blend ?? 'vec3  col     = mix(uBodyColor, face.rgb, isFace * 0.96);'}
 
       col = mix(col, ${vec3Glsl(palette.rimColor)}, outline);
       gl_FragColor = vec4(col, 1.0);

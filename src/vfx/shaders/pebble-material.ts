@@ -1,5 +1,6 @@
 import { AdditiveBlending } from '@iwsdk/core';
 import {
+  makeToonRimInstancedDitherMaterial,
   makeToonRimInstancedGrainyMaterial,
   makeToonRimInstancedWigglyMaterial,
   ToonRimPalette,
@@ -67,6 +68,23 @@ export const ORGANIC_GLITTER_PALETTE: ToonRimPalette = {
   sparkleColor: hexToRgb(WHITE),
 };
 export const kOrganicGlitterMat = makeToonRimInstancedGrainyMaterial(ORGANIC_GLITTER_PALETTE);
+
+// The organic PEBBLES themselves (ambient Pebbles field + the comet's tail —
+// the same pebbles before and after capture, so both must match) use this
+// instead of kOrganicGlitterMat: colored-dust stipple over a dark body,
+// densest toward the silhouette, which reads as a round rock rather than
+// the glitter material's flat dark disc. antialias fades the stipple to its
+// average shade once dots go sub-pixel, so distant pebbles don't shimmer
+// in the headset. dotFrequency 25 (vs. the plants' 480): pebbles are tiny,
+// so the default dots are sub-pixel even up close — 25 gives ~2-3px dots on
+// near/in-hand pebbles (visible dusty speckle), ~1px on typical tail
+// pebbles at arm's length, where antialias smooths them instead.
+// kOrganicGlitterMat stays for seed collectibles/blossoms. No uniforms —
+// nothing to tick per frame.
+export const kOrganicRockMat = makeToonRimInstancedDitherMaterial(ORGANIC_GLITTER_PALETTE, {
+  antialias: true,
+  dotFrequency: 25,
+});
 
 // ── Gas (type 2) — little additive gas-cloud puffs ──────────────────────────
 // Warm red/orange, NOT the nebula reference's teal — PEBBLE_TYPES[2].color

@@ -30,13 +30,14 @@ import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-s
 import {
   kGasCloudMat,
   kOrganicGlitterMat,
+  kOrganicRockMat,
   kSoulIslandMat,
   PEBBLE_ISLAND_MESH_NAMES,
   PEBBLE_ISLAND_MESH_URL,
   SOUL_SIZE_MULTIPLIER,
 } from '../../vfx/shaders/pebble-material.js';
 import { makePointSpriteMaterial } from '../../vfx/shaders/point-sprite-material.js';
-import { makeToonRimDecalMaterial } from '../../vfx/shaders/toon-rim-material.js';
+import { makeToonRimDecalMaterial, RockyFaceParams } from '../../vfx/shaders/toon-rim-material.js';
 
 // Comet head decal textures, indexed to line up with PEBBLE_TYPES (0 = soul,
 // 1 = organic, 2 = gas) — resolved lazily since AssetManager isn't populated
@@ -135,8 +136,18 @@ const kHazeMat = makePointSpriteMaterial({
 // PebbleChoiceBubbleSystem's own preview) can ask for a bigger face decal so
 // it still reads clearly, without affecting the real in-hand comet's own
 // default (1x) call.
+// Carved-stone face treatment (see RockyFaceParams) — the face lines stay
+// high-contrast but read as pale granite, and the dark body gets rock
+// patches/mottling instead of a flat fill. Tuned in the promo renderer
+// (scripts/promo-art/), which shares these values.
+const HEAD_ROCKY_FACE: RockyFaceParams = {
+  faceGrain: 0.95,
+  faceTint: 0.5,
+  faceEdgeFade: 0.25,
+  bodyGrain: 1.0,
+};
 export function makeHeadMat(faceSizeMultiplier = 1): ShaderMaterial {
-  return makeToonRimDecalMaterial(HEAD_PALETTE, faceSizeMultiplier);
+  return makeToonRimDecalMaterial(HEAD_PALETTE, faceSizeMultiplier, HEAD_ROCKY_FACE);
 }
 
 interface CometVisual {
@@ -380,7 +391,7 @@ export class PebbleCometPresentationSystem extends createSystem({
       const tintAttr = new InstancedBufferAttribute(new Float32Array(ORGANIC_VARIANT_CAPACITY * 3), 3);
       geo.setAttribute('aTint', tintAttr);
       geo.setAttribute('aTinted', new InstancedBufferAttribute(new Float32Array(ORGANIC_VARIANT_CAPACITY).fill(1), 1));
-      const mesh = new InstancedMesh(geo, kOrganicGlitterMat, ORGANIC_VARIANT_CAPACITY);
+      const mesh = new InstancedMesh(geo, kOrganicRockMat, ORGANIC_VARIANT_CAPACITY);
       mesh.name = `comet-organic-${v}`;
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
       mesh.frustumCulled = false;

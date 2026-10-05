@@ -36,6 +36,7 @@ import { makeSparkleMaterial } from '../shaders/sparkle-material.js';
 import { makeToonRimFlatMaterial, makeToonRimInstancedWigglyLiveRimMaterial } from '../shaders/toon-rim-material.js';
 import { TwinkleSynth } from '../audio/twinkle-synth.js';
 import { drawLabel } from '../textures/canvas-label.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // Shared floating "poke and hold to fill" diamond button — the interaction
 // model every player-facing menu in this game now uses (Start Menu's own
@@ -128,9 +129,8 @@ const LOCKED_FILL_DIM_MAX = 0.7;
 const LOCKED_GLOW_MAX = 0.6;
 
 // Lazily built once and shared by every PokeCubeButton in the game — one
-// extra AudioListener gain node on player.head (see stardust-vfx-system.ts's
-// own comment on why generative audio needs its own listener, IWSDK's
-// AudioSource/AudioUtils layer being buffer-only), not one per button.
+// synth on the game-wide shared AudioListener (see shared-audio-listener.ts),
+// not one per button.
 // Exported so other choice-select UI sharing this same "magic" audio
 // identity (e.g. PebbleChoiceBubbleSystem's own in-range chime) can reuse
 // the exact same synth/listener instead of spinning up a second one.
@@ -138,9 +138,7 @@ let sharedTwinkleSynth: TwinkleSynth | null = null;
 export function getSharedTwinkleSynth(world: World): TwinkleSynth {
   if (!sharedTwinkleSynth) {
     sharedTwinkleSynth = new TwinkleSynth();
-    const listener = new AudioListener();
-    world.player.head.add(listener);
-    sharedTwinkleSynth.build(listener, world.scene);
+    sharedTwinkleSynth.build(getSharedAudioListener(world), world.scene);
   }
   return sharedTwinkleSynth;
 }
@@ -480,6 +478,11 @@ export class PokeCubeButton {
   ) {
     this._world = world;
     this._holdSeconds = options?.holdSeconds ?? DEFAULT_HOLD_SECONDS;
+    // Build the shared fire chime now (buttons are constructed during
+    // world setup, behind the loading screen) rather than lazily on the
+    // first fire — its reverb impulse is generated sample-by-sample in JS,
+    // which profiled as a visible hitch on the very first poke.
+    getSharedTwinkleSynth(world);
 
     const group = new Group();
     group.position.set(...localOffset);

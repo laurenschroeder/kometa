@@ -9,6 +9,7 @@ import {
   Object3D,
   ShaderMaterial,
   SkinnedMesh,
+  Sphere,
   Vector3,
 } from '@iwsdk/core';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
@@ -103,6 +104,15 @@ interface AnimatedPersonTemplate {
   // the skull (box.max.y), measured at the same posed frame as the above —
   // what attachHeadProp() below rests a worn prop on top of.
   headTopOffsetY: number;
+  // The SkinnedMesh's own local bounding sphere in that same posed frame,
+  // computed ONCE here and copied onto every clone (see buildAnimatedPerson).
+  // three.js's renderer sorts objects by boundingSphere and, for a
+  // SkinnedMesh whose sphere is null, computes it by running every vertex
+  // through its bones — profiled at 10-30ms per freshly cloned figure on
+  // Quest, a visible hitch each time a new crowd member first renders. Only
+  // used for draw ordering (these meshes are frustumCulled=false), so a
+  // fixed posed sphere is exactly as good as a per-frame one.
+  posedBoundingSphere: Sphere;
 }
 
 export interface AnimatedPerson {
@@ -238,6 +248,10 @@ export function loadAnimatedPersonTemplate(): Promise<AnimatedPersonTemplate | n
           headTopOffsetY = (box.max.y - box.min.y) * 0.06;
         }
 
+        // Same posed frame as the box above — see posedBoundingSphere's own
+        // comment. The one-time per-vertex cost is paid here, at load.
+        (skinned as SkinnedMesh).computeBoundingSphere();
+
         return {
           root: root as unknown as Group,
           clip,
@@ -246,6 +260,7 @@ export function loadAnimatedPersonTemplate(): Promise<AnimatedPersonTemplate | n
           posedHipsX: hipsWorld.x,
           posedHipsZ: hipsWorld.z,
           headTopOffsetY,
+          posedBoundingSphere: (skinned as SkinnedMesh).boundingSphere!.clone(),
         };
       },
       (err) => {
@@ -287,6 +302,8 @@ export function buildAnimatedPerson(
   if (skinned) {
     (skinned as SkinnedMesh).material = material;
     (skinned as SkinnedMesh).frustumCulled = false;
+    // Precomputed once per template — see posedBoundingSphere's comment.
+    (skinned as SkinnedMesh).boundingSphere = template.posedBoundingSphere.clone();
   }
 
   const scale = template.posedHeight > 1e-6 ? targetHeight / template.posedHeight : 1;

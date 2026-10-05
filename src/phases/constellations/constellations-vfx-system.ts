@@ -36,6 +36,7 @@ import {
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { PEBBLE_TYPES } from '../pebbles/pebble-type.js';
 import { ConstellationsSystem, N_TYPES } from './constellations-system.js';
+import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
 
 // Bumped from 0.05 — the interactive constellation stars read as much too
 // small at arm's length; TOUCHED_SIZE_MULT still applies on top of this, so
@@ -319,8 +320,7 @@ export class ConstellationsVfxSystem extends createSystem({}) {
     // planet-growth-pool.ts's own plant shader for the same reason.
     this.world.renderer.compileAsync(this.world.scene, this.world.camera).catch(() => {});
 
-    this._audioListener = new AudioListener();
-    this.player.head.add(this._audioListener);
+    this._audioListener = getSharedAudioListener(this.world);
     this._dronePool = new StarDronePool();
     this._dronePool.build(this._audioListener, this.scene);
     this._twinkleSynth = new TwinkleSynth();

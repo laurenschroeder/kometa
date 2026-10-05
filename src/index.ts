@@ -1,4 +1,4 @@
-import { AssetType, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
+import { AssetManager, AssetType, launchXR, SessionMode, VisibilityState, World } from '@iwsdk/core';
 import { ART_TEST_ENABLED, ArtTestSystem } from './phases/art-test/art-test-system.js';
 import { ArtTestVfxSystem } from './phases/art-test/art-test-vfx-system.js';
 import { CometAudioSystem } from './comet/comet-audio-system.js';
@@ -15,6 +15,7 @@ import { BackgroundMusicSystem } from './core/background-music-system.js';
 import { bootstrapGlobals } from './core/globals.js';
 import { DevJumpSystem } from './core/dev-jump-system.js';
 import { DevPerfLoggerSystem } from './core/dev-perf-logger.js';
+import { DevCrownPreviewSystem } from './core/dev-crown-preview-system.js';
 import { GameDirectorSystem } from './core/game-director-system.js';
 import { HapticsSystem } from './core/haptics-system.js';
 import { ContinueButtonSystem } from './core/continue-button-system.js';
@@ -48,6 +49,7 @@ import { canEnterXR, initHeadsetPanel } from './core/browser-support.js';
 import { cometStats, fetchCometStats } from './core/community-stats.js';
 import { getPlatform, platformUser, startProgressSync } from './core/progress-sync.js';
 import { initTelemetry, setTelemetryUserProps } from './core/telemetry.js';
+import { prewarmShadersOnFirstXRSession, uploadTextures } from './core/render-prewarm.js';
 import { TelemetrySystem } from './core/telemetry-system.js';
 
 startLoadingScreen();
@@ -251,6 +253,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // and before director.start(), same as PhaseMenuSystem below.
   world.registerSystem(DevJumpSystem, { priority: 0 });
   world.registerSystem(DevPerfLoggerSystem, { priority: 0 });
+  world.registerSystem(DevCrownPreviewSystem, { priority: 0 });
 
   // Left-hand-pinch dev menu — jumps directly to any phase. Registered after
   // GameDirectorSystem (which it looks up via getSystem in its own init()).
@@ -506,6 +509,17 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   // director.start() is deliberately NOT called here — StartMenuSystem
   // calls it once the Start button is dwell-selected, gating the whole
   // game behind the start menu.
+
+  // One-time GPU work moved out of gameplay (see render-prewarm.ts). In
+  // production, also skip three.js's per-program error readback, which
+  // otherwise blocks the main thread until each shader finishes compiling
+  // the first time it's used.
+  if (import.meta.env.PROD) world.renderer.debug.checkShaderErrors = false;
+  uploadTextures(
+    world,
+    ['faceSoul', 'faceOrganic', 'faceGas'].map((key) => AssetManager.getTexture(key)),
+  );
+  prewarmShadersOnFirstXRSession(world);
 
   finishLoadingScreen();
 }).catch(async (err) => {
