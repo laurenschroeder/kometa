@@ -196,18 +196,18 @@
     <div class="ach-list">
       <div class="ach-col">
         <div class="ach-row">
-          <hudtext class="ach-title">Stargazer</hudtext>
-          <span class="ach-desc">Wander far enough from the comet to gather a distant speck of stardust.</span>
+          <hudtext id="ach-title-stargazer" class="ach-title">?</hudtext>
+          <span id="ach-desc-stargazer" class="ach-desc">Keep exploring...</span>
           <span id="ach-status-stargazer" class="ach-status">Locked</span>
         </div>
         <div class="ach-row">
-          <hudtext class="ach-title">Far Side</hudtext>
-          <span class="ach-desc">Seed the side of the planet facing directly away from where you started.</span>
+          <hudtext id="ach-title-far-side" class="ach-title">?</hudtext>
+          <span id="ach-desc-far-side" class="ach-desc">Keep exploring...</span>
           <span id="ach-status-far-side" class="ach-status">Locked</span>
         </div>
         <div class="ach-row">
-          <hudtext class="ach-title">Second Thoughts</hudtext>
-          <span class="ach-desc">Linger at both choice zones before finally committing to one.</span>
+          <hudtext id="ach-title-second-thoughts" class="ach-title">?</hudtext>
+          <span id="ach-desc-second-thoughts" class="ach-desc">Keep exploring...</span>
           <span id="ach-status-second-thoughts" class="ach-status">Locked</span>
         </div>
       </div>
@@ -218,8 +218,8 @@
           <span id="ach-status-full-sweep" class="ach-status">Locked</span>
         </div>
         <div class="ach-row">
-          <hudtext class="ach-title">Ambidextrous</hudtext>
-          <span class="ach-desc">Toss the comet to your other hand and catch it.</span>
+          <hudtext id="ach-title-ambidextrous" class="ach-title">?</hudtext>
+          <span id="ach-desc-ambidextrous" class="ach-desc">Keep exploring...</span>
           <span id="ach-status-ambidextrous" class="ach-status">Locked</span>
         </div>
         <div class="ach-row">
@@ -264,8 +264,8 @@
       </div>
       <div class="ach-col">
         <div class="ach-row">
-          <hudtext class="ach-title">Indecisive</hudtext>
-          <span class="ach-desc">Let the clock run out without choosing your comet's fate.</span>
+          <hudtext id="ach-title-indecisive" class="ach-title">?</hudtext>
+          <span id="ach-desc-indecisive" class="ach-desc">Keep exploring...</span>
           <span id="ach-status-indecisive" class="ach-status">Locked</span>
         </div>
         <div class="ach-row">

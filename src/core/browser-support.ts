@@ -38,11 +38,39 @@ export function isAndroid(): boolean {
   return /Android/i.test(navigator.userAgent);
 }
 
+// Meta's pages refuse to load inside a frame (X-Frame-Options: DENY), and on
+// VIVERSE this page IS a frame. Some browsers (in-app ones especially) ignore
+// target="_blank" and load the link in that frame anyway, showing "refused to
+// connect". So open a real new tab, and if the browser won't, navigate the
+// whole tab instead — anything but this frame.
+function openOutsideFrame(url: string): void {
+  try {
+    const tab = window.open(url, '_blank');
+    if (tab) {
+      tab.opener = null;
+      return;
+    }
+  } catch {
+    // fall through to navigating the whole tab
+  }
+  try {
+    (window.top ?? window).location.href = url;
+  } catch (err) {
+    console.warn('[headset] could not open', url, err);
+  }
+}
+
 // Fills in index.html's #headset-panel links for this browser. Showing or
 // hiding the panel itself is index.ts's job (it swaps with Enter VR).
 export function initHeadsetPanel(): void {
   const send = document.getElementById('send-to-headset') as HTMLAnchorElement | null;
-  if (send) send.href = SEND_TO_HEADSET_URL;
+  if (send) {
+    send.href = SEND_TO_HEADSET_URL;
+    send.addEventListener('click', (event) => {
+      event.preventDefault();
+      openOutsideFrame(SEND_TO_HEADSET_URL);
+    });
+  }
   if (!isInAppBrowser()) return;
   if (isAndroid()) {
     const chrome = document.getElementById('open-in-chrome') as HTMLAnchorElement | null;

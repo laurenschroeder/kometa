@@ -11,7 +11,7 @@ import {
   Vector3,
 } from '@iwsdk/core';
 import type { UIKitDocument } from '@iwsdk/core';
-import { ACHIEVEMENTS } from './achievement-list.js';
+import { ACHIEVEMENTS, SECRET_DESCRIPTION, SECRET_TITLE } from './achievement-list.js';
 import { cometsReleased, isUnlocked } from './achievement-store.js';
 import { cometStats, fetchCometStats } from './community-stats.js';
 import { GameDirectorSystem } from './game-director-system.js';
@@ -537,6 +537,14 @@ export class StartMenuSystem extends createSystem({
         text: unlocked ? 'Unlocked' : 'Locked',
         color: unlocked ? '#4ade80' : '#71717a',
       } as Record<string, unknown>);
+      if (def.secret) {
+        doc.getElementById(`ach-title-${def.id}`)?.setProperties({
+          text: unlocked ? def.title : SECRET_TITLE,
+        } as Record<string, unknown>);
+        doc.getElementById(`ach-desc-${def.id}`)?.setProperties({
+          text: unlocked ? def.description : SECRET_DESCRIPTION,
+        } as Record<string, unknown>);
+      }
     }
   }
 }
