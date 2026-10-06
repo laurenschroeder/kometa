@@ -13,6 +13,7 @@ import {
 import type { UIKitDocument } from '@iwsdk/core';
 import { ACHIEVEMENTS, SECRET_DESCRIPTION, SECRET_TITLE } from './achievement-list.js';
 import { cometsReleased, isUnlocked } from './achievement-store.js';
+import { isPassthroughAvailable } from './browser-support.js';
 import { cometStats, fetchCometStats } from './community-stats.js';
 import { GameDirectorSystem } from './game-director-system.js';
 import { getGlobals } from './globals.js';
@@ -103,7 +104,8 @@ export class StartMenuSystem extends createSystem({
   private _startButton!: PokeCubeButton;
   private _achievementsButton!: PokeCubeButton;
   private _settingsButton!: PokeCubeButton;
-  private _passthroughButton!: PokeCubeButton;
+  private _passthroughButton!: PokeCubeButton | null;
+  private _settingsBackButton!: PokeCubeButton;
   private _notificationsButton!: PokeCubeButton;
 
   private _startAction: (() => void) | null = null;
@@ -195,13 +197,21 @@ export class StartMenuSystem extends createSystem({
     for (const button of this._leaderboardRow.buttons) button.setEnabled(false);
 
     const globals = getGlobals(this.world);
+    // No Passthrough cube in a VR session (headsets without AR — see
+    // pickSessionMode): there's no camera feed to show.
+    const hasPassthrough = isPassthroughAvailable();
     this._settingsRow = this._buildCubeRow([
-      this._passthroughLabel(globals.passthroughEnabled.peek()),
+      ...(hasPassthrough ? [this._passthroughLabel(globals.passthroughEnabled.peek())] : []),
       this._notificationsLabel(globals.notificationsEnabled.peek()),
       'Back',
     ]);
     this._settingsRow.rootObject.visible = false;
-    [this._passthroughButton, this._notificationsButton] = this._settingsRow.buttons;
+    if (hasPassthrough) {
+      [this._passthroughButton, this._notificationsButton, this._settingsBackButton] = this._settingsRow.buttons;
+    } else {
+      this._passthroughButton = null;
+      [this._notificationsButton, this._settingsBackButton] = this._settingsRow.buttons;
+    }
     for (const button of this._settingsRow.buttons) button.setEnabled(false);
 
     this.queries.panel.subscribe(
@@ -322,7 +332,7 @@ export class StartMenuSystem extends createSystem({
     } else if (this._page === 'leaderboard') {
       if (this._firedPoke(this._leaderboardRow.buttons[0], delta, pokeReady)) this._openPage('achievements');
     } else if (this._page === 'settings') {
-      if (this._firedPoke(this._passthroughButton, delta, pokeReady)) {
+      if (this._passthroughButton && this._firedPoke(this._passthroughButton, delta, pokeReady)) {
         const globals = getGlobals(this.world);
         globals.passthroughEnabled.value = !globals.passthroughEnabled.value;
         this._passthroughButton.setLabel(this._passthroughLabel(globals.passthroughEnabled.value));
@@ -332,7 +342,7 @@ export class StartMenuSystem extends createSystem({
         globals.notificationsEnabled.value = !globals.notificationsEnabled.value;
         this._notificationsButton.setLabel(this._notificationsLabel(globals.notificationsEnabled.value));
       }
-      if (this._firedPoke(this._settingsRow.buttons[2], delta, pokeReady)) this._openPage('main');
+      if (this._firedPoke(this._settingsBackButton, delta, pokeReady)) this._openPage('main');
     }
 
     this._updateStartPinch(delta);

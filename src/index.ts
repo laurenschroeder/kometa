@@ -45,7 +45,7 @@ import { PlanetSeedingSystem } from './phases/planet-seeding/planet-seeding-syst
 import { PlanetSeedingVfxSystem } from './phases/planet-seeding/planet-seeding-vfx-system.js';
 import { StardustSystem } from './phases/stardust/stardust-system.js';
 import { StardustVfxSystem } from './phases/stardust/stardust-vfx-system.js';
-import { canEnterXR, initHeadsetPanel } from './core/browser-support.js';
+import { canEnterXR, initHeadsetPanel, pickSessionMode } from './core/browser-support.js';
 import { cometStats, fetchCometStats } from './core/community-stats.js';
 import { getPlatform, platformUser, startProgressSync } from './core/progress-sync.js';
 import { initTelemetry, setTelemetryUserProps } from './core/telemetry.js';
@@ -89,7 +89,9 @@ if (communityLine) {
   });
 }
 
-World.create(document.getElementById('scene-container') as HTMLDivElement, {
+// AR on every headset that supports it (all Quests); VR only where the
+// browser definitively has no AR — see pickSessionMode. Never rejects.
+pickSessionMode().then((sessionMode) => World.create(document.getElementById('scene-container') as HTMLDivElement, {
   assets: {
     // Comet head decal, keyed by dominant pebble type (see PEBBLE_TYPES).
     faceSoul: { url: '/textures/faceSoul.png', type: AssetType.Texture },
@@ -100,7 +102,9 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     ...(ART_TEST_ENABLED
       ? { starIllustration: { url: '/textures/starillustration.png', type: AssetType.Texture } }
       : {}),
-    backgroundMusic: { url: '/audio/insectsAndSalamander.wav', type: AssetType.Audio },
+    // AAC (160 kbps) encode of audio-src/insectsAndSalamander.wav — 6 MB
+    // instead of 58 MB to download.
+    backgroundMusic: { url: '/audio/insectsAndSalamander.m4a', type: AssetType.Audio },
     // Quill-authored, baked vertex-cache animation exported as glTF morph
     // targets (no rig) — see EarthSituationsVfxSystem's own bee comment for
     // why only a couple instances are used.
@@ -113,8 +117,9 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // time, from whatever sessionMode is requested here; there's no runtime
     // API to flip it later. Settings' "Passthrough" toggle is therefore a
     // purely visual switch within this one persistent AR session (see
-    // VirtualSkySystem) rather than a session restart.
-    sessionMode: SessionMode.ImmersiveAR,
+    // VirtualSkySystem) rather than a session restart. Browsers without AR
+    // sessions get VR instead, with that toggle hidden (pickSessionMode).
+    sessionMode: sessionMode === 'immersive-vr' ? SessionMode.ImmersiveVR : SessionMode.ImmersiveAR,
     offer: 'always',
     features: { handTracking: true },
   },
@@ -130,7 +135,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     // each file's markup — see ui-font-kit.ts.
     spatialUI: { kits: { hudtext: HudText, span: GameSpan, button: GameButton } },
   },
-}).then((world) => {
+})).then((world) => {
   bootstrapGlobals(world);
 
   // Explicit, always-visible fallback for entering XR (see index.html) —

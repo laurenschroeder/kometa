@@ -86,6 +86,40 @@ export function initHeadsetPanel(): void {
 
 const SUPPORT_CHECK_TIMEOUT_MS = 3000;
 
+// Kometa boots an AR session so the Settings "Passthrough" toggle can show
+// the real world (see index.ts). Headsets whose browser has VR but no AR
+// sessions (Apple Vision Pro, PC VR) get a VR session instead — the game
+// already defaults to its opaque virtual sky, so only the toggle goes away.
+// Only a DEFINITIVE "no AR, yes VR" picks VR; any error or slow answer keeps
+// AR, exactly as before this existed. ?kometa_vr forces VR for testing.
+let passthroughAvailable = true;
+export function isPassthroughAvailable(): boolean {
+  return passthroughAvailable;
+}
+
+export async function pickSessionMode(): Promise<'immersive-ar' | 'immersive-vr'> {
+  let mode: 'immersive-ar' | 'immersive-vr' = 'immersive-ar';
+  if (new URLSearchParams(location.search).has('kometa_vr')) {
+    mode = 'immersive-vr';
+  } else {
+    const xr = navigator.xr;
+    if (xr) {
+      try {
+        const [ar, vr] = await withTimeout(
+          () => Promise.all([xr.isSessionSupported('immersive-ar'), xr.isSessionSupported('immersive-vr')]),
+          SUPPORT_CHECK_TIMEOUT_MS,
+          'WebXR session mode check',
+        );
+        if (!ar && vr) mode = 'immersive-vr';
+      } catch {
+        // keep AR
+      }
+    }
+  }
+  passthroughAvailable = mode === 'immersive-ar';
+  return mode;
+}
+
 // Resolves false ONLY when the browser definitively says no immersive
 // session is possible (or has no WebXR at all). Any error or a slow answer
 // resolves true — a false "unsupported" would hide Enter VR from a real
