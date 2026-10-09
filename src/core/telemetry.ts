@@ -11,6 +11,13 @@ import { firebaseConfig } from './firebase-config.js';
 // debug_mode so it shows up in the Firebase console's DebugView instead of
 // the normal reports.
 //
+// Held during immersive play (see setTelemetryHold): on Quest each event's
+// gtag processing measured ~8-10ms on the main thread — enough to drop a
+// frame at 72Hz whenever one is sent mid-VR (every phase change sent two).
+// Events are queued while held and sent the moment the session isn't fully
+// visible (system menu, headset off, VR exited) or the page is hidden/closed.
+// Params are captured when track() is called, so only delivery is delayed.
+//
 // Must never throw or block: track() is called from inside signal
 // subscribers and gameplay code (e.g. a phase change mid-frame), where an
 // exception would propagate into the system that set the signal. Every
@@ -31,6 +38,8 @@ let setUserPropertiesFn: typeof import('firebase/analytics').setUserProperties |
 const MAX_PENDING = 200;
 const pending: Array<() => void> = [];
 let disabled = !ENABLED;
+let holding = false;
+const held: Array<() => void> = [];
 
 function disable(reason: string, err?: unknown): void {
   disabled = true;
@@ -80,8 +89,36 @@ export function initTelemetry(): void {
 
 function whenReady(fn: () => void): void {
   if (disabled) return;
+  if (holding) {
+    if (held.length < MAX_PENDING) held.push(fn);
+    return;
+  }
   if (analytics) safeCall(fn);
   else if (pending.length < MAX_PENDING) pending.push(fn);
+}
+
+function flushHeld(): void {
+  if (disabled) return;
+  const wasHolding = holding;
+  holding = false;
+  for (const fn of held.splice(0)) whenReady(fn);
+  holding = wasHolding;
+}
+
+// Driven by TelemetrySystem from the XR visibility state: true while the
+// immersive session is fully visible, false (which flushes) otherwise.
+export function setTelemetryHold(hold: boolean): void {
+  holding = hold;
+  if (!hold) flushHeld();
+}
+
+// Backstop for a page closed or backgrounded mid-session. Doesn't release the
+// hold itself — TelemetrySystem does that once the session leaves Visible.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushHeld();
+  });
+  window.addEventListener('pagehide', flushHeld);
 }
 
 export function track(name: string, params: Params = {}): void {

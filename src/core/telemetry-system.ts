@@ -1,7 +1,7 @@
 import { createSystem, VisibilityState } from '@iwsdk/core';
 import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
-import { track } from './telemetry.js';
+import { setTelemetryHold, track } from './telemetry.js';
 
 // Turns the game's existing globals signals into analytics events (see
 // telemetry.ts), so phase systems don't each need their own tracking calls.
@@ -32,6 +32,24 @@ export class TelemetrySystem extends createSystem({}) {
         }
       }),
     );
+
+    // Analytics wait out immersive play (see setTelemetryHold). Driven by the
+    // XRSession's own events rather than world.visibilityState, which was
+    // measured still reading Visible after a session had ended — leaving
+    // events held until the page closed.
+    const onSessionStart = () => {
+      const session = this.xrManager.getSession();
+      if (!session) return;
+      setTelemetryHold(session.visibilityState === 'visible');
+      session.addEventListener('visibilitychange', () => setTelemetryHold(session.visibilityState === 'visible'));
+    };
+    const onSessionEnd = () => setTelemetryHold(false);
+    this.xrManager.addEventListener('sessionstart', onSessionStart);
+    this.xrManager.addEventListener('sessionend', onSessionEnd);
+    this.cleanupFuncs.push(() => {
+      this.xrManager.removeEventListener('sessionstart', onSessionStart);
+      this.xrManager.removeEventListener('sessionend', onSessionEnd);
+    });
 
     this.cleanupFuncs.push(
       globals.gameStarted.subscribe((started) => {

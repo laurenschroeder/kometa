@@ -5,6 +5,7 @@ import { getGlobals } from './globals.js';
 import { Phase } from './phase.js';
 import { StartMenuSystem } from './start-menu-system.js';
 import { PlanetSeedingSystem } from '../phases/planet-seeding/planet-seeding-system.js';
+import { PERF_HOOKS_ENABLED } from './perf-hooks.js';
 
 // MCP/agent-testing hook — NOT a player-facing feature (see PhaseMenuSystem
 // for the actual in-headset dev menu, which needs real XR controller input
@@ -14,8 +15,8 @@ import { PlanetSeedingSystem } from '../phases/planet-seeding/planet-seeding-sys
 // jump straight to any phase by writing this component's `target` field to a
 // Phase value, e.g. via `ecs_set_component` on the singleton entity this
 // creates. Cleared back to '' the instant the jump is applied, so setting
-// the same phase twice in a row still re-triggers it. Same DEV_MENU_ENABLED
-// gate as PhaseMenuSystem — never reachable in a production build.
+// the same phase twice in a row still re-triggers it. Dev-only, except a
+// localhost `?perfhooks` production build (see perf-hooks.ts).
 export const DevJump = createComponent('DevJump', {
   target: { type: Types.String, default: '' },
   // Set true while Phase.Seeding is current to instantly color every
@@ -28,7 +29,7 @@ export const DevJump = createComponent('DevJump', {
   resetAchievements: { type: Types.Boolean, default: false },
 });
 
-const DEV_JUMP_ENABLED = import.meta.env.DEV;
+const DEV_JUMP_ENABLED = PERF_HOOKS_ENABLED;
 // `?devjump=seeding,win,launch` — the same jumps as the component fields
 // above, but from the URL, for a real headset the MCP tools can't drive.
 // Steps run one per DEVJUMP_STEP_SECONDS, once the player enters XR (so

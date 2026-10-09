@@ -1,5 +1,6 @@
 import { createSystem, Mesh, Vector3 } from '@iwsdk/core';
 import { getGlobals } from './globals.js';
+import { PERF_HOOKS_ENABLED } from './perf-hooks.js';
 
 // One-shot: the instant total scene triangles crosses this, walk the scene
 // and log every mesh whose own geometry accounts for a large share — lets an
@@ -21,9 +22,9 @@ const DUMP_ENABLED = new URLSearchParams(location.search).has('perfdump');
 // so an agent driving the game headlessly via MCP tools can read real
 // performance numbers from browser_get_console_logs instead of guessing
 // from a screenshot. Same DEV_MENU_ENABLED-style gate as PhaseMenuSystem/
-// DevJumpSystem — never active in a production build.
+// DevJumpSystem — off in production unless perf-hooks.ts allows it.
 const LOG_INTERVAL = 1;
-const PERF_LOG_ENABLED = import.meta.env.DEV;
+const PERF_LOG_ENABLED = PERF_HOOKS_ENABLED;
 // Tags every line with the device, so a headset and a desktop tab connected
 // to the same dev server can be told apart in the shared log.
 // The desktop emulator spoofs a Quest user agent, so it's detected by the
