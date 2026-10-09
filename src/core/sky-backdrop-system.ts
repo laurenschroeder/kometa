@@ -86,6 +86,7 @@ export class SkyBackdropSystem extends createSystem({}) {
       transparent: true,
       depthWrite: false,
       side: DoubleSide,
+      forceSinglePass: true, // see poke-button.ts's label material
       blending: AdditiveBlending,
       opacity: 0,
     });

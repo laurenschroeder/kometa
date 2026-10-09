@@ -35,6 +35,13 @@ export class PlanetSpinSynth {
   private _gain!: GainNode;
   private _sound!: PositionalAudio;
   private _running = false;
+  // start() only records the request; the audio graph is built on the next
+  // update() — see start()'s own comment.
+  private _startPending = false;
+  // update() usually runs later in the same frame as start() (the director
+  // starts the spin from its own priority-0 update), so one call is skipped.
+  private _startSkipTicks = 0;
+  private _startPosition = new Vector3();
 
   build(listener: AudioListener, scene: Scene): void {
     this._listener = listener;
@@ -42,6 +49,11 @@ export class PlanetSpinSynth {
     listener.context.resume().catch(() => {});
   }
 
+  // start() is called on the Constellations phase-entry frame, which is
+  // already the most expensive frame of that transition — building the
+  // oscillator/filter/gain/panner graph measured ~3ms on Quest. update() runs
+  // every frame of the spin anyway, so the build waits for its first call;
+  // a one-frame-late onset is inaudible under the 0.8s fade-in.
   start(position: Vector3): void {
     const context = this._listener.context;
     if (context.state !== 'running') {
@@ -49,7 +61,14 @@ export class PlanetSpinSynth {
       return;
     }
     this.stop();
+    this._startPosition.copy(position);
+    this._startPending = true;
+    this._startSkipTicks = 1;
+  }
 
+  private _build(): void {
+    this._startPending = false;
+    const context = this._listener.context;
     const now = context.currentTime;
     this._oscillator = context.createOscillator();
     this._oscillator.type = 'triangle';
@@ -69,7 +88,7 @@ export class PlanetSpinSynth {
 
     this._sound = new PositionalAudio(this._listener);
     this._sound.setNodeSource(this._gain as unknown as AudioScheduledSourceNode);
-    this._sound.position.copy(position);
+    this._sound.position.copy(this._startPosition);
     this._scene.add(this._sound);
 
     this._oscillator.start(now);
@@ -84,6 +103,11 @@ export class PlanetSpinSynth {
   // spinEnvelope's own comment), progress is unused here but accepted for a
   // uniform call signature with the visual transition's own update().
   update(_progress: number, angularSpeedNorm: number): void {
+    if (this._startPending) {
+      if (this._startSkipTicks > 0) this._startSkipTicks--;
+      else this._build();
+      return;
+    }
     if (!this._running) return;
     const context = this._listener.context;
     const now = context.currentTime;
@@ -114,6 +138,7 @@ export class PlanetSpinSynth {
   // Fades out and hard-stops. Safe to call even if never started (e.g. a
   // fresh loop reset before the spin ever ran).
   stop(): void {
+    this._startPending = false;
     if (!this._running) return;
     this._running = false;
     const context = this._listener.context;

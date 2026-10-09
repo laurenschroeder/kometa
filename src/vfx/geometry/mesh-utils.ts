@@ -52,3 +52,52 @@ export function randomUnitVector3(): Vector3 {
   const len = Math.sqrt(lenSq);
   return new Vector3(x / len, y / len, z / len);
 }
+
+// Writes position * rotation * uniform scale straight into an InstancedMesh's
+// instanceMatrix array (same layout Matrix4.compose + setMatrixAt produce)
+// from plain numbers. For per-frame hot loops: three's compose() is shared
+// with IWSDK's getter-backed synced vectors, which leaves its property reads
+// megamorphic — measured on Quest allocating a boxed number per float read
+// (~2.6MB/s for the comet's pebbles alone, feeding GC pauses).
+export function writeInstanceTRS(
+  array: Float32Array,
+  index: number,
+  px: number,
+  py: number,
+  pz: number,
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+  scale: number,
+): void {
+  const x2 = qx + qx;
+  const y2 = qy + qy;
+  const z2 = qz + qz;
+  const xx = qx * x2;
+  const xy = qx * y2;
+  const xz = qx * z2;
+  const yy = qy * y2;
+  const yz = qy * z2;
+  const zz = qz * z2;
+  const wx = qw * x2;
+  const wy = qw * y2;
+  const wz = qw * z2;
+  const o = index * 16;
+  array[o] = (1 - (yy + zz)) * scale;
+  array[o + 1] = (xy + wz) * scale;
+  array[o + 2] = (xz - wy) * scale;
+  array[o + 3] = 0;
+  array[o + 4] = (xy - wz) * scale;
+  array[o + 5] = (1 - (xx + zz)) * scale;
+  array[o + 6] = (yz + wx) * scale;
+  array[o + 7] = 0;
+  array[o + 8] = (xz + wy) * scale;
+  array[o + 9] = (yz - wx) * scale;
+  array[o + 10] = (1 - (xx + yy)) * scale;
+  array[o + 11] = 0;
+  array[o + 12] = px;
+  array[o + 13] = py;
+  array[o + 14] = pz;
+  array[o + 15] = 1;
+}

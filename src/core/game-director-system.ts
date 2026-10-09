@@ -1,6 +1,7 @@
 import { createSystem } from '@iwsdk/core';
 import { getGlobals } from './globals.js';
 import { nextPhase, Phase } from './phase.js';
+import { devPerfMark } from './dev-perf-logger.js';
 
 // Structural subset of elics' System — local so definePhase() call sites
 // don't have to fight System<S,Q> generics just to pass an instance in.
@@ -145,6 +146,7 @@ export class GameDirectorSystem extends createSystem({}) {
     this._playPhase(to);
 
     console.info(`[GameDirector] ${from} -> ${to} (${reason})`);
+    devPerfMark(`phase:${to}`);
   }
 
   private _playPhase(phase: Phase): void {

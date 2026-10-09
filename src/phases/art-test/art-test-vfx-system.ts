@@ -610,6 +610,7 @@ export class ArtTestVfxSystem extends createSystem({
       transparent: true,
       depthWrite: false,
       side: DoubleSide,
+      forceSinglePass: true, // see poke-button.ts's label material
     });
     this._labelMesh = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), mat);
     this._labelMesh.visible = false;

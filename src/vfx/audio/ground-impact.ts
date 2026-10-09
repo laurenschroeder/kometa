@@ -1,12 +1,12 @@
 import { AudioListener, PositionalAudio, Scene, Vector3 } from '@iwsdk/core';
 
-const DURATION = 0.7;
+const DURATION = 0.8;
 const noiseBuffers = new WeakMap<BaseAudioContext, AudioBuffer>();
 
 function getNoise(context: BaseAudioContext): AudioBuffer {
   let buf = noiseBuffers.get(context);
   if (!buf) {
-    buf = context.createBuffer(1, Math.floor(context.sampleRate * 0.3), context.sampleRate);
+    buf = context.createBuffer(1, Math.floor(context.sampleRate * 0.5), context.sampleRate);
     const data = buf.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
     noiseBuffers.set(context, buf);
@@ -14,15 +14,50 @@ function getNoise(context: BaseAudioContext): AudioBuffer {
   return buf;
 }
 
-// One-shot generative "something lands on soft ground". Deliberately NOT a
-// kick-drum recipe (fast pitch sweep + hard click, identical every time — it
-// read as a drum machine when stardust lands repeatedly): a soft-attack round
-// thud with only a small pitch settle, an inharmonic woody overtone, and a
-// noise-excited resonant "body" for the earthy tone. Every hit randomizes its
-// pitch, resonance, length and level so no two land alike. Same raw-Web-Audio-
-// via-PositionalAudio.setNodeSource technique as payoff-chime.ts. `pitch`
-// scales the whole thing so repeated hits (moon bumps) can differ from planet
-// hits.
+// One short noise burst through a filter into `out` — the building block for
+// every layer below. `offset` reads a different slice of the shared noise
+// buffer so stacked layers don't sound phase-locked.
+function noiseBurst(
+  context: BaseAudioContext,
+  out: AudioNode,
+  start: number,
+  filterType: BiquadFilterType,
+  freq: number,
+  q: number,
+  peak: number,
+  attack: number,
+  decay: number,
+): BiquadFilterNode {
+  const src = context.createBufferSource();
+  src.buffer = getNoise(context);
+  const filter = context.createBiquadFilter();
+  filter.type = filterType;
+  filter.frequency.setValueAtTime(freq, start);
+  filter.Q.setValueAtTime(q, start);
+  const gain = context.createGain();
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(peak, start + attack);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + attack + decay);
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(out);
+  src.start(start, Math.random() * 0.15);
+  src.stop(start + attack + decay + 0.05);
+  return filter;
+}
+
+// One-shot generative "a seed settles into soft soil". Deliberately has NO
+// pitched oscillator: an earlier version's sine thump + pitch settle still
+// read as a tom/drum when stardust lands repeatedly. Everything here is
+// filtered noise, so it stays breathy and organic:
+//  - a muffled low "pat" (soft earth giving way), slow-ish attack, no click
+//  - a hollow seed-pod resonance that blooms slightly upward, like a soft
+//    "pok" of something sinking in rather than something being struck
+//  - a few scattered, quiet grains of dirt settling afterward
+// Every hit randomizes pitch, resonance, grain timing and level so no two land
+// alike. Same raw-Web-Audio-via-PositionalAudio.setNodeSource technique as
+// payoff-chime.ts. `pitch` scales the whole thing so repeated hits (moon
+// bumps) can differ from planet hits.
 export function playGroundImpact(
   listener: AudioListener,
   scene: Scene,
@@ -34,75 +69,36 @@ export function playGroundImpact(
     context.resume().catch(() => {});
     return;
   }
-  const now = context.currentTime + Math.random() * 0.015; // slight timing smear
+  const now = context.currentTime + Math.random() * 0.02; // slight timing smear
   const sum = context.createGain();
+  sum.gain.value = 0.85;
   const character = 0.85 + Math.random() * 0.3; // per-hit pitch/resonance personality
-  const level = 0.8 + Math.random() * 0.2;
-  const f0 = 95 * pitch * character;
+  const level = 0.75 + Math.random() * 0.25;
 
-  // Round thud: gentle settle downward (not a kick's dive), soft attack.
-  const thump = context.createOscillator();
-  thump.type = 'sine';
-  thump.frequency.setValueAtTime(f0, now);
-  thump.frequency.exponentialRampToValueAtTime(f0 * 0.62, now + 0.2);
-  const thumpGain = context.createGain();
-  thumpGain.gain.setValueAtTime(0.0001, now);
-  thumpGain.gain.exponentialRampToValueAtTime(0.3 * level, now + 0.016);
-  thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.38 + Math.random() * 0.14);
-  thump.connect(thumpGain);
-  thumpGain.connect(sum);
-  thump.start(now);
-  thump.stop(now + DURATION);
+  // Muffled soil "pat": heavily low-passed noise, gentle attack.
+  noiseBurst(context, sum, now, 'lowpass', 260 * pitch * character, 0.7, 0.34 * level, 0.028, 0.3 + Math.random() * 0.1);
 
-  // Woody overtone at a non-integer ratio — short, quiet; gives "material"
-  // instead of a pure sub tone.
-  const wood = context.createOscillator();
-  wood.type = 'triangle';
-  wood.frequency.setValueAtTime(f0 * (1.9 + Math.random() * 0.35), now);
-  wood.frequency.exponentialRampToValueAtTime(f0 * 1.3, now + 0.14);
-  const woodGain = context.createGain();
-  woodGain.gain.setValueAtTime(0.0001, now);
-  woodGain.gain.exponentialRampToValueAtTime(0.07 * level, now + 0.01);
-  woodGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
-  wood.connect(woodGain);
-  woodGain.connect(sum);
-  wood.start(now);
-  wood.stop(now + 0.3);
+  // Hollow seed-pod resonance, blooming a little upward as it fades.
+  const podFreq = 300 * pitch * character;
+  const pod = noiseBurst(context, sum, now + 0.005, 'bandpass', podFreq, 7 + Math.random() * 4, 0.22 * level, 0.022, 0.24);
+  pod.frequency.exponentialRampToValueAtTime(podFreq * (1.12 + Math.random() * 0.1), now + 0.22);
 
-  // Soft dusty scuff: low-passed noise with a slow-ish attack (no click).
-  const noise = context.createBufferSource();
-  noise.buffer = getNoise(context);
-  const lp = context.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.setValueAtTime(700 * pitch, now);
-  lp.frequency.exponentialRampToValueAtTime(140, now + 0.22);
-  const noiseGain = context.createGain();
-  noiseGain.gain.setValueAtTime(0.0001, now);
-  noiseGain.gain.exponentialRampToValueAtTime(0.14 * level, now + 0.012);
-  noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-  noise.connect(lp);
-  lp.connect(noiseGain);
-  noiseGain.connect(sum);
-  noise.start(now);
-  noise.stop(now + 0.3);
-
-  // Earthy body: the same kind of noise burst rung through a resonant band —
-  // a hollow "thok" whose pitch varies per hit.
-  const bodyNoise = context.createBufferSource();
-  bodyNoise.buffer = getNoise(context);
-  const bp = context.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.setValueAtTime(210 * pitch * character, now);
-  bp.Q.setValueAtTime(4 + Math.random() * 3, now);
-  const bodyGain = context.createGain();
-  bodyGain.gain.setValueAtTime(0.0001, now);
-  bodyGain.gain.exponentialRampToValueAtTime(0.32 * level, now + 0.01);
-  bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
-  bodyNoise.connect(bp);
-  bp.connect(bodyGain);
-  bodyGain.connect(sum);
-  bodyNoise.start(now);
-  bodyNoise.stop(now + 0.3);
+  // Grains of dirt settling: a few tiny, quiet, scattered ticks.
+  const grains = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < grains; i++) {
+    const t = now + 0.04 + Math.random() * 0.22;
+    noiseBurst(
+      context,
+      sum,
+      t,
+      'bandpass',
+      (1400 + Math.random() * 1600) * pitch,
+      2.5,
+      (0.025 + Math.random() * 0.025) * level,
+      0.004,
+      0.03 + Math.random() * 0.03,
+    );
+  }
 
   const sound = new PositionalAudio(listener);
   sound.setNodeSource(sum as unknown as AudioScheduledSourceNode);

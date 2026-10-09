@@ -987,6 +987,7 @@ export class FateEventVfxSystem extends createSystem({
         transparent: true,
         depthWrite: false,
         side: DoubleSide,
+        forceSinglePass: true, // see poke-button.ts's label material
         opacity: 0,
       });
       const mesh = new Mesh(geo, material);
@@ -1038,6 +1039,7 @@ export class FateEventVfxSystem extends createSystem({
         transparent: true,
         depthWrite: false,
         side: DoubleSide,
+        forceSinglePass: true, // see poke-button.ts's label material
         blending: AdditiveBlending,
       });
       const mesh = new Mesh(geo, material);

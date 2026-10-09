@@ -167,7 +167,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     this.world.createTransformEntity(zone);
 
     const texture = drawLabel(text, 0);
-    const labelMat = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide });
+    const labelMat = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide, forceSinglePass: true });
     const label = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), labelMat);
     label.position.set(center.x, center.y + LABEL_OFFSET_Y, center.z);
     label.visible = false;

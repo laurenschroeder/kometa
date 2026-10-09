@@ -1,4 +1,5 @@
 import { createSystem, Mesh, Vector3 } from '@iwsdk/core';
+import { getGlobals } from './globals.js';
 
 // One-shot: the instant total scene triangles crosses this, walk the scene
 // and log every mesh whose own geometry accounts for a large share — lets an
@@ -11,6 +12,9 @@ const PER_MESH_LOG_THRESHOLD = 300;
 // meshes) isn't missed by the original one-shot latch, which fires on the
 // FIRST threshold crossing (right as the comet reveals) and never again.
 const DUMP_INTERVAL = 5;
+// Off unless the URL has `?perfdump`: the dump walks the whole scene and
+// allocates, which itself causes the frame hitches this logger reports.
+const DUMP_ENABLED = new URLSearchParams(location.search).has('perfdump');
 
 // MCP/agent-testing hook — logs frame-time stats to the console every
 // LOG_INTERVAL seconds (avg/min/max delta this window, converted to fps)
@@ -20,6 +24,28 @@ const DUMP_INTERVAL = 5;
 // DevJumpSystem — never active in a production build.
 const LOG_INTERVAL = 1;
 const PERF_LOG_ENABLED = import.meta.env.DEV;
+// Tags every line with the device, so a headset and a desktop tab connected
+// to the same dev server can be told apart in the shared log.
+// The desktop emulator spoofs a Quest user agent, so it's detected by the
+// __IWER_MCP_MANAGED flag the dev plugin sets on the browser it
+// launches (a real headset's browser never has it).
+const DEVICE_TAG = '__IWER_MCP_MANAGED' in globalThis ? 'emulator' : 'headset';
+// A frame slower than this misses the 72Hz budget (13.9ms, plus slack for
+// timer jitter) — counted per window as `missed=`.
+const MISSED_FRAME_SECONDS = 1 / 72 + 0.002;
+
+// A frame slower than this gets its own `[DevPerf:hitch]` line, listing any
+// devPerfMark() events and newly compiled shader programs from that frame.
+const HITCH_SECONDS = 0.025;
+
+// Labels recorded by gameplay code via devPerfMark() — lets a hitch line say
+// what happened on the frame that hitched. Kept for two frames (see
+// _logHitch) since this system may run before or after the marking system.
+let pendingMarks: string[] = [];
+let previousMarks: string[] = [];
+export function devPerfMark(label: string): void {
+  if (PERF_LOG_ENABLED && pendingMarks.length < 16) pendingMarks.push(label);
+}
 
 export class DevPerfLoggerSystem extends createSystem({}) {
   private _windowElapsed = 0;
@@ -27,11 +53,14 @@ export class DevPerfLoggerSystem extends createSystem({}) {
   private _minDelta = Infinity;
   private _maxDelta = 0;
   private _sumDelta = 0;
+  private _missed = 0;
+  private _knownPrograms = new Set<string>();
+  private _lastProgramCount = 0;
   private _dumped = false;
   private _sinceLastDump = 0;
 
   private _maybeDumpHeavyMeshes(totalTris: number, delta: number): void {
-    if (totalTris < TRIANGLE_DUMP_THRESHOLD) return;
+    if (!DUMP_ENABLED || totalTris < TRIANGLE_DUMP_THRESHOLD) return;
     this._sinceLastDump += delta;
     if (this._dumped && this._sinceLastDump < DUMP_INTERVAL) return;
     this._dumped = true;
@@ -106,8 +135,36 @@ export class DevPerfLoggerSystem extends createSystem({}) {
       if (vis) allVisibleSum += total;
     });
     console.info(
-      `[DevPerf] heavy-mesh dump (renderer-reported=${totalTris}, all-scene-sum=${allSum}, visible-scene-sum=${allVisibleSum}, meshCount=${meshCount}, ${rows.length} meshes >= ${PER_MESH_LOG_THRESHOLD} tris):\n${rows.map((r) => r.text).join('\n')}`,
+      `[DevPerf:${DEVICE_TAG}] heavy-mesh dump (renderer-reported=${totalTris}, all-scene-sum=${allSum}, visible-scene-sum=${allVisibleSum}, meshCount=${meshCount}, ${rows.length} meshes >= ${PER_MESH_LOG_THRESHOLD} tris):\n${rows.map((r) => r.text).join('\n')}`,
     );
+  }
+
+  // delta is the gap between this frame and the last, so a slow frame's
+  // marks may have landed on either side of this system's own update —
+  // report both this frame's and the previous frame's.
+  private _logHitch(delta: number): void {
+    const programs = this.world.renderer.info.programs ?? [];
+    let newPrograms = '';
+    if (programs.length !== this._lastProgramCount) {
+      this._lastProgramCount = programs.length;
+      for (const prog of programs) {
+        const key = (prog as unknown as { cacheKey: string }).cacheKey;
+        if (this._knownPrograms.has(key)) continue;
+        this._knownPrograms.add(key);
+        newPrograms += ` ${(prog as unknown as { name: string }).name}`;
+      }
+    }
+    if (delta > HITCH_SECONDS) {
+      console.info(
+        `[DevPerf:${DEVICE_TAG}:hitch] ${(delta * 1000).toFixed(1)}ms phase=${getGlobals(this.world).gamePhase.peek()}` +
+          ` marks=[${[...previousMarks, ...pendingMarks].join(' | ')}]` +
+          (newPrograms ? ` newPrograms=[${newPrograms.trim()}]` : ''),
+      );
+    }
+    const recycled = previousMarks;
+    previousMarks = pendingMarks;
+    pendingMarks = recycled;
+    pendingMarks.length = 0;
   }
 
   update(delta: number): void {
@@ -116,15 +173,17 @@ export class DevPerfLoggerSystem extends createSystem({}) {
     this._sumDelta += delta;
     if (delta < this._minDelta) this._minDelta = delta;
     if (delta > this._maxDelta) this._maxDelta = delta;
+    if (delta > MISSED_FRAME_SECONDS) this._missed++;
+    this._logHitch(delta);
     this._windowElapsed += delta;
 
     if (this._windowElapsed >= LOG_INTERVAL) {
       const avgDelta = this._sumDelta / this._frameCount;
       const info = this.world.renderer.info;
       console.info(
-        `[DevPerf] avg=${(1 / avgDelta).toFixed(1)}fps (${(avgDelta * 1000).toFixed(2)}ms) ` +
+        `[DevPerf:${DEVICE_TAG}] phase=${getGlobals(this.world).gamePhase.peek()} avg=${(1 / avgDelta).toFixed(1)}fps (${(avgDelta * 1000).toFixed(2)}ms) ` +
           `worst=${(1 / this._maxDelta).toFixed(1)}fps (${(this._maxDelta * 1000).toFixed(2)}ms) ` +
-          `best=${(1 / this._minDelta).toFixed(1)}fps frames=${this._frameCount} ` +
+          `best=${(1 / this._minDelta).toFixed(1)}fps frames=${this._frameCount} missed=${this._missed} ` +
           `calls=${info.render.calls} tris=${info.render.triangles} ` +
           `geoms=${info.memory.geometries} progs=${info.programs?.length ?? 0}`,
       );
@@ -134,6 +193,7 @@ export class DevPerfLoggerSystem extends createSystem({}) {
       this._minDelta = Infinity;
       this._maxDelta = 0;
       this._sumDelta = 0;
+      this._missed = 0;
     }
   }
 }

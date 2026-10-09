@@ -103,5 +103,6 @@ export function makeStreakRibbonMaterial(params: StreakRibbonParams): ShaderMate
     transparent: true,
     depthWrite: false,
     side: DoubleSide,
+    forceSinglePass: true, // see poke-button.ts's label material
   });
 }

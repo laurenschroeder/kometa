@@ -47,6 +47,131 @@ export function uploadTextures(world: World, extra: (Texture | null | undefined)
   }
 }
 
+// Compiling isn't the whole first-use cost: three.js defers each program's
+// uniform/attribute location lookup (WebGLProgram's onFirstUse) until the
+// first frame it's actually drawn — measured on Quest at 10-14ms per phase
+// transition, all on the frame a phase's objects first appear. Calling the
+// lazy getters pays it here instead, one program per tick so the prewarm
+// itself never stalls a frame by more than one program's worth.
+const PROGRAM_SETUP_INTERVAL_MS = 20;
+
+// Even with every program compiled and set up, the first frame an object is
+// actually DRAWN still uploads its geometry buffers and builds its vertex
+// array object — measured on Quest at ~13ms of each phase-entry frame, since
+// a phase's objects all appear on the same frame. This draws every hidden
+// object once, during the start menu, with color and depth writes off so
+// nothing shows: a few hidden subtrees per frame (each subtree all-or-
+// nothing, so a sibling never gets drawn with its real material). Renderables
+// whose material is also on something currently visible are left hidden —
+// turning off that material's writes would blank the visible object for a
+// frame — and simply keep paying their first-draw cost as before.
+const DRAW_PREWARM_RENDERABLES_PER_FRAME = 40;
+
+type Renderable = Object3D & { material: Material | Material[]; frustumCulled: boolean };
+
+function isRenderable(obj: Object3D): obj is Renderable {
+  return !!(obj as Partial<Renderable>).material && (obj as Object3D & { isLight?: boolean }).isLight !== true;
+}
+
+function materialsOf(obj: Renderable): Material[] {
+  return Array.isArray(obj.material) ? obj.material : [obj.material];
+}
+
+function drawHiddenOnce(world: World): void {
+  // Materials on currently drawn objects — never touched (see above).
+  const visibleMaterials = new Set<Material>();
+  // Maximal hidden subtrees: hidden objects whose ancestors are all visible.
+  const roots: Object3D[] = [];
+  const collect = (obj: Object3D) => {
+    if (!obj.visible) {
+      roots.push(obj);
+      return;
+    }
+    if (isRenderable(obj)) for (const m of materialsOf(obj)) visibleMaterials.add(m);
+    for (const child of obj.children) collect(child);
+  };
+  collect(world.scene);
+
+  const scene = world.scene;
+  const previousAfterRender = scene.onAfterRender;
+  const drawBatch = () => {
+    if (roots.length === 0) {
+      scene.onAfterRender = previousAfterRender;
+      return;
+    }
+    const flipped: Object3D[] = [];
+    const keptHidden: Object3D[] = [];
+    const culled: Renderable[] = [];
+    const muted = new Map<Material, [boolean, boolean]>();
+    let count = 0;
+    while (roots.length > 0 && count < DRAW_PREWARM_RENDERABLES_PER_FRAME) {
+      roots.pop()!.traverse((obj) => {
+        const materials = isRenderable(obj) ? materialsOf(obj) : null;
+        if (materials && materials.some((m) => visibleMaterials.has(m))) {
+          if (obj.visible) {
+            obj.visible = false;
+            keptHidden.push(obj);
+          }
+          return;
+        }
+        if (!obj.visible) {
+          obj.visible = true;
+          flipped.push(obj);
+        }
+        if (!materials) return;
+        for (const m of materials) {
+          if (!muted.has(m)) {
+            muted.set(m, [m.colorWrite, m.depthWrite]);
+            m.colorWrite = false;
+            m.depthWrite = false;
+          }
+        }
+        const renderable = obj as Renderable;
+        if (renderable.frustumCulled) {
+          renderable.frustumCulled = false;
+          culled.push(renderable);
+        }
+        count++;
+      });
+    }
+    // Restored right after the one render that draws this batch.
+    scene.onAfterRender = (...args) => {
+      for (const obj of flipped) obj.visible = false;
+      for (const obj of keptHidden) obj.visible = true;
+      for (const obj of culled) obj.frustumCulled = true;
+      for (const [m, [colorWrite, depthWrite]] of muted) {
+        m.colorWrite = colorWrite;
+        m.depthWrite = depthWrite;
+      }
+      previousAfterRender.apply(scene, args);
+      scene.onAfterRender = () => {
+        scene.onAfterRender = previousAfterRender;
+        drawBatch();
+      };
+    };
+  };
+  drawBatch();
+}
+
+function finishProgramSetup(world: World): void {
+  const programs = [...(world.renderer.info.programs ?? [])] as unknown as {
+    getUniforms(): unknown;
+    getAttributes(): unknown;
+  }[];
+  const step = () => {
+    const program = programs.shift();
+    if (!program) return;
+    try {
+      program.getUniforms();
+      program.getAttributes();
+    } catch (err) {
+      console.warn('[prewarm] program setup failed', err);
+    }
+    setTimeout(step, PROGRAM_SETUP_INTERVAL_MS);
+  };
+  step();
+}
+
 // Compiles a shader program for every material in the scene — INCLUDING
 // objects that are currently hidden until a later phase, which a plain
 // renderer.compile() skips (it only walks visible objects).
@@ -76,7 +201,13 @@ export function prewarmShadersOnFirstXRSession(world: World): void {
         // await, so visibility can be restored immediately below — nothing
         // hidden is ever actually drawn. The returned promise resolves once
         // the GPU has finished linking in the background.
-        world.renderer.compileAsync(world.scene, world.camera).catch(() => {});
+        world.renderer
+          .compileAsync(world.scene, world.camera)
+          .then(() => {
+            drawHiddenOnce(world);
+            finishProgramSetup(world);
+          })
+          .catch(() => {});
       } catch (err) {
         console.warn('[prewarm] shader compile failed', err);
       } finally {

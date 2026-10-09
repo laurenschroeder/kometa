@@ -17,6 +17,7 @@ import { hexToRgb, NOTIFICATION_TEXT_DEFAULT } from '../vfx/color/color-scheme.j
 import { playNotificationChime } from '../vfx/audio/notification-chime.js';
 import { HUD_FONT_FAMILIES } from '../vfx/fonts/font-registry.js';
 import { getSharedAudioListener } from '../vfx/audio/shared-audio-listener.js';
+import { devPerfMark } from './dev-perf-logger.js';
 
 // A `fontFamilies` value only takes effect if present at component
 // construction time (setProperties() on an already-built Text/Container
@@ -162,6 +163,8 @@ export class NotificationHudSystem extends createSystem({
   // hasShown(). Cleared alongside _bootTriggered in resetBootTrigger(), the
   // same "a fresh run started" signal.
   private _shownTexts = new Set<string>();
+  // See _pump() — defers an undelayed message's first show by one tick.
+  private _skipDelayTick = false;
   // Same idea as _shownTexts, but only once a message has fully faded back
   // out — see hasFinished().
   private _finishedTexts = new Set<string>();
@@ -428,12 +431,13 @@ export class NotificationHudSystem extends createSystem({
 
     this._active = true;
     this._elapsed = 0;
-    if (next.delaySeconds > 0) {
-      this._pending = next;
-      this._state = FadeState.Delay;
-    } else {
-      this._beginShow(next);
-    }
+    // Even an undelayed message waits out one update tick in Delay before
+    // _beginShow(): new text costs a uikit relayout (~7-8ms on Quest), and
+    // notify() is mostly called on a phase-transition frame that's already
+    // over budget. Still not Idle meanwhile, so queue order is unchanged.
+    this._pending = next;
+    this._state = FadeState.Delay;
+    this._skipDelayTick = next.delaySeconds <= 0;
   }
 
   // Actually puts a message on screen — either immediately from _pump() (no
@@ -441,6 +445,7 @@ export class NotificationHudSystem extends createSystem({
   private _beginShow(next: QueueEntry): void {
     this._currentMuted = !getGlobals(this.world).notificationsEnabled.peek();
     this._shownTexts.add(next.text);
+    devPerfMark(`notify:${next.text.slice(0, 24)}`);
     const lines = next.text.split('\n');
     this._lineCount = Math.min(lines.length, MAX_LINES);
     this._lineStartSeconds = next.lineStartSeconds;
@@ -491,6 +496,10 @@ export class NotificationHudSystem extends createSystem({
     this._elapsed += delta;
 
     if (this._state === FadeState.Delay) {
+      if (this._skipDelayTick) {
+        this._skipDelayTick = false;
+        return;
+      }
       if (this._elapsed >= (this._pending?.delaySeconds ?? 0)) {
         const next = this._pending!;
         this._pending = null;

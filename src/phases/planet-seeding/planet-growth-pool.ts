@@ -4,7 +4,6 @@ import {
   Entity,
   InstancedBufferAttribute,
   InstancedMesh,
-  Matrix4,
   Quaternion,
   Vector3,
   World,
@@ -14,6 +13,7 @@ import {
   loadFbxAllMeshes,
   normalizeGeometryToUnitRadiusFromOrigin,
 } from '../../vfx/geometry/fbx-field-loader.js';
+import { writeInstanceTRS } from '../../vfx/geometry/mesh-utils.js';
 import { makeToonRimInstancedDitherMaterial } from '../../vfx/shaders/toon-rim-material.js';
 import { hexToRgb, ORGANIC_GLITTER_DARK, ORGANIC_GLITTER_LIGHT, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
 import { MAX_SPLATS } from '../../vfx/shaders/planet-stain-material.js';
@@ -272,8 +272,6 @@ export class PlanetGrowthPool {
   private _unassigned: { slot: number; useFlowers: boolean; color: [number, number, number] }[] = [];
 
   private _upAxis = new Vector3(0, 1, 0);
-  private _scaleVec = new Vector3();
-  private _matrix = new Matrix4();
 
   // parentEntity is the planet's own transform entity (see
   // PlanetSeedingVfxSystem's _planetEntity) — the buckets are parented under
@@ -409,9 +407,16 @@ export class PlanetGrowthPool {
   private _writeInstance(slot: number, scale: number): void {
     const bucket = this._slotBucket[slot];
     if (!bucket) return;
-    this._scaleVec.setScalar(scale);
-    this._matrix.compose(this._slotPos[slot], this._slotQuat[slot], this._scaleVec);
-    bucket.mesh.setMatrixAt(this._slotInstance[slot], this._matrix);
+    // Direct write, not compose() + setMatrixAt() — see writeInstanceTRS.
+    const pos = this._slotPos[slot];
+    const quat = this._slotQuat[slot];
+    writeInstanceTRS(
+      bucket.mesh.instanceMatrix.array as Float32Array,
+      this._slotInstance[slot],
+      pos.x, pos.y, pos.z,
+      quat.x, quat.y, quat.z, quat.w,
+      scale,
+    );
     bucket.mesh.instanceMatrix.needsUpdate = true;
   }
 

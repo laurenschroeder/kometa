@@ -7,6 +7,7 @@ import { HapticPattern, HapticsSystem } from './haptics-system.js';
 import { NotificationHudSystem } from './notification-hud-system.js';
 import { track } from './telemetry.js';
 import { getSharedAudioListener } from '../vfx/audio/shared-audio-listener.js';
+import { devPerfMark } from './dev-perf-logger.js';
 
 // A shared "unlock" service, not a self-driving one — every achievement in
 // achievement-list.ts is now tied to a specific mission/gameplay outcome
@@ -23,6 +24,11 @@ export class AchievementSystem extends createSystem({}) {
   private _audioListener!: AudioListener;
   private _synth!: AchievementSynth;
   private _scratchPos!: Vector3;
+  // Chimes are queued and played from update() a tick later rather than
+  // inline: unlocks mostly fire on a phase-transition frame, and building
+  // the chime's oscillator graph measured ~3.7ms on Quest.
+  private _pendingChimes = 0;
+  private _chimeSkipTicks = 0;
 
   init(): void {
     this._audioListener = getSharedAudioListener(this.world);
@@ -41,6 +47,7 @@ export class AchievementSystem extends createSystem({}) {
   unlock(id: string): void {
     if (!unlockAchievement(id)) return;
     track('achievement_unlocked', { id });
+    devPerfMark(`unlock:${id}`);
     const def = ACHIEVEMENTS.find((a) => a.id === id);
     if (!def) return;
     // notify() itself already self-mutes its box/chime when notifications
@@ -50,10 +57,7 @@ export class AchievementSystem extends createSystem({}) {
     this.world.getSystem(NotificationHudSystem)?.notify(`Achievement unlocked: ${def.title}`, 3.5);
     this.world.getSystem(HapticsSystem)?.pulseBoth(HapticPattern.CelebratoryBurst);
     if (!getGlobals(this.world).notificationsEnabled.peek()) return;
-    // Not tied to any world location — just plays roughly where the player
-    // is looking, same as the HUD notification it accompanies.
-    this.camera.getWorldPosition(this._scratchPos);
-    this._synth.playUnlock(this._scratchPos);
+    this._queueChime();
   }
 
   // Same ascending chime as unlock() above, for a moment that deserves its
@@ -63,6 +67,23 @@ export class AchievementSystem extends createSystem({}) {
   // unlockAchievement() record on top of it) — no popup, no achievement id,
   // just the sound.
   playSuccessChime(): void {
+    this._queueChime();
+  }
+
+  private _queueChime(): void {
+    this._pendingChimes++;
+    this._chimeSkipTicks = 1;
+  }
+
+  update(): void {
+    if (this._pendingChimes === 0) return;
+    if (this._chimeSkipTicks > 0) {
+      this._chimeSkipTicks--;
+      return;
+    }
+    this._pendingChimes--;
+    // Not tied to any world location — just plays roughly where the player
+    // is looking, same as the HUD notification it accompanies.
     this.camera.getWorldPosition(this._scratchPos);
     this._synth.playUnlock(this._scratchPos);
   }

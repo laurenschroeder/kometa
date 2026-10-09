@@ -19,6 +19,7 @@ import { OrbitalLaunchSynth } from '../../vfx/audio/orbital-launch-synth.js';
 import { PLANET_RADIUS as SEEDING_PLANET_RADIUS } from '../planet-seeding/planet-seeding-system.js';
 import { PlanetSeedingVfxSystem } from '../planet-seeding/planet-seeding-vfx-system.js';
 import { getSharedAudioListener } from '../../vfx/audio/shared-audio-listener.js';
+import { devPerfMark } from '../../core/dev-perf-logger.js';
 
 // 45 degrees front-left/front-right — used both as the fixed placeholder
 // direction before this system has ever played (see init()) and as the
@@ -490,6 +491,7 @@ export class OrbitalLaunchSystem extends createSystem({
   }
 
   private _commit(choice: LaunchChoice): void {
+    devPerfMark(`launch-commit:${choice}`);
     this._choice = choice;
     this._state = 'committed';
     this._orbitCharge = 0;
@@ -556,6 +558,7 @@ export class OrbitalLaunchSystem extends createSystem({
   }
 
   private _detach(): void {
+    devPerfMark('launch-detach');
     this._state = 'detached';
     // Direction comes from where the player is actually looking right now,
     // not from the comet's raw swing velocity (see class comment) — this

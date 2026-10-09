@@ -24,9 +24,10 @@ import { Phase } from '../../core/phase.js';
 import { COMET_HEAD, HAZE, hexToRgb, ORGANIC_PALETTE, WHITE } from '../../vfx/color/color-scheme.js';
 import { loadFbxMeshesByName } from '../../vfx/geometry/fbx-field-loader.js';
 import { buildOrganicGeometry } from '../../vfx/geometry/organic-rock-geometry.js';
+import { writeInstanceTRS } from '../../vfx/geometry/mesh-utils.js';
 import { generateRadialField, RadialField } from '../../vfx/particles/particle-field.js';
 import { PEBBLE_MESH_SCALE, pebbleSizeFromSample } from '../../vfx/particles/pebble-size.js';
-import { sampleTrailField, sampleTrailOffset } from '../../vfx/particles/trail-sampler.js';
+import { sampleTrailField } from '../../vfx/particles/trail-sampler.js';
 import {
   kGasCloudMat,
   kOrganicGlitterMat,
@@ -154,6 +155,10 @@ interface CometVisual {
   pebbleField: RadialField;
   pebbleSizes: Float32Array;
   pebbleRot: Quaternion[];
+  // pebbleRot flattened to xyzw — read by the per-frame placement loop,
+  // which avoids three's shared Vector3/Quaternion accessors (see
+  // _placeInstancedPebbles).
+  pebbleRotArr: Float32Array;
   // Each pebble's fixed random roll in [0, 1) — see _recomputeTypesForVisual. Combined
   // with the CURRENT globals.pebbleTypeWeights, decides pebbleType.
   pebbleTypeRoll: Float32Array;
@@ -232,7 +237,6 @@ export class PebbleCometPresentationSystem extends createSystem({
   private _faceDir!: Vector3;
   private _xAxis!: Vector3;
   private _scratchOffset!: Vector3;
-  private _scratchGasPos!: Vector3;
   private _scratchMat4!: Matrix4;
   private _scratchScale!: Vector3;
 
@@ -247,7 +251,6 @@ export class PebbleCometPresentationSystem extends createSystem({
     this._faceDir = new Vector3();
     this._xAxis = new Vector3(1, 0, 0);
     this._scratchOffset = new Vector3();
-    this._scratchGasPos = new Vector3();
     this._scratchMat4 = new Matrix4();
     this._scratchScale = new Vector3();
 
@@ -368,6 +371,8 @@ export class PebbleCometPresentationSystem extends createSystem({
       rotAxisScratch.set(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
       pebbleRot[i] = new Quaternion().setFromAxisAngle(rotAxisScratch, Math.random() * Math.PI * 2);
     }
+    const pebbleRotArr = new Float32Array(N_PEBBLES * 4);
+    for (let i = 0; i < N_PEBBLES; i++) pebbleRot[i].toArray(pebbleRotArr, i * 4);
 
     const pebbleTypeRoll = new Float32Array(N_PEBBLES);
     for (let i = 0; i < N_PEBBLES; i++) pebbleTypeRoll[i] = Math.random();
@@ -503,6 +508,7 @@ export class PebbleCometPresentationSystem extends createSystem({
       pebbleField,
       pebbleSizes,
       pebbleRot,
+      pebbleRotArr,
       pebbleTypeRoll,
       pebbleType: new Uint8Array(N_PEBBLES),
       organicPaletteColor,
@@ -677,55 +683,63 @@ export class PebbleCometPresentationSystem extends createSystem({
     }
   }
 
+  // Runs every frame for all N_PEBBLES, so it works in plain local numbers:
+  // three's shared Vector3/Quaternion methods (set/copy/addScaledVector,
+  // the x/y/z getters, Matrix4.compose) also serve IWSDK's getter-backed
+  // synced vectors, which leaves them megamorphic — measured on Quest
+  // allocating a boxed number per float read/write here (~1.7MB/s of
+  // garbage from this loop alone, feeding GC pauses).
   private _placeInstancedPebbles(
     trail: Float32Array,
     samples: number,
     stride: number,
     visual: CometVisual,
   ): void {
-    const { pebbleField, pebbleSizes, pebbleRot, pebbleType, organicMeshes, soulMeshes, soulBucket, soulLocal, soulExtraScale } =
+    const { pebbleField, pebbleSizes, pebbleRotArr, pebbleType, organicMeshes, soulMeshes, soulBucket, soulLocal, soulExtraScale, gasJitter, gasBaseBright } =
       visual;
     const posArr = visual.gasPositionAttr.array as Float32Array;
     const brightArr = visual.gasBrightAttr.array as Float32Array;
+    const rx = this._camRight.x, ry = this._camRight.y, rz = this._camRight.z;
+    const ux = this._camUp.x, uy = this._camUp.y, uz = this._camUp.z;
+    const fx = this._camFwd.x, fy = this._camFwd.y, fz = this._camFwd.z;
+    const { t, dx, dy, dz } = pebbleField;
 
     for (let i = 0; i < N_PEBBLES; i++) {
       const type = pebbleType[i];
       if (type === TYPE_NONE) continue;
-      sampleTrailOffset(
-        trail,
-        samples,
-        stride,
-        pebbleField.t[i],
-        pebbleField.dx[i],
-        pebbleField.dy[i],
-        pebbleField.dz[i],
-        this._camRight,
-        this._camUp,
-        this._camFwd,
-        this._scratchOffset,
-      );
+      // Same math as sampleTrailOffset(), inlined.
+      const ti = Math.min(samples - 1, Math.floor(t[i] * samples)) * stride * 3;
+      const ox = trail[ti] + rx * dx[i] + ux * dy[i] + fx * dz[i];
+      const oy = trail[ti + 1] + ry * dx[i] + uy * dy[i] + fy * dz[i];
+      const oz = trail[ti + 2] + rz * dx[i] + uz * dy[i] + fz * dz[i];
 
       if (type === TYPE_ORGANIC) {
-        this._scratchScale.setScalar(pebbleSizes[i] * PEBBLE_MESH_SCALE);
-        this._scratchMat4.compose(this._scratchOffset, pebbleRot[i], this._scratchScale);
-        organicMeshes[i % N_ORGANIC_VARIANTS].setMatrixAt(Math.floor(i / N_ORGANIC_VARIANTS), this._scratchMat4);
+        const q = i * 4;
+        writeInstanceTRS(
+          organicMeshes[i % N_ORGANIC_VARIANTS].instanceMatrix.array as Float32Array,
+          Math.floor(i / N_ORGANIC_VARIANTS),
+          ox, oy, oz,
+          pebbleRotArr[q], pebbleRotArr[q + 1], pebbleRotArr[q + 2], pebbleRotArr[q + 3],
+          pebbleSizes[i] * PEBBLE_MESH_SCALE,
+        );
       } else if (type === TYPE_SOUL) {
-        this._scratchScale.setScalar(pebbleSizes[i] * PEBBLE_MESH_SCALE * soulExtraScale[i] * SOUL_SIZE_MULTIPLIER);
-        this._scratchMat4.compose(this._scratchOffset, pebbleRot[i], this._scratchScale);
-        soulMeshes[soulBucket[i]].setMatrixAt(soulLocal[i], this._scratchMat4);
+        const q = i * 4;
+        writeInstanceTRS(
+          soulMeshes[soulBucket[i]].instanceMatrix.array as Float32Array,
+          soulLocal[i],
+          ox, oy, oz,
+          pebbleRotArr[q], pebbleRotArr[q + 1], pebbleRotArr[q + 2], pebbleRotArr[q + 3],
+          pebbleSizes[i] * PEBBLE_MESH_SCALE * soulExtraScale[i] * SOUL_SIZE_MULTIPLIER,
+        );
       } else {
         const base = i * CLOUD_POINTS_PER_PEBBLE;
         for (let k = 0; k < CLOUD_POINTS_PER_PEBBLE; k++) {
           const flat = base + k;
-          this._scratchGasPos
-            .copy(this._scratchOffset)
-            .addScaledVector(this._camRight, visual.gasJitter[flat * 3])
-            .addScaledVector(this._camUp, visual.gasJitter[flat * 3 + 1])
-            .addScaledVector(this._camFwd, visual.gasJitter[flat * 3 + 2]);
-          posArr[flat * 3] = this._scratchGasPos.x;
-          posArr[flat * 3 + 1] = this._scratchGasPos.y;
-          posArr[flat * 3 + 2] = this._scratchGasPos.z;
-          brightArr[flat] = visual.gasBaseBright[flat];
+          const jx = gasJitter[flat * 3], jy = gasJitter[flat * 3 + 1], jz = gasJitter[flat * 3 + 2];
+          posArr[flat * 3] = ox + rx * jx + ux * jy + fx * jz;
+          posArr[flat * 3 + 1] = oy + ry * jx + uy * jy + fy * jz;
+          posArr[flat * 3 + 2] = oz + rz * jx + uz * jy + fz * jz;
+          brightArr[flat] = gasBaseBright[flat];
         }
       }
     }
@@ -734,4 +748,5 @@ export class PebbleCometPresentationSystem extends createSystem({
     visual.gasPositionAttr.needsUpdate = true;
     visual.gasBrightAttr.needsUpdate = true;
   }
+
 }

@@ -96,7 +96,7 @@ function buildFireTube(): [Mesh, Float32Array, Float32Array, BufferAttribute, Bu
   geo.setAttribute('position', posAttr);
   geo.setAttribute('color', colAttr);
   const mat = new MeshBasicMaterial({
-    vertexColors: true, side: DoubleSide,
+    vertexColors: true, side: DoubleSide, forceSinglePass: true,
     blending: AdditiveBlending, depthWrite: false, transparent: true,
   });
   const mesh = new Mesh(geo, mat);

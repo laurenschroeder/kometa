@@ -50,6 +50,7 @@ import { cometStats, fetchCometStats } from './core/community-stats.js';
 import { getPlatform, platformUser, startProgressSync } from './core/progress-sync.js';
 import { initTelemetry, setTelemetryUserProps } from './core/telemetry.js';
 import { prewarmShadersOnFirstXRSession, uploadTextures } from './core/render-prewarm.js';
+import { installFastMatrixUpdate } from './core/fast-matrix-update.js';
 import { TelemetrySystem } from './core/telemetry-system.js';
 
 startLoadingScreen();
@@ -88,6 +89,9 @@ if (communityLine) {
     communityLine.style.display = stats ? 'block' : 'none';
   });
 }
+
+// Before any Object3D exists — see fast-matrix-update.ts (GC churn on Quest).
+installFastMatrixUpdate();
 
 // AR on every headset that supports it (all Quests); VR only where the
 // browser definitively has no AR — see pickSessionMode. Never rejects.
@@ -519,7 +523,10 @@ pickSessionMode().then((sessionMode) => World.create(document.getElementById('sc
   // production, also skip three.js's per-program error readback, which
   // otherwise blocks the main thread until each shader finishes compiling
   // the first time it's used.
-  if (import.meta.env.PROD) world.renderer.debug.checkShaderErrors = false;
+  // `?perfprod` does the same in dev, so on-device profiling matches a release build.
+  if (import.meta.env.PROD || new URLSearchParams(location.search).has('perfprod')) {
+    world.renderer.debug.checkShaderErrors = false;
+  }
   uploadTextures(
     world,
     ['faceSoul', 'faceOrganic', 'faceGas'].map((key) => AssetManager.getTexture(key)),

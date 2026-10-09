@@ -524,7 +524,17 @@ export class PokeCubeButton {
     // No per-frame billboarding — every caller parents this under a root
     // that already faces the player via FollowBehavior.FaceTarget, so a
     // label at local identity rotation inherits that automatically.
-    this._labelMaterial = new MeshBasicMaterial({ transparent: true, depthWrite: false, side: DoubleSide });
+    // forceSinglePass: three otherwise draws transparent DoubleSide materials
+    // in two passes, flagging needsUpdate twice per object per frame — a full
+    // program lookup each time (measured on Quest as ~5MB/s of garbage across
+    // the game's flat label/billboard planes). A flat plane gains nothing
+    // from the back-then-front pass split.
+    this._labelMaterial = new MeshBasicMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: DoubleSide,
+      forceSinglePass: true,
+    });
     this._labelMesh = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), this._labelMaterial);
     this._labelMesh.position.set(0, DIAMOND_SIZE / 2 + LABEL_GAP, 0);
     group.add(this._labelMesh);
@@ -537,6 +547,17 @@ export class PokeCubeButton {
 
     this._burst = new BurstEffect();
     group.add(this._burst.points);
+
+    // IWSDK's InputSystem builds a BVH for every mesh under an interactable
+    // the frame it qualifies — skipped for geometry that already has one.
+    // PokeInteractable was added above while the group was still empty, so
+    // the real build used to land on the first setEnabled(true) mid-game
+    // (measured on Quest: 22ms, the Continue button's unlock). Paid here,
+    // behind the loading screen, instead.
+    group.traverse((child) => {
+      const geometry = (child as Mesh).isMesh ? (child as Mesh).geometry : null;
+      if (geometry && !geometry.boundsTree) geometry.computeBoundsTree();
+    });
   }
 
   // One diamond panel: two flourish halves (see buildFlourishMesh) at a
