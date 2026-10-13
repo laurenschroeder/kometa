@@ -1,0 +1,620 @@
+<title>Kometa Artist Deck</title>
+<style>
+  /* Layout: a stack of 16:9 slides, each a full-bleed render from the game
+     with copy set inside the game's own UI panel (black fill, 2px white
+     border, square corners, corner.png swirl flourishes). Sizes are in cqw
+     so a slide reads the same on screen, on a phone, and as a printed page. */
+  @font-face {
+    font-family: 'CarroisGothicSC';
+    src: url({{FONT_CARROIS}}) format('truetype');
+  }
+
+  @font-face {
+    font-family: 'ImperialScript';
+    src: url({{FONT_IMPERIAL}}) format('truetype');
+  }
+
+  :root {
+    --void: #000000;
+    /* panel fill, index.html #kometa-panel */
+    --ink: #ffffff;
+    /* panel border + headings */
+    --cream: #fffae2;
+    /* WHITE in color-scheme.ts */
+    --mist: #d4d4d8;
+    /* tagline grey */
+    --dim: #a1a1aa;
+    /* community-line grey */
+    --gold: #ffd933;
+    /* UI_GOLD */
+    --soul: #85aaff;
+    --organic: #caff81;
+    --gas: #ff7053;
+    --sky: #080e22;
+    /* DOME_SKY */
+    --hud: 'CarroisGothicSC', 'Carrois Gothic SC', 'Trebuchet MS', sans-serif;
+    --script: 'ImperialScript', 'Imperial Script', cursive;
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    background: var(--void);
+    color: var(--ink);
+  }
+
+  body {
+    margin: 0;
+    padding-inline: 16px;
+    padding-block: 24px;
+    font-family: var(--hud);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .deck {
+    display: grid;
+    gap: 24px;
+    justify-items: center;
+  }
+
+  .slide {
+    position: relative;
+    width: min(100%, 1280px);
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    container-type: inline-size;
+    background: var(--sky);
+    border: 2px solid var(--ink);
+    box-sizing: border-box;
+  }
+
+  .slide>.art {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* Darken the side the panel sits on so the art still breathes elsewhere. */
+  .shade-l::after,
+  .shade-r::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .shade-l::after {
+    background: linear-gradient(90deg, rgb(0 0 0 / 0.55), rgb(0 0 0 / 0) 60%);
+  }
+
+  .shade-r::after {
+    background: linear-gradient(270deg, rgb(0 0 0 / 0.55), rgb(0 0 0 / 0) 60%);
+  }
+
+  .panel {
+    position: absolute;
+    z-index: 2;
+    background: var(--void);
+    border: 2px solid var(--ink);
+    box-sizing: border-box;
+    padding: 4.8cqw 4.6cqw;
+    display: flex;
+    flex-direction: column;
+    gap: 1.4cqw;
+  }
+
+  .corner {
+    position: absolute;
+    width: 4.6cqw;
+    height: 4.6cqw;
+    pointer-events: none;
+  }
+
+  .corner.bl {
+    left: 0;
+    bottom: 0;
+  }
+
+  .corner.tl {
+    left: 0;
+    top: 0;
+    transform: rotate(90deg);
+  }
+
+  .corner.tr {
+    right: 0;
+    top: 0;
+    transform: rotate(180deg);
+  }
+
+  .corner.br {
+    right: 0;
+    bottom: 0;
+    transform: rotate(270deg);
+  }
+
+  .kicker {
+    font-size: 1.15cqw;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin: 0;
+  }
+
+  h1,
+  h2 {
+    margin: 0;
+    font-weight: bold;
+    color: var(--cream);
+    text-wrap: balance;
+    letter-spacing: 0.02em;
+    line-height: 1.08;
+  }
+
+  h1 {
+    font-size: 3.1cqw;
+  }
+
+  h2 {
+    font-size: 2.6cqw;
+  }
+
+  p {
+    margin: 0;
+    font-size: 1.42cqw;
+    line-height: 1.5;
+    color: var(--mist);
+    letter-spacing: 0.03em;
+    max-width: 62ch;
+  }
+
+  p strong {
+    color: var(--cream);
+    font-weight: bold;
+  }
+
+  p em {
+    color: var(--cream);
+    font-style: normal;
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Title lockup (index.html #kometa-panel) ── */
+  .lockup {
+    align-items: center;
+    text-align: center;
+    gap: 0;
+    padding: 3.6cqw 6cqw 3.4cqw;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: center;
+    line-height: 1;
+    color: var(--ink);
+  }
+
+  .title-k {
+    font-family: var(--script);
+    font-size: calc(6cqw * 2.625);
+    line-height: 1;
+  }
+
+  .title-rest {
+    font-weight: bold;
+    font-size: 6cqw;
+    line-height: 1;
+  }
+
+  .tagline {
+    margin-top: 2cqw;
+    font-size: 1.5cqw;
+    letter-spacing: 0.14em;
+    line-height: 1.3;
+    color: var(--mist);
+    text-transform: uppercase;
+  }
+
+  .tagline .studio {
+    display: block;
+    font-size: 1.3em;
+    margin-top: 0.3em;
+  }
+
+  /* ── Chapter index ── */
+  .index {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    align-content: center;
+    gap: 3cqw;
+    padding: 4.5cqw 5cqw;
+  }
+
+  .index-head {
+    display: flex;
+    flex-direction: column;
+    gap: 1cqw;
+  }
+
+  .chapters {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 1.8cqw;
+    align-items: start;
+  }
+
+  .chapter {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9cqw;
+    min-width: 0;
+  }
+
+  .chapter img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    border: 2px solid var(--ink);
+    box-sizing: border-box;
+    display: block;
+  }
+
+  .chapter .n {
+    font-size: 1cqw;
+    letter-spacing: 0.3em;
+    color: var(--gold);
+  }
+
+  .chapter .name {
+    font-size: 2.1cqw;
+    font-weight: bold;
+    color: var(--cream);
+    letter-spacing: 0.03em;
+  }
+
+  .chapter .what {
+    font-size: 1.3cqw;
+    line-height: 1.45;
+    color: var(--mist);
+    letter-spacing: 0.03em;
+  }
+
+  /* ── Chapter slides: framed labeled render + story panel ── */
+  .chapter-slide {
+    background: var(--void);
+  }
+
+  .chapter-slide .shot {
+    position: absolute;
+    left: 3.5cqw;
+    /* Centered by offset, not transform: print pagination is laid out
+       before transforms apply, so a translate-centered box gets split
+       across pages in the PDF. Slide is 56.25cqw tall; 64cqw at 16:9 is 36. */
+    top: 10.125cqw;
+    width: 64cqw;
+    height: 36cqw;
+    aspect-ratio: 16 / 9;
+    display: block;
+    border: 2px solid var(--ink);
+    box-sizing: border-box;
+  }
+
+  .story {
+    left: 70.5cqw;
+    right: 3.5cqw;
+    top: 0;
+    bottom: 0;
+    margin-block: auto;
+    height: fit-content;
+    padding: 4cqw 2.8cqw;
+    gap: 1.2cqw;
+  }
+
+  .story .corner {
+    width: 3cqw;
+    height: 3cqw;
+  }
+
+  .story p:not(.kicker) {
+    font-size: 1.32cqw;
+  }
+
+  .caption {
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 3.2cqw;
+    width: 62cqw;
+    padding: 2cqw 3cqw;
+    gap: 0;
+  }
+
+  .caption.left {
+    left: 4cqw;
+    transform: none;
+  }
+
+  .caption.right {
+    left: auto;
+    right: 4cqw;
+    transform: none;
+  }
+
+  .caption .corner {
+    width: 3cqw;
+    height: 3cqw;
+  }
+
+  .caption p {
+    font-size: 1.35cqw;
+    max-width: none;
+  }
+
+  /* ── Visuals: art on top, the three natures below ── */
+  .visuals {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 36%;
+    box-sizing: border-box;
+    padding: 2.6cqw 4cqw;
+    display: grid;
+    grid-template-columns: 1.25fr 1fr 1fr 1fr;
+    gap: 3cqw;
+    align-items: start;
+  }
+
+  .visuals>div {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7cqw;
+    min-width: 0;
+  }
+
+  .visuals h3 {
+    margin: 0;
+    font-size: 1.6cqw;
+    letter-spacing: 0.06em;
+  }
+
+  .visuals p {
+    font-size: 1.2cqw;
+  }
+
+  .swatch {
+    display: inline-block;
+    width: 0.9cqw;
+    height: 0.9cqw;
+    margin-right: 0.7cqw;
+    vertical-align: 0.05cqw;
+    border: 1px solid var(--ink);
+  }
+
+  @page {
+    size: 13.333in 7.5in;
+    margin: 0;
+  }
+
+  @media print {
+    body {
+      padding: 0;
+    }
+
+    .deck {
+      display: block;
+    }
+
+    .slide {
+      width: 13.333in;
+      height: 7.5in;
+      aspect-ratio: auto;
+      border: 0;
+      break-after: page;
+      page-break-after: always;
+    }
+
+    .slide:last-child {
+      break-after: auto;
+      page-break-after: auto;
+    }
+  }
+
+  @media (max-width: 560px) {
+    body {
+      padding-block: 16px;
+    }
+
+    .deck {
+      gap: 16px;
+    }
+  }
+</style>
+
+<main class="deck">
+
+  <!-- 1. Cover -->
+  <section class="slide shade-r" aria-label="Cover">
+    <img class="art" src="{{IMG_COVER}}"
+      alt="A comet with a glowing blue face trails a tail of translucent soul pebbles across a starry night sky.">
+    <div class="panel lockup" style="right: 7cqw; top: 0; bottom: 0; margin-block: auto; height: fit-content;">
+      {{CORNERS}}
+      <div class="title-row"><span class="title-k">K</span><span class="title-rest">OMETA</span></div>
+      <div class="tagline">An experience of stardust and fate<span class="studio">· Virtual Pebble Studio ·</span></div>
+    </div>
+  </section>
+
+  <!-- 2. Concept -->
+  <section class="slide shade-l" aria-label="Concept">
+    <img class="art" src="{{IMG_CONCEPT}}"
+      alt="Close-up of the gas comet's carved stone face, its red cloud tail whipping behind it.">
+    <div class="panel" style="left: 4cqw; top: 0; bottom: 0; margin-block: auto; height: fit-content; width: 50cqw;">
+      {{CORNERS}}
+      <p class="kicker">Concept</p>
+      <h1>Making an accessible VR game that people describe as magical</h1>
+      <p>This VR experience invites players into a minimal, stylized cosmos where they guide a comet on its journey. I
+        wanted to make something that's accessible for anyone to play, even if they've never tried VR, while making the
+        experience feel magical.</p>
+    </div>
+  </section>
+
+  <!-- 3. Intention -->
+  <section class="slide shade-l" aria-label="Intention">
+    <img class="art" src="{{IMG_INTENT}}"
+      alt="The organic comet streams a long tail of green stones and translucent soul islands behind it.">
+    <div class="panel" style="left: 4cqw; top: 0; bottom: 0; margin-block: auto; height: fit-content; width: 50cqw;">
+      {{CORNERS}}
+      <p class="kicker">Intention</p>
+      <h2>One gesture, felt in the hand</h2>
+      <p><em>Kometa</em> uses a custom spring-joint system <strong>to give players intuitive, physical control over an
+          orbiting ball that represents their comet.</strong> The spring joint creates a satisfying sense of weight and
+        momentum: swinging wide builds speed, pulling close creates tight spirals.</p>
+      <p>This single mechanic is the foundation for every interaction in the game, recontextualized across all five
+        chapters.</p>
+    </div>
+  </section>
+
+  <!-- 4. Universe -->
+  <section class="slide shade-r" aria-label="Universe">
+    <img class="art" src="{{IMG_UNIVERSE}}"
+      alt="The organic comet's carved face looks out from a faint green nebula, its tail sweeping up behind it.">
+    <div class="panel" style="right: 4cqw; top: 0; bottom: 0; margin-block: auto; height: fit-content; width: 50cqw;">
+      {{CORNERS}}
+      <p class="kicker">Universe</p>
+      <h2>The lifecycle of a comet</h2>
+      <p>I was inspired in learning about the lifecycle of comets, and how they have seeded planets, possibly Earth,
+        with some of the elements needed to create life.</p>
+      <p>In the experience you begin as stardust, gather yourself into a comet with the motion of your hand, and carry
+        what you choose (souls, living things, or volatile gasses) to a young planet. What you seed there grows into an
+        ecosystem, shapes the fate of its people, and finally decides where your comet goes.</p>
+    </div>
+  </section>
+
+  <!-- 5. Chapter index -->
+  <section class="slide" aria-label="Five chapters" style="background: var(--void);">
+    <div class="index">
+      <div class="index-head">
+        <p class="kicker">The journey</p>
+        <h2>Five chapters, one comet</h2>
+      </div>
+      <div class="chapters">
+        <div class="chapter"><img src="{{IMG_P1}}" alt=""><span class="n">PHASE 1</span><span
+            class="name">STARDUST</span><span class="what">Gather drifting stardust into a comet.</span></div>
+        <div class="chapter"><img src="{{IMG_P2}}" alt=""><span class="n">PHASE 2</span><span
+            class="name">PEBBLES</span><span class="what">Choose what you carry: souls, living things, or volatile
+            gasses.</span></div>
+        <div class="chapter"><img src="{{IMG_P3}}" alt=""><span class="n">PHASE 3</span><span
+            class="name">SEEDING</span><span class="what">Seed a young planet and watch life grow.</span></div>
+        <div class="chapter"><img src="{{IMG_P4}}" alt=""><span class="n">PHASE 4</span><span
+            class="name">FATE</span><span class="what">Meet the people your comet created.</span></div>
+        <div class="chapter"><img src="{{IMG_P5}}" alt=""><span class="n">PHASE 5</span><span
+            class="name">LAUNCH</span><span class="what">Decide where your comet goes.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6–10. Chapters: the whole labeled render, framed, with its story beside it -->
+  <section class="slide chapter-slide" aria-label="Phase 1: Stardust">
+    <img class="shot" src="{{IMG_P1}}"
+      alt="A clump of cream stardust trails sparkles across the sky, with a gold swirl of pixel stars behind it.">
+    <div class="panel story">
+      {{CORNERS}}
+      <p class="kicker">Phase 1</p>
+      <h2>Stardust</h2>
+      <p>You begin as scattered stardust. Sweeping your hand through the dark draws the motes together into a glittering
+        clump that trails behind you.</p>
+    </div>
+  </section>
+
+  <section class="slide chapter-slide" aria-label="Phase 2: Pebbles">
+    <img class="shot" src="{{IMG_P2}}"
+      alt="Three clusters float in space: translucent blue soul islands, dark green organic rocks, and glowing red gas clouds.">
+    <div class="panel story">
+      {{CORNERS}}
+      <p class="kicker">Phase 2</p>
+      <h2>Pebbles</h2>
+      <p>Three kinds of matter appear around you: soul dust drifts as translucent, wobbling islands; organic matter
+        as speckled stones; volatile gasses as glowing clouds. What you gather forms your comet's body, and what you
+        gather most gives it its face.</p>
+    </div>
+  </section>
+
+  <section class="slide chapter-slide" aria-label="Phase 3: Seeding">
+    <img class="shot" src="{{IMG_P3}}"
+      alt="A small planet patched in shades of green, covered in plants, with grey moons around it.">
+    <div class="panel story">
+      {{CORNERS}}
+      <p class="kicker">Phase 3</p>
+      <h2>Seeding</h2>
+      <p>You swing your comet around a young planet, raining stardust onto its surface. Years later, the world you
+        seeded comes alive.</p>
+    </div>
+  </section>
+
+  <section class="slide chapter-slide" aria-label="Phase 4: Fate">
+    <img class="shot" src="{{IMG_P4}}"
+      alt="Small dark figures with gold outlines gather around a crowned King on the curve of a green planet, a red comet glowing overhead.">
+    <div class="panel story">
+      {{CORNERS}}
+      <p class="kicker">Phase 4</p>
+      <h2>Fate</h2>
+      <p>Up close, the planet's people live out the consequences of what you brought. Each kind of comet tells a
+        different story. Shown here is a world seeded with volatile gasses, where a crowned King's court gathers in
+        anger and grief.</p>
+    </div>
+  </section>
+
+  <section class="slide chapter-slide" aria-label="Phase 5: Launch">
+    <img class="shot" src="{{IMG_P5}}"
+      alt="Two wireframe spheres float above the comet: a blue one labeled Orbit holding the home planet, and a purple one labeled The Great Unknown holding a nebula.">
+    <div class="panel story">
+      {{CORNERS}}
+      <p class="kicker">Phase 5</p>
+      <h2>Launch</h2>
+      <p>Finally, you choose: stay in orbit around the world you made, or fling yourself into the great unknown. Then
+        you let your comet go.</p>
+    </div>
+  </section>
+
+  <!-- 11. Visual language -->
+  <section class="slide" aria-label="Visual language" style="background: var(--void);">
+    <img class="art" src="{{IMG_TRIO}}"
+      alt="Three comets with soul, organic and gas faces fly together, their tails interleaving."
+      style="height: 64%; object-position: 50% 62%; border-bottom: 2px solid var(--ink); box-sizing: border-box;">
+    <div class="visuals">
+      <div class="visuals-head">
+        <p class="kicker">Visuals</p>
+        <h2>Three natures, one night sky</h2>
+        <p>Every comet's face shows what it carries most.</p>
+      </div>
+      <div>
+        <h3 style="color: var(--soul)"><span class="swatch" style="background: var(--soul)"></span>SOUL DUST</h3>
+        <p>Translucent, softly wobbling islands shaped like ghosts of people and creatures.</p>
+      </div>
+      <div>
+        <h3 style="color: var(--organic)"><span class="swatch" style="background: var(--organic)"></span>ORGANIC MATTER
+        </h3>
+        <p>Dark stones flecked with glitter, tinted from a palette of greens.</p>
+      </div>
+      <div>
+        <h3 style="color: var(--gas)"><span class="swatch" style="background: var(--gas)"></span>VOLATILE GASSES</h3>
+        <p>Soft clouds of warm light that glow and drift along the tail.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12. Close -->
+  <section class="slide" aria-label="Closing" style="background: var(--void);">
+    <div class="panel lockup" style="inset: 0; margin: auto; width: fit-content; height: fit-content;">
+      {{CORNERS}}
+      <div class="title-row"><span class="title-k">K</span><span class="title-rest">OMETA</span></div>
+      <div class="tagline">An experience of stardust and fate<span class="studio">· Virtual Pebble Studio ·</span></div>
+    </div>
+  </section>
+
+</main>

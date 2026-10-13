@@ -90,6 +90,9 @@ for (const face of [0, 1, 2]) {
     shot({ ...portrait, name: `cover-portrait-${FACES[face]}-clean` }),
     shot({ ...square, name: `cover-square-${FACES[face]}`, title: 'bottom', frame: true, head: [-0.2, 0.3], camDist: 0.34 }),
     shot({ ...square, name: `cover-square-${FACES[face]}-clean` }),
+    // 2560x1440 store banner/tile — same composition as the HD landscape
+    // cover, just rendered at the larger size the store requires.
+    shot({ ...landscape, w: 2560, h: 1440, name: `banner-${FACES[face]}`, title: 'middle', titleX: 0.68, frame: true }),
   );
 }
 
@@ -179,4 +182,63 @@ for (const face of [0, 1, 2]) {
   compare.push(shot({ ...c, name: `compare-${FACES[face]}-rocky` }));
 }
 
-export const SHOTS = [...covers, ...gallery, ...compare];
+// ── Phase art 1920x1080 ───────────────────────────────────────────────────
+// One representative image per game phase for the art deck — built by
+// page/phase-scenes.ts (selected by `scene`). Comet fields here pose the
+// comet each scene includes, same meaning as the hero shots above.
+const phase = (o) => shot({ w: 1920, h: 1080, face: 0, counts: MIX[0], faceSize: FACE_SIZE[0], ...o });
+const phases = [
+  // Comet stand-in: only the trail is used (no head yet) — the stardust
+  // clump rides its head end.
+  phase({
+    name: 'phase-1-stardust', scene: 'stardust', seed: 301,
+    head: [-0.18, -0.1], camDist: 0.42,
+    tail: { angle: 200, length: 0.7, depth: 0.45, swish: 0.09, waves: 1.6, phase: 1.1, spread: 0.8 },
+    nebulaCenter: [0.4, 0.45],
+  }),
+  phase({
+    name: 'phase-2-pebbles', scene: 'pebbles', seed: 302,
+    nebulaCenter: [0.5, 0.55],
+    comets: [],
+  }),
+  phase({ name: 'phase-3-seeding', scene: 'seeding', seed: 303, nebulaCenter: [0.5, 0.5] }),
+  phase({
+    name: 'phase-4-fate', scene: 'fate', seed: 304, fov: 42,
+    nebulaCenter: [0.5, 0.8],
+    comets: [{
+      face: 2, counts: [20, 25, 140], faceSize: FACE_SIZE[2], camDist: 0.9, head: [0.6, 0.6],
+      faceTurn: [-0.2, -0.2, 0],
+      tail: { angle: 20, length: 1.4, depth: 0.6, swish: 0.12, waves: 1.5, phase: 0.8, spread: 0.85 },
+    }],
+  }),
+  phase({
+    name: 'phase-5-launch', scene: 'launch', seed: 305, fov: 50,
+    nebulaCenter: [0.65, 0.55],
+    comets: [{
+      face: 2, counts: [30, 40, 150], faceSize: FACE_SIZE[2], camDist: 0.5, head: [0.0, -0.5],
+      tail: { angle: 270, length: 1.2, depth: 0.5, swish: 0.1, waves: 1.6, phase: 1.4, spread: 0.8 },
+    }],
+  }),
+  // Seen from behind-ish, glancing back over its shoulder, tail streaming
+  // back toward the camera (negative depth).
+  phase({
+    name: 'phase-6-flyaway', scene: 'flyaway', seed: 306, face: 2, counts: [30, 40, 150], faceSize: FACE_SIZE[2],
+    head: [0.38, 0.32], camDist: 1.1, faceTurn: [0.9, 0, 0.1],
+    tail: { angle: 215, length: 1.5, depth: -0.35, swish: 0.12, waves: 1.5, phase: 0.8, spread: 0.85 },
+    nebulaCenter: [0.65, 0.65],
+  }),
+];
+
+// Captioned twins of the phase art (…-labeled), for slides that need the
+// phase called out on the image itself.
+const PHASE_LABELS = {
+  'phase-1-stardust': { kicker: 'Phase 1', name: 'Stardust', line: 'Gather drifting stardust into a comet', corner: 'br' },
+  'phase-2-pebbles': { kicker: 'Phase 2', name: 'Pebbles', line: 'Three paths call to you: soul, organic, gas', corner: 'bl' },
+  'phase-3-seeding': { kicker: 'Phase 3', name: 'Seeding', line: 'Seed a planet and watch life grow', corner: 'br' },
+  'phase-4-fate': { kicker: 'Phase 4', name: 'Fate', line: 'Meet the people your comet created', corner: 'tl' },
+  'phase-5-launch': { kicker: 'Phase 5', name: 'Launch', line: 'Orbit home, or the great unknown?', corner: 'bl' },
+  'phase-6-flyaway': { kicker: 'Phase 6', name: 'Release', line: 'Let your comet go', corner: 'tl' },
+};
+const labeledPhases = phases.map((p) => ({ ...p, name: `${p.name}-labeled`, label: PHASE_LABELS[p.name] }));
+
+export const SHOTS = [...covers, ...gallery, ...compare, ...phases, ...labeledPhases];

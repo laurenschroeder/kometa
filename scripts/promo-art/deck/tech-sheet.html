@@ -1,0 +1,191 @@
+<title>Kometa Exhibition Sheet</title>
+<style>
+  /* Layout: one A4 portrait page in the game's UI language (black, 2px
+     white border, square corners, corner.png flourishes), set densely for
+     reference reading: header, key facts, chapters, space plan beside its
+     notes, requirements, then exhibition and comfort notes. Sizes are in
+     cqw (page width) so screen and print match. */
+  @font-face { font-family: 'CarroisGothicSC'; src: url({{FONT_CARROIS}}) format('truetype'); }
+  @font-face { font-family: 'ImperialScript'; src: url({{FONT_IMPERIAL}}) format('truetype'); }
+  :root {
+    --void: #000000;
+    --ink: #ffffff;
+    --cream: #fffae2;
+    --mist: #d4d4d8;
+    --dim: #a1a1aa;
+    --rule: #3f3f46;
+    --gold: #ffd933;
+    --soul: #85aaff;
+    --sky: #080e22;
+    --hud: 'CarroisGothicSC', 'Carrois Gothic SC', 'Trebuchet MS', sans-serif;
+    --script: 'ImperialScript', 'Imperial Script', cursive;
+    color-scheme: dark;
+  }
+  html, body { background: var(--void); color: var(--ink); }
+  body {
+    margin: 0;
+    padding-inline: 16px;
+    padding-block: 24px;
+    font-family: var(--hud);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .deck { display: grid; justify-items: center; }
+  .slide {
+    position: relative;
+    width: min(100%, 900px);
+    aspect-ratio: 210 / 297;
+    overflow: hidden;
+    container-type: inline-size;
+    background: var(--void);
+    border: 2px solid var(--ink);
+    box-sizing: border-box;
+  }
+  .page {
+    position: absolute; inset: 0;
+    padding: 6.5cqw 6.5cqw 6cqw;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 3cqw;
+    box-sizing: border-box;
+  }
+  .corner { position: absolute; width: 5.5cqw; height: 5.5cqw; pointer-events: none; z-index: 3; }
+  .corner.bl { left: 0; bottom: 0; }
+  .corner.tl { left: 0; top: 0; transform: rotate(90deg); }
+  .corner.tr { right: 0; top: 0; transform: rotate(180deg); }
+  .corner.br { right: 0; bottom: 0; transform: rotate(270deg); }
+
+  .head { display: flex; align-items: end; justify-content: space-between; gap: 3.10cqw; border-bottom: 1px solid var(--rule); padding-bottom: 1.55cqw; }
+  .head-text { display: flex; flex-direction: column; gap: 0.77cqw; }
+  .kicker { margin: 0; font-size: 1.27cqw; letter-spacing: 0.35em; text-transform: uppercase; color: var(--gold); }
+  h1 { margin: 0; color: var(--cream); font-weight: bold; font-size: 3.55cqw; letter-spacing: 0.03em; line-height: 1.05; }
+  .mark { display: flex; align-items: center; line-height: 1; color: var(--ink); }
+  .mark .k { font-family: var(--script); font-size: 7.73cqw; line-height: 1; }
+  .mark .rest { font-weight: bold; font-size: 2.94cqw; }
+
+  h3 { margin: 0; font-size: 1.23cqw; letter-spacing: 0.3em; text-transform: uppercase; color: var(--gold); font-weight: normal; }
+  p, li { margin: 0; font-size: 1.33cqw; line-height: 1.42; color: var(--mist); letter-spacing: 0.03em; }
+  strong { color: var(--cream); font-weight: bold; }
+  ul { margin: 0; padding-left: 1.1em; display: grid; gap: 0.39cqw; }
+  li::marker { color: var(--gold); }
+  .block { display: flex; flex-direction: column; gap: 0.85cqw; min-width: 0; }
+
+  /* Key facts: 4 x 2 */
+  .facts { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--rule); }
+  .fact { display: flex; flex-direction: column; gap: 0.39cqw; padding: 1.23cqw 1.23cqw 1.23cqw 0; border-bottom: 1px solid var(--rule); min-width: 0; }
+  .fact:not(:nth-child(4n + 1)) { padding-left: 1.23cqw; border-left: 1px solid var(--rule); }
+  .fact .label { font-size: 1.04cqw; letter-spacing: 0.28em; color: var(--dim); text-transform: uppercase; }
+  .fact .value { font-size: 1.89cqw; font-weight: bold; color: var(--cream); letter-spacing: 0.02em; line-height: 1.12; }
+  .fact .note { font-size: 1.12cqw; color: var(--mist); letter-spacing: 0.03em; line-height: 1.35; }
+
+  /* Chapters: 5 across */
+  .chapters { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1.39cqw; }
+  .chap { display: flex; flex-direction: column; gap: 0.46cqw; min-width: 0; }
+  .chap img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border: 1px solid var(--ink); box-sizing: border-box; display: block; }
+  .chap .n { font-size: 0.97cqw; letter-spacing: 0.28em; color: var(--gold); }
+  .chap .name { font-size: 1.55cqw; font-weight: bold; color: var(--cream); letter-spacing: 0.04em; }
+  .chap p { font-size: 1.12cqw; line-height: 1.35; }
+
+  /* Space: three short columns */
+  .trio { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2.71cqw; }
+
+  /* Requirements: label / value rows in two columns */
+  .reqs { display: grid; grid-template-columns: 1fr 1fr; column-gap: 2.71cqw; border-top: 1px solid var(--rule); }
+  .req { display: grid; grid-template-columns: 8.50cqw 1fr; gap: 1.08cqw; padding: 0.93cqw 0; border-bottom: 1px solid var(--rule); }
+  .req .label { font-size: 1.04cqw; letter-spacing: 0.25em; color: var(--gold); text-transform: uppercase; padding-top: 0.19cqw; }
+  .req p { font-size: 1.20cqw; line-height: 1.38; }
+
+  .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 2.71cqw; }
+
+  @page { size: 210mm 297mm; margin: 0; }
+  @media print {
+    body { padding: 0; }
+    .deck { display: block; }
+    .slide { width: 210mm; height: 297mm; aspect-ratio: auto; border: 0; }
+  }
+  @media (max-width: 560px) { body { padding-block: 16px; } }
+</style>
+
+<main class="deck">
+  <section class="slide" aria-label="Exhibition technical sheet">
+    {{CORNERS}}
+    <div class="page">
+
+      <div class="head">
+        <div class="head-text">
+          <p class="kicker">Exhibition technical sheet</p>
+          <h1>Kometa at a glance</h1>
+        </div>
+        <div class="mark" aria-label="Kometa"><span class="k">K</span><span class="rest">OMETA</span></div>
+      </div>
+
+      <div class="facts">
+        <div class="fact"><span class="label">Format</span><span class="value">Single-player VR</span><span class="note">Optional mixed reality via passthrough</span></div>
+        <div class="fact"><span class="label">Session</span><span class="value">10–15 min</span><span class="note">About 22 min at most; every chapter has a time limit</span></div>
+        <div class="fact"><span class="label">Players</span><span class="value">1 per headset</span><span class="note">Stations are independent; run any number</span></div>
+        <div class="fact"><span class="label">Hardware</span><span class="value">Meta Quest 3 / 3S</span><span class="note">Standalone; no cables or trackers</span></div>
+        <div class="fact"><span class="label">Input</span><span class="value">Hand tracking</span><span class="note">Quest controllers also work; hands mean nothing to hand over</span></div>
+        <div class="fact"><span class="label">Play area</span><span class="value">2 × 2 m</span><span class="note">Standing or seated on a swivel chair; no walking</span></div>
+        <div class="fact"><span class="label">Installation</span><span class="value">None</span><span class="note">Web-based; no app, store account or PC</span></div>
+        <div class="fact"><span class="label">Language</span><span class="value">English</span><span class="note">Short on-screen text; play is wordless gesture</span></div>
+      </div>
+
+      <div class="block">
+        <h3>Five chapters, played in order</h3>
+        <div class="chapters">
+          <div class="chap"><img src="{{IMG_P1}}" alt=""><span class="n">PHASE 1</span><span class="name">STARDUST</span><p>Gather drifting stardust into a comet.</p></div>
+          <div class="chap"><img src="{{IMG_P2}}" alt=""><span class="n">PHASE 2</span><span class="name">PEBBLES</span><p>Choose souls, living things or volatile gasses.</p></div>
+          <div class="chap"><img src="{{IMG_P3}}" alt=""><span class="n">PHASE 3</span><span class="name">SEEDING</span><p>Seed a young planet and watch life grow.</p></div>
+          <div class="chap"><img src="{{IMG_P4}}" alt=""><span class="n">PHASE 4</span><span class="name">FATE</span><p>Meet the people your comet created.</p></div>
+          <div class="chap"><img src="{{IMG_P5}}" alt=""><span class="n">PHASE 5</span><span class="name">LAUNCH</span><p>Choose orbit or the great unknown, then let the comet go.</p></div>
+        </div>
+      </div>
+
+      <div class="trio">
+        <div class="block">
+          <h3>Users and position</h3>
+          <ul>
+            <li>Content surrounds the visitor and appears overhead, so they turn in place.</li>
+            <li>Everything is within arm's reach, so seated and limited-mobility visitors can play.</li>
+          </ul>
+        </div>
+        <div class="block">
+          <h3>Visitor flow</h3>
+          <ul>
+            <li><strong>Fit, ~1 min:</strong> the attendant fits the headset.</li>
+            <li><strong>Reset, ~1 min:</strong> the ending's Main Menu button returns to the start screen.</li>
+            <li>About <strong>4 visitors per station per hour</strong>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="block">
+        <h3>Technical requirements</h3>
+        <div class="reqs">
+          <div class="req"><span class="label">Headset</span><p>Current system software. Performance-tested on Quest 3 at its native 72 fps.</p></div>
+          <div class="req"><span class="label">Launch</span><p>Open <strong>kometa.quest</strong> in the headset browser and select Enter VR. Bookmark it on each headset; accept any permission prompt on first launch.</p></div>
+          <div class="req"><span class="label">Network</span><p>Wi-Fi to load: about 50 MB on first launch, cached after. The live comet counter also uses it; the game plays fully without it.</p></div>
+          <div class="req"><span class="label">Input</span><p>Pinch with hands, or trigger on controllers. Turn on hand tracking in headset settings.</p></div>
+          <div class="req"><span class="label">Audio</span><p>Spatial sound and music on the headset speakers. Headphones recommended in loud venues.</p></div>
+          <div class="req"><span class="label">Power</span><p>About 2 hours per charge. Rotate spares, or use battery straps or cables between sessions.</p></div>
+        </div>
+      </div>
+
+      <div class="notes">
+        <div class="block">
+          <h3>Special features</h3>
+          <ul>
+            <li><strong>Shared counter:</strong> the start menu shows how many comets all players have released; every visitor adds to it.</li>
+            <li><strong>Audience view:</strong> cast each headset to a nearby screen with Quest's built-in casting so the queue can watch.</li>
+          </ul>
+        </div>
+        <div class="block">
+          <h3>Comfort and content</h3>
+          <ul>
+            <li>No artificial locomotion, keeping motion sickness risk low.</li>
+            <li>Mild themes of death and grief in one storyline, stylized and non-graphic. Age guidance follows Meta (10+).</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+  </section>
+</main>

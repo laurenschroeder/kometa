@@ -67,7 +67,7 @@ import {
   makeToonRimInstancedWigglyMaterial,
 } from '../../../src/vfx/shaders/toon-rim-material.js';
 
-interface TailParams {
+export interface TailParams {
   angle: number; // screen-space heading of the tail, degrees (0 = right, 90 = up)
   length: number; // meters along the trail
   depth: number; // 0..1 — how much of the tail recedes away from the camera
@@ -79,7 +79,7 @@ interface TailParams {
 
 // One comet in the shot. A Shot is itself a Comet (single-comet shots put
 // these fields at the top level); multi-comet shots list them in `comets`.
-interface Comet {
+export interface Comet {
   face: 0 | 1 | 2; // soul / organic / gas, same order as PEBBLE_TYPES
   counts: [number, number, number]; // soul / organic / gas pebbles in the tail
   camDist: number;
@@ -89,8 +89,12 @@ interface Comet {
   tail: TailParams;
 }
 
-interface Shot extends Comet {
+export interface Shot extends Comet {
   name: string;
+  // Phase art (see phase-scenes.ts) — omitted for the comet hero shots.
+  scene?: 'stardust' | 'pebbles' | 'seeding' | 'fate' | 'launch' | 'flyaway';
+  // Deck caption burned into the image (see drawPhaseLabel).
+  label?: { kicker: string; name: string; line: string; corner: 'tl' | 'tr' | 'bl' | 'br' };
   w: number;
   h: number;
   ss: number; // supersample factor (downscaled by render.mjs)
@@ -125,19 +129,19 @@ declare global {
   }
 }
 
-const GAME_HEAD_RADIUS = 0.024; // pebble-comet-presentation-system.ts
+export const GAME_HEAD_RADIUS = 0.024; // pebble-comet-presentation-system.ts
 const TRAIL_SAMPLES = 240;
 // Approximate Quest 3 per-eye pixels-per-radian — every point-sprite factor
 // in the game was tuned against this density.
 const HEADSET_PX_PER_RADIAN = 1000;
 
-const TYPE_COLORS: RGB[] = [hexToRgb(SOUL_DUST), hexToRgb(ORGANIC_MATTER), hexToRgb(VOLATILE_GASSES)];
-const FACE_URLS = ['/textures/faceSoul.png', '/textures/faceOrganic.png', '/textures/faceGas.png'];
+export const TYPE_COLORS: RGB[] = [hexToRgb(SOUL_DUST), hexToRgb(ORGANIC_MATTER), hexToRgb(VOLATILE_GASSES)];
+export const FACE_URLS = ['/textures/faceSoul.png', '/textures/faceOrganic.png', '/textures/faceGas.png'];
 
-const shot = window.__shot;
-const HEAD_RADIUS = GAME_HEAD_RADIUS * shot.headScale;
-const W = shot.w * shot.ss;
-const H = shot.h * shot.ss;
+export const shot = window.__shot;
+export const HEAD_RADIUS = GAME_HEAD_RADIUS * shot.headScale;
+export const W = shot.w * shot.ss;
+export const H = shot.h * shot.ss;
 
 run().catch((err) => {
   console.error(err);
@@ -157,19 +161,16 @@ async function run(): Promise<void> {
 
   const PX = H / (2 * Math.tan((shot.fov * Math.PI) / 360)) / HEADSET_PX_PER_RADIAN;
 
-  scene.add(buildBackground(TYPE_COLORS[shot.face]));
-  scene.add(buildStarfield(camera, PX));
-
-  const comets: Comet[] = shot.comets
-    ? shot.comets.map((c) => ({ ...shot, ...c, tail: { ...shot.tail, ...c.tail } }))
-    : [shot];
-  for (const c of comets) {
-    const headPos = new Vector3(c.head[0], c.head[1], 0.5).unproject(camera).normalize().multiplyScalar(c.camDist);
-    const trail = buildTrail(c, headPos);
-    scene.add(buildGlow(c, headPos, TYPE_COLORS[c.face]));
-    const faceTex = await loadFace(FACE_URLS[c.face], renderer.capabilities.getMaxAnisotropy());
-    scene.add(buildHead(c, headPos, faceTex));
-    for (const obj of await buildTail(c, trail, headPos, PX)) scene.add(obj);
+  if (shot.scene) {
+    const { buildPhaseScene } = await import('./phase-scenes.js');
+    await buildPhaseScene(shot.scene, scene, camera, renderer, PX);
+  } else {
+    scene.add(buildBackground(TYPE_COLORS[shot.face]));
+    scene.add(buildStarfield(camera, PX));
+    const comets: Comet[] = shot.comets
+      ? shot.comets.map((c) => ({ ...shot, ...c, tail: { ...shot.tail, ...c.tail } }))
+      : [shot];
+    for (const c of comets) await addComet(scene, camera, renderer, c, PX);
   }
 
   renderer.render(scene, camera);
@@ -181,7 +182,19 @@ async function run(): Promise<void> {
   ctx.drawImage(renderer.domElement, 0, 0);
   if (shot.frame) await drawFrame(ctx);
   if (shot.title !== 'none') await drawTitle(ctx);
+  if (shot.label) await drawPhaseLabel(ctx, shot.label);
   window.__result = out.toDataURL('image/png');
+}
+
+// One comet — glow, head and tail — posed by its NDC head position and
+// camDist. Assumes the camera sits at the origin (see buildTrail).
+export async function addComet(scene: Scene, camera: PerspectiveCamera, renderer: WebGLRenderer, c: Comet, PX: number): Promise<void> {
+  const headPos = new Vector3(c.head[0], c.head[1], 0.5).unproject(camera).normalize().multiplyScalar(c.camDist);
+  const trail = buildTrail(c, headPos);
+  scene.add(buildGlow(c, headPos, TYPE_COLORS[c.face]));
+  const faceTex = await loadFace(FACE_URLS[c.face], renderer.capabilities.getMaxAnisotropy());
+  scene.add(buildHead(c, headPos, faceTex));
+  for (const obj of await buildTail(c, trail, headPos, PX)) scene.add(obj);
 }
 
 // ── Trail ──────────────────────────────────────────────────────────────────
@@ -190,7 +203,7 @@ async function run(): Promise<void> {
 // the tail heads off along `angle` in the screen plane while receding by
 // `depth`, with a sine swish perpendicular to it that grows from the head
 // outward (the head end stays anchored, the tip whips the furthest).
-function buildTrail(c: Comet, headPos: Vector3): Float32Array {
+export function buildTrail(c: Comet, headPos: Vector3): Float32Array {
   const { angle, length, depth, swish, waves, phase } = c.tail;
   const a = (angle * Math.PI) / 180;
   const axis = new Vector3(Math.cos(a) * (1 - depth), Math.sin(a) * (1 - depth), -depth).normalize();
@@ -291,7 +304,7 @@ function orientHead(c: Comet, head: Mesh, headPos: Vector3): void {
 }
 
 // ── Tail ───────────────────────────────────────────────────────────────────
-async function buildTail(c: Comet, trail: Float32Array, headPos: Vector3, PX: number) {
+export async function buildTail(c: Comet, trail: Float32Array, headPos: Vector3, PX: number) {
   const objects: (Mesh | Points)[] = [];
   const [nSoul, nOrganic, nGas] = c.counts;
   const n = nSoul + nOrganic + nGas;
@@ -477,7 +490,7 @@ async function buildTail(c: Comet, trail: Float32Array, headPos: Vector3, PX: nu
   return objects;
 }
 
-function addInstanceAttrs(
+export function addInstanceAttrs(
   geo: BufferGeometry,
   count: number,
   setTint: (k: number, tint: InstancedBufferAttribute) => void,
@@ -493,7 +506,7 @@ function addInstanceAttrs(
 // ── Backdrop ───────────────────────────────────────────────────────────────
 // Full-screen gradient in the game's own dome colors, plus a faint fbm
 // nebula wash in the face type's identity color.
-function buildBackground(typeColor: RGB): Mesh {
+export function buildBackground(typeColor: RGB): Mesh {
   const geo = new BufferGeometry();
   geo.setAttribute('position', new BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
   const [sr, sg, sb] = hexToRgb(DOME_SKY);
@@ -557,7 +570,7 @@ function buildBackground(typeColor: RGB): Mesh {
   return mesh;
 }
 
-function buildStarfield(camera: PerspectiveCamera, PX: number): Points {
+export function buildStarfield(camera: PerspectiveCamera, PX: number): Points {
   const count = Math.round(2600 * shot.stars);
   const positions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
@@ -624,7 +637,7 @@ function buildStarfield(camera: PerspectiveCamera, PX: number): Points {
 
 // Soft type-colored bloom just behind the head so the dark navy body
 // separates from the night sky.
-function buildGlow(c: Comet, headPos: Vector3, typeColor: RGB): Mesh {
+export function buildGlow(c: Comet, headPos: Vector3, typeColor: RGB): Mesh {
   const mat = new ShaderMaterial({
     uniforms: { uStrength: { value: shot.glow } },
     vertexShader: `
@@ -703,6 +716,58 @@ async function drawTitle(ctx: CanvasRenderingContext2D): Promise<void> {
   ctx.letterSpacing = `${tag * 0.8 * 0.12}px`;
   ctx.fillStyle = '#9a9aa2';
   ctx.fillText('by Virtual Pebble Studio', cx, tagY + tag * 1.6);
+  ctx.restore();
+}
+
+// Phase caption for the art deck — "PHASE 1" kicker, the phase name in the
+// title lockup's hud font, and a one-line description, tucked into a
+// corner over a soft dark scrim so it reads on any scene.
+async function drawPhaseLabel(ctx: CanvasRenderingContext2D, label: NonNullable<Shot['label']>): Promise<void> {
+  await loadFonts();
+  const m = Math.min(W, H);
+  const pad = m * 0.07;
+  const nameSize = m * 0.085;
+  const kickerSize = m * 0.03;
+  const lineSize = m * 0.032;
+  const right = label.corner.endsWith('r');
+  const top = label.corner.startsWith('t');
+  const x = right ? W - pad : pad;
+  const blockH = kickerSize * 1.6 + nameSize * 1.05 + lineSize * 1.5;
+  const y0 = top ? pad : H - pad - blockH;
+
+  ctx.save();
+  // Scrim: a wide radial falloff anchored on the caption's corner.
+  const cx = right ? W : 0;
+  const cy = top ? 0 : H;
+  const scrim = ctx.createRadialGradient(cx, cy, 0, cx, cy, m * 0.75);
+  scrim.addColorStop(0, 'rgba(2, 4, 12, 0.72)');
+  scrim.addColorStop(0.55, 'rgba(2, 4, 12, 0.35)');
+  scrim.addColorStop(1, 'rgba(2, 4, 12, 0)');
+  ctx.fillStyle = scrim;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = right ? 'right' : 'left';
+  ctx.textBaseline = 'top';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+
+  ctx.font = `${kickerSize}px CarroisGothicSC`;
+  ctx.letterSpacing = `${kickerSize * 0.35}px`;
+  ctx.fillStyle = '#ffd933'; // UI_GOLD
+  ctx.shadowBlur = kickerSize * 0.5;
+  ctx.fillText(label.kicker.toUpperCase(), x, y0);
+
+  const nameY = y0 + kickerSize * 1.6;
+  ctx.font = `bold ${nameSize}px CarroisGothicSC`;
+  ctx.letterSpacing = `${nameSize * 0.04}px`;
+  ctx.fillStyle = '#fffae2'; // WHITE
+  ctx.shadowBlur = nameSize * 0.3;
+  ctx.fillText(label.name.toUpperCase(), x, nameY);
+
+  ctx.font = `${lineSize}px CarroisGothicSC`;
+  ctx.letterSpacing = `${lineSize * 0.08}px`;
+  ctx.fillStyle = '#d4d4d8';
+  ctx.shadowBlur = lineSize * 0.5;
+  ctx.fillText(label.line, x, nameY + nameSize * 1.1);
   ctx.restore();
 }
 

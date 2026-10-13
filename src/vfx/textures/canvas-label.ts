@@ -68,7 +68,15 @@ function paint(ctx: CanvasRenderingContext2D, text: string, radius: number, widt
   ctx.stroke();
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = labelFont(42);
+  // Shrink-to-fit: text wider than the card's inner width (minus a side
+  // margin) steps the font down instead of running past the border.
+  const maxTextW = w - pad * 2 - 40;
+  let size = 42;
+  ctx.font = labelFont(size);
+  while (size > 20 && ctx.measureText(text).width > maxTextW) {
+    size -= 2;
+    ctx.font = labelFont(size);
+  }
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, w / 2, h / 2);

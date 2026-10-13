@@ -29,7 +29,11 @@ const NEBULA_SPIN_SPEED = 0.15; // rad/s
 // actually committed to a path. 1/s exponential ease.
 const NEBULA_FADE_EASE_RATE = 1.2;
 
-const LABEL_WIDTH = 0.42;
+// Cards are widened (canvas + plane together, so the text isn't stretched)
+// so "The Great Unknown" fits at full size with room to breathe; Orbit
+// shares the same width so the two signs match.
+const LABEL_WIDTH_SCALE = 1.4;
+const LABEL_WIDTH = 0.42 * LABEL_WIDTH_SCALE;
 const LABEL_HEIGHT = 0.15;
 const LABEL_GAP = 0.15; // above the zone sphere
 
@@ -166,7 +170,7 @@ export class OrbitalLaunchVfxSystem extends createSystem({}) {
     zone.visible = false;
     this.world.createTransformEntity(zone);
 
-    const texture = drawLabel(text, 0);
+    const texture = drawLabel(text, 0, LABEL_WIDTH_SCALE);
     const labelMat = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: DoubleSide, forceSinglePass: true });
     const label = new Mesh(new PlaneGeometry(LABEL_WIDTH, LABEL_HEIGHT), labelMat);
     label.position.set(center.x, center.y + LABEL_OFFSET_Y, center.z);
